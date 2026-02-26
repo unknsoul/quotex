@@ -52,9 +52,10 @@ FEATURE_COLUMNS = [
     "return_last_5",
     "volatility_rolling_10",
     "momentum_rolling_5",
-    # Multi-timeframe (3)
+    # Multi-timeframe (4)
     "h1_trend_direction",
     "h1_ema_alignment",
+    "h1_atr",
     "m15_momentum",
 ]
 
@@ -194,14 +195,18 @@ def compute_htf_features(m5_df: pd.DataFrame,
         h1.loc[bull, "h1_ema_alignment"] = 1
         h1.loc[bear, "h1_ema_alignment"] = -1
 
+        # H1 ATR
+        h1["h1_atr"] = _atr(h1["high"], h1["low"], h1["close"], ATR_PERIOD)
+
         # Merge onto M5 using asof join (last completed H1 bar)
-        h1_merge = h1[["time", "h1_trend_direction", "h1_ema_alignment"]].copy()
+        h1_merge = h1[["time", "h1_trend_direction", "h1_ema_alignment", "h1_atr"]].copy()
         h1_merge = h1_merge.sort_values("time")
         df = df.sort_values("time")
         df = pd.merge_asof(df, h1_merge, on="time", direction="backward")
     else:
         df["h1_trend_direction"] = 0
         df["h1_ema_alignment"] = 0
+        df["h1_atr"] = 0.0
 
     # -- M15 features --
     if m15_df is not None and len(m15_df) > 0:
@@ -224,6 +229,7 @@ def compute_htf_features(m5_df: pd.DataFrame,
     # Fill any NaN from merge
     df["h1_trend_direction"] = df["h1_trend_direction"].fillna(0).astype(int)
     df["h1_ema_alignment"] = df["h1_ema_alignment"].fillna(0).astype(int)
+    df["h1_atr"] = df["h1_atr"].fillna(0.0)
     df["m15_momentum"] = df["m15_momentum"].fillna(0.0)
 
     return df

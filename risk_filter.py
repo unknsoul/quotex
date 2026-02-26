@@ -1,5 +1,5 @@
 """
-Risk Filter v2 — 90th percentile spread check, ATR spike, low volatility.
+Risk Filter v3 — generates warnings only, NEVER blocks predictions.
 """
 
 import logging
@@ -15,54 +15,36 @@ log = logging.getLogger("risk_filter")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 
 
-def check_low_volatility(atr, close):
-    ratio = atr / (close + 1e-10)
-    if ratio < MIN_ATR_CLOSE_RATIO:
-        return True, f"Low volatility: ATR/close={ratio:.6f} (min={MIN_ATR_CLOSE_RATIO})"
-    return False, ""
-
-
-def check_spread_percentile(current_spread, df):
-    """Skip if spread > 90th percentile of recent spreads."""
-    if "spread" not in df.columns or current_spread <= 0:
-        return False, ""
-    p90 = np.percentile(df["spread"].dropna().values[-500:], SPREAD_PERCENTILE)
-    if current_spread > p90:
-        return True, f"Extreme spread: {current_spread} > P{SPREAD_PERCENTILE}={p90:.1f}"
-    return False, ""
-
-
-def check_atr_spike(df):
-    if len(df) < ATR_ROLLING_WINDOW:
-        return False, ""
-    atr_now = df["atr_14"].iloc[-1]
-    atr_mean = df["atr_14"].iloc[-ATR_ROLLING_WINDOW:].mean()
-    if atr_now > atr_mean * ATR_SPIKE_MULTIPLIER:
-        return True, f"ATR spike: {atr_now:.6f} > mean {atr_mean:.6f} x {ATR_SPIKE_MULTIPLIER}"
-    return False, ""
-
-
-def apply_filters(df, current_spread=0):
-    """Run all risk filters. Returns (should_skip, reasons)."""
-    reasons = []
+def check_warnings(df, current_spread=0):
+    """
+    Check risk conditions. Returns list of warning strings.
+    These are INFORMATIONAL ONLY — prediction is always generated.
+    """
+    warnings = []
     last = df.iloc[-1]
 
-    skip, r = check_low_volatility(last["atr_14"], last["close"])
-    if skip:
-        reasons.append(r)
+    # Low volatility warning
+    atr = last["atr_14"]
+    close = last["close"]
+    ratio = atr / (close + 1e-10)
+    if ratio < MIN_ATR_CLOSE_RATIO:
+        warnings.append(f"Low volatility: ATR/close={ratio:.6f} (min={MIN_ATR_CLOSE_RATIO})")
 
-    skip, r = check_spread_percentile(current_spread, df)
-    if skip:
-        reasons.append(r)
+    # High spread warning
+    if "spread" in df.columns and current_spread > 0:
+        p90 = np.percentile(df["spread"].dropna().values[-500:], SPREAD_PERCENTILE)
+        if current_spread > p90:
+            warnings.append(f"High spread: {current_spread} > P{SPREAD_PERCENTILE}={p90:.1f}")
 
-    skip, r = check_atr_spike(df)
-    if skip:
-        reasons.append(r)
+    # ATR spike warning
+    if len(df) >= ATR_ROLLING_WINDOW:
+        atr_mean = df["atr_14"].iloc[-ATR_ROLLING_WINDOW:].mean()
+        if atr > atr_mean * ATR_SPIKE_MULTIPLIER:
+            warnings.append(f"ATR spike: {atr:.6f} > mean {atr_mean:.6f} x {ATR_SPIKE_MULTIPLIER}")
 
-    should_skip = len(reasons) > 0
-    if should_skip:
-        log.warning("Risk filters BLOCKED: %s", reasons)
+    if warnings:
+        log.warning("Risk warnings: %s", warnings)
     else:
-        log.info("Risk filters passed.")
+        log.info("No risk warnings.")
 
-    return should_skip, reasons
+    return warnings

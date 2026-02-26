@@ -1,11 +1,6 @@
 """
-Meta Model — GradientBoosting that predicts reliability of primary model predictions.
-
-Trained AFTER primary model using out-of-fold predictions.
-Meta target: 1 if primary prediction was correct, 0 if wrong.
-
-Usage:
-    python meta_model.py --symbol EURUSD
+Meta Model v3 — uses probability_distance_from_0.5 instead of confidence_strength.
+Trained on ALL primary predictions (never skip training rows).
 """
 
 import argparse
@@ -38,11 +33,10 @@ from regime_detection import detect_regime_series
 log = logging.getLogger("meta_model")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 
-# Meta feature column names
+# v3: probability_distance_from_0.5 replaces confidence_strength
 META_FEATURE_COLUMNS = [
     "primary_green_prob",
-    "primary_red_prob",
-    "primary_confidence_strength",
+    "prob_distance_from_half",
     "regime_encoded",
     "atr_value",
     "spread_ratio",
@@ -53,18 +47,15 @@ META_FEATURE_COLUMNS = [
 ]
 
 REGIME_ENCODING = {
-    "Trending": 0,
-    "Ranging": 1,
-    "High_Volatility": 2,
-    "Low_Volatility": 3,
+    "Trending": 0, "Ranging": 1, "High_Volatility": 2, "Low_Volatility": 3,
 }
 
 
-def _compute_rolling_accuracy(correct_series: pd.Series, window: int) -> pd.Series:
+def _compute_rolling_accuracy(correct_series, window):
     return correct_series.rolling(window, min_periods=1).mean()
 
 
-def _compute_win_streak(correct_series: pd.Series, cap: int) -> pd.Series:
+def _compute_win_streak(correct_series, cap):
     streaks = []
     streak = 0
     for val in correct_series:
@@ -86,16 +77,14 @@ def _build_clf():
     )
 
 
-def build_meta_features(df: pd.DataFrame, oof_data: dict) -> pd.DataFrame:
+def build_meta_features(df, oof_data):
     indices = oof_data["indices"]
     oof_proba = oof_data["oof_proba"]
     actual = oof_data["actual"]
 
     sub = df.iloc[indices].copy().reset_index(drop=True)
-
     sub["primary_green_prob"] = oof_proba
-    sub["primary_red_prob"] = 1.0 - oof_proba
-    sub["primary_confidence_strength"] = np.maximum(oof_proba, 1.0 - oof_proba)
+    sub["prob_distance_from_half"] = np.abs(oof_proba - 0.5)
 
     primary_direction = (oof_proba >= 0.5).astype(int)
     correct = (primary_direction == actual).astype(int)
@@ -123,7 +112,7 @@ def build_meta_features(df: pd.DataFrame, oof_data: dict) -> pd.DataFrame:
     return sub
 
 
-def train_meta(symbol: str) -> None:
+def train_meta(symbol):
     if not os.path.exists(OOF_PREDICTIONS_PATH):
         print("ERROR: No OOF predictions found. Run train_model.py first.")
         sys.exit(1)
@@ -131,7 +120,6 @@ def train_meta(symbol: str) -> None:
     oof_data = joblib.load(OOF_PREDICTIONS_PATH)
     print(f"\n>> Loaded OOF predictions: {len(oof_data['oof_proba'])} rows")
 
-    print(f">> Loading feature data for {symbol}...")
     mtf = load_multi_tf(symbol)
     df = mtf.get("M5")
     if df is None:
@@ -161,7 +149,7 @@ def train_meta(symbol: str) -> None:
     fold_metrics = []
 
     print(f"\n{'='*65}")
-    print(f"  Meta Model (GradientBoosting) -- TimeSeriesSplit {TIMESERIES_SPLITS} folds")
+    print(f"  Meta Model -- TimeSeriesSplit {TIMESERIES_SPLITS} folds")
     print(f"{'='*65}\n")
 
     for fold, (tr_idx, te_idx) in enumerate(tscv.split(X_meta), 1):
@@ -170,7 +158,6 @@ def train_meta(symbol: str) -> None:
 
         clf = _build_clf()
         clf.fit(X_tr, y_tr)
-
         y_pred = clf.predict(X_te)
         y_prob = clf.predict_proba(X_te)[:, 1]
 
@@ -210,7 +197,7 @@ def train_meta(symbol: str) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train meta reliability model.")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default=DEFAULT_SYMBOL)
     args = parser.parse_args()
     train_meta(args.symbol)

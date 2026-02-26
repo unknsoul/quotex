@@ -1,7 +1,8 @@
 """
-API Server v2 — Dual-layer prediction endpoint.
+API Server v3 — Continuous Prediction (never skip).
 
-Returns primary probability + meta reliability + dual-gate decision.
+Always returns probability percentages for every candle.
+Risk warnings are included but do not suppress prediction.
 
 Run:
     uvicorn api_server:app --host 0.0.0.0 --port 8000 --reload
@@ -26,42 +27,36 @@ from data_collector import fetch_multi_timeframe
 from feature_engineering import compute_features, FEATURE_COLUMNS
 from regime_detection import detect_regime, get_volatility_status
 from predict_engine import predict, log_prediction
-from risk_filter import apply_filters
+from risk_filter import check_warnings
 from stability import ProbabilitySmoother, AccuracyTracker
 
 log = logging.getLogger("api_server")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 
-# Stability instances
 _smoother = ProbabilitySmoother()
 _tracker = AccuracyTracker()
 
 
-# --- Schemas -----------------------------------------------------------------
+# --- Schemas (v3: always return full prediction) -----------------------------
 
 class PredictRequest(BaseModel):
-    symbol: str = Field(default=DEFAULT_SYMBOL, description="Trading symbol")
+    symbol: str = Field(default=DEFAULT_SYMBOL)
 
 
 class PredictResponse(BaseModel):
     symbol: str
     timestamp: str
     market_regime: str
-    primary_green_probability: float
-    meta_reliability_probability: float
-    primary_threshold: float
-    meta_threshold: float
-    final_decision: str
+    green_probability_percent: float
+    red_probability_percent: float
+    primary_direction: str
+    meta_reliability_percent: float
+    final_confidence_percent: float
     confidence_level: str
+    suggested_trade: str
     volatility_status: str
+    risk_warnings: list[str]
     reason_summary: str
-
-
-class SkippedResponse(BaseModel):
-    status: str = "skipped"
-    symbol: str
-    reasons: list[str]
-    timestamp: str
 
 
 class HealthResponse(BaseModel):
@@ -99,7 +94,6 @@ def _get_spread(symbol: str) -> float:
 def _reason_summary(row, regime, result):
     parts = [f"Regime: {regime}"]
 
-    # EMA alignment
     if row["ema_20"] > row["ema_50"] > row["ema_200"]:
         parts.append("EMA bullish")
     elif row["ema_20"] < row["ema_50"] < row["ema_200"]:
@@ -107,28 +101,23 @@ def _reason_summary(row, regime, result):
     else:
         parts.append("EMAs mixed")
 
-    # RSI
     rsi = row["rsi_14"]
     if rsi > 70:
         parts.append(f"RSI OB({rsi:.0f})")
     elif rsi < 30:
         parts.append(f"RSI OS({rsi:.0f})")
 
-    # MACD
     parts.append("MACD+" if row["macd"] > row["macd_signal"] else "MACD-")
 
-    # ADX
     adx = row["adx"]
     if adx > 40:
         parts.append(f"Strong trend(ADX {adx:.0f})")
     elif adx > 25:
         parts.append(f"Trend(ADX {adx:.0f})")
 
-    # Meta
-    meta_r = result.get("meta_reliability", 0)
-    parts.append(f"Meta:{meta_r:.0%}")
+    parts.append(f"Conf:{result['final_confidence_percent']:.0f}%")
+    parts.append(f"Meta:{result['meta_reliability_percent']:.0f}%")
 
-    # HTF
     if row.get("h1_ema_alignment") == 1:
         parts.append("H1 bullish")
     elif row.get("h1_ema_alignment") == -1:
@@ -149,9 +138,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Regime-Aware Dual-Layer Meta Learning Engine",
-    version="2.0.0",
-    description="Predicts M5 candle direction with primary + meta reliability models.",
+    title="Continuous Candle Probability Forecast Engine",
+    version="3.0.0",
+    description="Predicts green/red probability for EVERY M5 candle. Never skips.",
     lifespan=lifespan,
 )
 
@@ -163,14 +152,16 @@ app.add_middleware(
 )
 
 
-@app.post("/predict")
+@app.post("/predict", response_model=PredictResponse)
 def predict_endpoint(req: PredictRequest):
-    """Full dual-layer prediction pipeline."""
+    """
+    Generate prediction for current candle.
+    ALWAYS returns probabilities — never skips.
+    """
     symbol = req.symbol
     now = datetime.now(timezone.utc)
 
     # 1) Fetch multi-timeframe
-    import pandas as pd
     try:
         data = fetch_multi_timeframe(symbol, CANDLES_TO_FETCH)
         df = data.get("M5")
@@ -184,46 +175,43 @@ def predict_endpoint(req: PredictRequest):
     # 2) Features
     df = compute_features(df, m15_df=m15, h1_df=h1)
     if df.empty:
-        raise HTTPException(status_code=500, detail="Not enough data after feature computation.")
+        raise HTTPException(status_code=500, detail="Not enough data.")
 
     # 3) Regime
     regime = detect_regime(df)
     vol_status = get_volatility_status(df)
 
-    # 4) Risk filters
+    # 4) Risk warnings (informational only, never blocks)
     spread = _get_spread(symbol)
-    should_skip, reasons = apply_filters(df, current_spread=spread)
-    if should_skip:
-        return SkippedResponse(symbol=symbol, reasons=reasons, timestamp=now.isoformat())
+    risk_warnings = check_warnings(df, current_spread=spread)
 
-    # 5) Dual-layer predict
+    # 5) Predict (ALWAYS)
     try:
         result = predict(df, regime)
     except FileNotFoundError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # 6) Smooth probability
-    smoothed_green = _smoother.smooth(result["green_probability"])
-
-    # 7) Build response
+    # 6) Build response
     reason = _reason_summary(df.iloc[-1], regime, result)
 
     response = PredictResponse(
         symbol=symbol,
         timestamp=now.isoformat(),
         market_regime=regime,
-        primary_green_probability=result["green_probability"],
-        meta_reliability_probability=result["meta_reliability"],
-        primary_threshold=result["primary_threshold"],
-        meta_threshold=result["meta_threshold"],
-        final_decision=result["suggested_trade"],
+        green_probability_percent=result["green_probability_percent"],
+        red_probability_percent=result["red_probability_percent"],
+        primary_direction=result["primary_direction"],
+        meta_reliability_percent=result["meta_reliability_percent"],
+        final_confidence_percent=result["final_confidence_percent"],
         confidence_level=result["confidence_level"],
+        suggested_trade=result["suggested_trade"],
         volatility_status=vol_status,
+        risk_warnings=risk_warnings,
         reason_summary=reason,
     )
 
-    # 8) Log
-    log_prediction(symbol, regime, result, timestamp=now)
+    # 7) Log
+    log_prediction(symbol, regime, result, risk_warnings=risk_warnings, timestamp=now)
     return response
 
 
