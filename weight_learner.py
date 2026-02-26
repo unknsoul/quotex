@@ -32,6 +32,7 @@ from config import (
 from data_collector import load_csv, load_multi_tf
 from feature_engineering import compute_features, add_target, FEATURE_COLUMNS
 from regime_detection import detect_regime_series
+from calibration import CalibratedModel  # needed for joblib.load
 
 log = logging.getLogger("weight_learner")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)

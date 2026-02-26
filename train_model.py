@@ -21,6 +21,9 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import (
     accuracy_score, roc_auc_score, brier_score_loss, classification_report,
 )
+from sklearn.isotonic import IsotonicRegression
+
+from calibration import CalibratedModel, build_calibrated_model
 
 from config import (
     MODEL_DIR, MODEL_PATH, FEATURE_LIST_PATH,
@@ -101,18 +104,24 @@ def train(symbol):
     print(f"\n  Avg: Acc={avg['acc']:.4f} AUC={avg['auc']:.4f} Brier={avg['brier']:.4f}")
 
     # =========================================================================
-    # Train 5-seed ensemble (each calibrated with isotonic)
+    # Train 5-seed ensemble (manual isotonic calibration on held-out val)
     # =========================================================================
-    print(f"\n>> Training {len(ENSEMBLE_SEEDS)}-seed ensemble with isotonic calibration...")
+    print(f"\n>> Training {len(ENSEMBLE_SEEDS)}-seed ensemble (manual isotonic)...")
+    cal_split = int(len(y) * 0.8)
+    X_base, y_base = X.iloc[:cal_split], y[:cal_split]
+    X_cal, y_cal = X.iloc[cal_split:], y[cal_split:]
+    print(f"   Base train: {cal_split}, Calibration val: {len(y) - cal_split}")
+
     ensemble = []
     for i, seed in enumerate(ENSEMBLE_SEEDS, 1):
         base = _build_clf(spw, seed)
-        cal = CalibratedClassifierCV(base, method="isotonic", cv=3)
-        cal.fit(X, y)
-        ensemble.append(cal)
-        p = cal.predict_proba(X)[:, 1]
-        brier = brier_score_loss(y, p)
-        print(f"  Seed {seed}: Brier={brier:.4f}")
+        base.fit(X_base, y_base,
+                 eval_set=[(X_cal, y_cal)], verbose=False)
+        cal_model = build_calibrated_model(base, X_cal, y_cal)
+        ensemble.append(cal_model)
+        p = cal_model.predict_proba(X_cal)[:, 1]
+        brier = brier_score_loss(y_cal, p)
+        print(f"  Seed {seed}: Brier(val)={brier:.4f}")
 
     # Ensemble predictions
     all_probs = np.array([m.predict_proba(X)[:, 1] for m in ensemble])
@@ -125,9 +134,9 @@ def train(symbol):
     print(f"\n  Ensemble (in-sample): Acc={ens_acc:.4f} Brier={ens_brier:.4f}")
     print(f"  Avg variance: {ens_var.mean():.6f}, Max: {ens_var.max():.6f}")
 
-    # Feature importances (from first calibrated model)
+    # Feature importances (from first model's base)
     try:
-        base_est = ensemble[0].calibrated_classifiers_[0].estimator
+        base_est = ensemble[0].base_model
         imp = base_est.feature_importances_
         order = np.argsort(imp)[::-1]
         print("\n  Top 10 features:")

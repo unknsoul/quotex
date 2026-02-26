@@ -22,6 +22,7 @@ from config import (
     LOG_LEVEL, LOG_FORMAT,
 )
 from regime_detection import get_regime_thresholds
+from calibration import CalibratedModel  # needed for joblib.load
 
 log = logging.getLogger("predict_engine")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
