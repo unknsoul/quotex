@@ -1,6 +1,6 @@
 """
-Central configuration v3 — Continuous Prediction Engine.
-All constants, thresholds, and paths. No magic numbers elsewhere.
+Central configuration v4 — Quant Stability & Precision.
+Ensemble models, continuous regime, dynamic weights.
 """
 
 import os
@@ -10,12 +10,15 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
+CHART_DIR = os.path.join(BASE_DIR, "charts")
 
 MODEL_PATH = os.path.join(MODEL_DIR, "primary_model.pkl")
 FEATURE_LIST_PATH = os.path.join(MODEL_DIR, "primary_features.pkl")
+ENSEMBLE_MODEL_PATH = os.path.join(MODEL_DIR, "ensemble_models.pkl")
 META_MODEL_PATH = os.path.join(MODEL_DIR, "meta_model.pkl")
 META_FEATURE_LIST_PATH = os.path.join(MODEL_DIR, "meta_features.pkl")
 OOF_PREDICTIONS_PATH = os.path.join(MODEL_DIR, "oof_predictions.pkl")
+WEIGHT_MODEL_PATH = os.path.join(MODEL_DIR, "weight_model.pkl")
 
 PREDICTION_LOG_CSV = os.path.join(LOG_DIR, "predictions.csv")
 PREDICTION_LOG_JSON = os.path.join(LOG_DIR, "predictions.json")
@@ -54,10 +57,11 @@ VOLATILITY_ROLLING = 10
 MOMENTUM_ROLLING = 5
 RETURN_LOOKBACK = 5
 
-# --- v2/v3 Feature Params ---------------------------------------------------
+# --- v2/v3/v4 Feature Params ------------------------------------------------
 RANGE_POSITION_WINDOW = 20
 LIQUIDITY_SWEEP_WINDOW = 10
 VOLATILITY_ZSCORE_WINDOW = 50
+ATR_PERCENTILE_WINDOW = 100  # v4: for ATR percentile rank
 
 # --- Regime Detection --------------------------------------------------------
 ADX_TRENDING_THRESHOLD = 25
@@ -66,7 +70,7 @@ ATR_HIGH_VOL_MULTIPLIER = 1.5
 ATR_LOW_VOL_MULTIPLIER = 0.7
 ATR_ROLLING_WINDOW = 100
 
-# --- Regime-Aware Thresholds (for trade suggestions only) --------------------
+# --- Regime Thresholds (trade suggestions) -----------------------------------
 REGIME_THRESHOLDS = {
     "Trending":        {"primary": 0.62, "meta": 0.58},
     "Ranging":         {"primary": 0.58, "meta": 0.62},
@@ -76,14 +80,18 @@ REGIME_THRESHOLDS = {
 PRIMARY_BASE_THRESHOLD = 0.60
 META_BASE_THRESHOLD = 0.60
 
-# --- Confidence Levels (applied to final_confidence %) -----------------------
-CONFIDENCE_HIGH_MIN = 75.0    # >= 75% -> High
-CONFIDENCE_MEDIUM_MIN = 60.0  # >= 60% -> Medium, < 60% -> Low
+# --- Confidence Levels (%) --------------------------------------------------
+CONFIDENCE_HIGH_MIN = 75.0
+CONFIDENCE_MEDIUM_MIN = 60.0
 
-# --- Risk Warnings (never block prediction) ----------------------------------
+# --- Risk Warnings -----------------------------------------------------------
 MIN_ATR_CLOSE_RATIO = 0.0003
 SPREAD_PERCENTILE = 90
 ATR_SPIKE_MULTIPLIER = 3.0
+
+# --- Ensemble (v4) ----------------------------------------------------------
+ENSEMBLE_SEEDS = [42, 123, 456, 789, 1024]
+ENSEMBLE_SIZE = len(ENSEMBLE_SEEDS)
 
 # --- XGBoost Primary Hyperparams --------------------------------------------
 XGB_N_ESTIMATORS = 400
@@ -93,11 +101,11 @@ XGB_SUBSAMPLE = 0.8
 XGB_COLSAMPLE_BYTREE = 0.8
 TIMESERIES_SPLITS = 5
 
-# --- Meta Model Hyperparams (GradientBoosting) ------------------------------
-LGBM_N_ESTIMATORS = 200
-LGBM_MAX_DEPTH = 4
-LGBM_LEARNING_RATE = 0.05
-LGBM_SUBSAMPLE = 0.8
+# --- Meta Model Hyperparams -------------------------------------------------
+META_N_ESTIMATORS = 200
+META_MAX_DEPTH = 4
+META_LEARNING_RATE = 0.05
+META_SUBSAMPLE = 0.8
 
 # --- Stability ---------------------------------------------------------------
 PROBABILITY_SMOOTHING_SPAN = 5
@@ -105,6 +113,7 @@ ROLLING_ACCURACY_WINDOW = 50
 RETRAINING_ACCURACY_TRIGGER = 0.48
 META_ROLLING_WINDOW = 50
 WIN_STREAK_CAP = 10
+DRIFT_COSINE_THRESHOLD = 0.85  # v4: alert if cosine sim < this
 
 # --- Session Hours (UTC) ----------------------------------------------------
 SESSION_ASIA = (0, 8)
