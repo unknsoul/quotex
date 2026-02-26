@@ -1,10 +1,12 @@
 """
-Data Collector — fetch OHLC data from MT5, validate, save to CSV.
+Data Collector v2 — fetch multi-timeframe OHLC data from MT5.
+
+Supports M5, M15, H1 in a single command.
 
 Usage:
     python data_collector.py --symbol EURUSD
     python data_collector.py --symbol EURUSD --candles 15000
-    python data_collector.py --symbol EURUSD --update     # incremental
+    python data_collector.py --symbol EURUSD --update
 """
 
 import argparse
@@ -25,13 +27,19 @@ from config import (
 log = logging.getLogger("data_collector")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 
+# Timeframe map
+TF_MAP = {
+    "M5":  mt5.TIMEFRAME_M5,
+    "M15": mt5.TIMEFRAME_M15,
+    "H1":  mt5.TIMEFRAME_H1,
+}
 
-# ═══════════════════════════════════════════════════════════════════════════
+
+# =============================================================================
 #  MT5 Helpers
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 def connect_mt5() -> bool:
-    """Initialize MT5 terminal connection."""
     kwargs = {}
     if MT5_PATH:
         kwargs["path"] = MT5_PATH
@@ -47,7 +55,7 @@ def connect_mt5() -> bool:
         return False
 
     info = mt5.terminal_info()
-    log.info("MT5 connected — build %s", info.build if info else "?")
+    log.info("MT5 connected -- build %s", info.build if info else "?")
     return True
 
 
@@ -56,37 +64,46 @@ def disconnect_mt5():
     log.info("MT5 disconnected.")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
 #  Data Fetching
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
-def fetch_candles(symbol: str, count: int = CANDLES_TO_FETCH) -> pd.DataFrame:
-    """
-    Fetch `count` M5 candles from MT5.
-    Returns DataFrame: time, open, high, low, close, tick_volume, spread
-    """
-    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, count)
+def fetch_candles(symbol: str, tf_name: str = "M5",
+                  count: int = CANDLES_TO_FETCH) -> pd.DataFrame:
+    """Fetch `count` candles for given timeframe from MT5."""
+    tf = TF_MAP.get(tf_name)
+    if tf is None:
+        raise ValueError(f"Unknown timeframe: {tf_name}")
+
+    rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
     if rates is None or len(rates) == 0:
-        raise RuntimeError(f"No data for {symbol}: {mt5.last_error()}")
+        raise RuntimeError(f"No data for {symbol}/{tf_name}: {mt5.last_error()}")
 
     df = pd.DataFrame(rates)
     df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    log.info("Fetched %d candles for %s", len(df), symbol)
+    log.info("Fetched %d %s candles for %s", len(df), tf_name, symbol)
     return df
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+def fetch_multi_timeframe(symbol: str,
+                          count: int = CANDLES_TO_FETCH) -> dict[str, pd.DataFrame]:
+    """Fetch M5, M15, H1 candles. Returns {tf_name: DataFrame}."""
+    result = {}
+    for tf_name in TF_MAP:
+        # Higher timeframes need fewer bars
+        tf_count = count if tf_name == "M5" else count // 3
+        try:
+            result[tf_name] = fetch_candles(symbol, tf_name, tf_count)
+        except RuntimeError as e:
+            log.warning("Could not fetch %s: %s", tf_name, e)
+    return result
+
+
+# =============================================================================
 #  Validation
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 def validate(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Clean the raw OHLC DataFrame:
-      1. Chronological sort
-      2. Drop duplicate timestamps
-      3. Drop rows with any NaN in OHLCV
-      4. Reset index
-    """
     before = len(df)
     df = df.sort_values("time").reset_index(drop=True)
     df = df.drop_duplicates(subset=["time"], keep="last")
@@ -96,30 +113,28 @@ def validate(df: pd.DataFrame) -> pd.DataFrame:
     if before != after:
         log.warning("Validation dropped %d rows (%d -> %d)", before - after, before, after)
     else:
-        log.info("Validation OK — %d rows clean.", after)
+        log.info("Validation OK -- %d rows clean.", after)
     return df
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  Save / Update
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
+#  Save / Load
+# =============================================================================
 
-def _csv_path(symbol: str) -> str:
-    return os.path.join(DATA_DIR, f"{symbol}_M5.csv")
+def _csv_path(symbol: str, tf: str = "M5") -> str:
+    return os.path.join(DATA_DIR, f"{symbol}_{tf}.csv")
 
 
-def save_csv(df: pd.DataFrame, symbol: str) -> str:
-    """Save full dataset to CSV. Returns file path."""
+def save_csv(df: pd.DataFrame, symbol: str, tf: str = "M5") -> str:
     os.makedirs(DATA_DIR, exist_ok=True)
-    path = _csv_path(symbol)
+    path = _csv_path(symbol, tf)
     df.to_csv(path, index=False)
     log.info("Saved %d rows -> %s", len(df), path)
     return path
 
 
-def load_csv(symbol: str) -> pd.DataFrame:
-    """Load saved CSV for a symbol."""
-    path = _csv_path(symbol)
+def load_csv(symbol: str, tf: str = "M5") -> pd.DataFrame:
+    path = _csv_path(symbol, tf)
     if not os.path.exists(path):
         raise FileNotFoundError(f"No data file at {path}. Run data_collector.py first.")
     df = pd.read_csv(path, parse_dates=["time"])
@@ -127,12 +142,20 @@ def load_csv(symbol: str) -> pd.DataFrame:
     return df
 
 
-def incremental_update(symbol: str, new_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Merge new candles with existing CSV. Keeps only unique timestamps.
-    Returns the merged DataFrame.
-    """
-    path = _csv_path(symbol)
+def load_multi_tf(symbol: str) -> dict[str, pd.DataFrame]:
+    """Load all saved timeframe CSVs."""
+    result = {}
+    for tf in TF_MAP:
+        try:
+            result[tf] = load_csv(symbol, tf)
+        except FileNotFoundError:
+            log.warning("No %s data for %s, skipping.", tf, symbol)
+    return result
+
+
+def incremental_update(symbol: str, new_df: pd.DataFrame,
+                       tf: str = "M5") -> pd.DataFrame:
+    path = _csv_path(symbol, tf)
     if os.path.exists(path):
         old = pd.read_csv(path, parse_dates=["time"])
         merged = pd.concat([old, new_df], ignore_index=True)
@@ -141,19 +164,19 @@ def incremental_update(symbol: str, new_df: pd.DataFrame) -> pd.DataFrame:
 
     merged = merged.drop_duplicates(subset=["time"], keep="last")
     merged = merged.sort_values("time").reset_index(drop=True)
-    log.info("Incremental update: %d rows total for %s", len(merged), symbol)
+    log.info("Incremental update: %d rows total for %s/%s", len(merged), symbol, tf)
     return merged
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
 #  CLI
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Fetch M5 OHLC data from MT5 and save to CSV.")
-    parser.add_argument("--symbol", default=DEFAULT_SYMBOL, help="Trading symbol")
-    parser.add_argument("--candles", type=int, default=CANDLES_TO_FETCH, help="Candles to fetch")
-    parser.add_argument("--update", action="store_true", help="Incremental update mode")
+    parser = argparse.ArgumentParser(description="Fetch OHLC data from MT5.")
+    parser.add_argument("--symbol", default=DEFAULT_SYMBOL)
+    parser.add_argument("--candles", type=int, default=CANDLES_TO_FETCH)
+    parser.add_argument("--update", action="store_true", help="Incremental update")
     args = parser.parse_args()
 
     if not connect_mt5():
@@ -161,16 +184,21 @@ def main():
         sys.exit(1)
 
     try:
-        print(f">> Fetching {args.candles} M5 candles for {args.symbol}...")
-        df = fetch_candles(args.symbol, args.candles)
-        df = validate(df)
+        # Always fetch all timeframes
+        print(f">> Fetching multi-timeframe data for {args.symbol}...")
+        data = fetch_multi_timeframe(args.symbol, args.candles)
 
-        if args.update:
-            df = incremental_update(args.symbol, df)
+        for tf_name, df in data.items():
+            df = validate(df)
+            if args.update:
+                df = incremental_update(args.symbol, df, tf_name)
+            path = save_csv(df, args.symbol, tf_name)
+            print(f"   {tf_name}: {len(df)} rows -> {path}")
 
-        path = save_csv(df, args.symbol)
-        print(f">> Saved {len(df)} rows -> {path}")
-        print(f"   Range: {df['time'].iloc[0]} -> {df['time'].iloc[-1]}")
+        # Print M5 range
+        if "M5" in data:
+            m5 = data["M5"]
+            print(f"   M5 range: {m5['time'].iloc[0]} -> {m5['time'].iloc[-1]}")
     finally:
         disconnect_mt5()
 

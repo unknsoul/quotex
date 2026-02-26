@@ -1,8 +1,7 @@
 """
-API Server — FastAPI endpoint for live predictions.
+API Server v2 — Dual-layer prediction endpoint.
 
-This is the ONLY entry point for users / frontend.
-It fetches live candles from MT5, runs the full pipeline, and returns JSON.
+Returns primary probability + meta reliability + dual-gate decision.
 
 Run:
     uvicorn api_server:app --host 0.0.0.0 --port 8000 --reload
@@ -23,16 +22,22 @@ from config import (
     MT5_PATH, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER,
     LOG_LEVEL, LOG_FORMAT,
 )
+from data_collector import fetch_multi_timeframe
 from feature_engineering import compute_features, FEATURE_COLUMNS
 from regime_detection import detect_regime, get_volatility_status
 from predict_engine import predict, log_prediction
 from risk_filter import apply_filters
+from stability import ProbabilitySmoother, AccuracyTracker
 
 log = logging.getLogger("api_server")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 
+# Stability instances
+_smoother = ProbabilitySmoother()
+_tracker = AccuracyTracker()
 
-# ─── Schemas ────────────────────────────────────────────────────────────────
+
+# --- Schemas -----------------------------------------------------------------
 
 class PredictRequest(BaseModel):
     symbol: str = Field(default=DEFAULT_SYMBOL, description="Trading symbol")
@@ -42,11 +47,12 @@ class PredictResponse(BaseModel):
     symbol: str
     timestamp: str
     market_regime: str
-    green_probability: float
-    red_probability: float
-    threshold_used: float
+    primary_green_probability: float
+    meta_reliability_probability: float
+    primary_threshold: float
+    meta_threshold: float
+    final_decision: str
     confidence_level: str
-    suggested_trade: str
     volatility_status: str
     reason_summary: str
 
@@ -58,7 +64,13 @@ class SkippedResponse(BaseModel):
     timestamp: str
 
 
-# ─── MT5 Helpers (local to API) ────────────────────────────────────────────
+class HealthResponse(BaseModel):
+    status: str
+    timestamp: str
+    accuracy_tracker: dict = {}
+
+
+# --- MT5 Helpers -------------------------------------------------------------
 
 def _connect_mt5() -> bool:
     kwargs = {}
@@ -77,43 +89,30 @@ def _connect_mt5() -> bool:
     return True
 
 
-def _fetch_live(symbol: str, count: int = CANDLES_TO_FETCH):
-    """Fetch live M5 candles from MT5."""
-    import pandas as pd
-    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, count)
-    if rates is None or len(rates) == 0:
-        raise RuntimeError(f"No data for {symbol}: {mt5.last_error()}")
-    df = pd.DataFrame(rates)
-    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    return df
-
-
 def _get_spread(symbol: str) -> float:
     info = mt5.symbol_info(symbol)
     return float(info.spread) if info else 0.0
 
 
-# ─── Reason Summary Builder ────────────────────────────────────────────────
+# --- Reason Summary ---------------------------------------------------------
 
-def _reason_summary(row, regime: str) -> str:
+def _reason_summary(row, regime, result):
     parts = [f"Regime: {regime}"]
 
     # EMA alignment
     if row["ema_20"] > row["ema_50"] > row["ema_200"]:
-        parts.append("EMA bullish (20>50>200)")
+        parts.append("EMA bullish")
     elif row["ema_20"] < row["ema_50"] < row["ema_200"]:
-        parts.append("EMA bearish (20<50<200)")
+        parts.append("EMA bearish")
     else:
         parts.append("EMAs mixed")
 
     # RSI
     rsi = row["rsi_14"]
     if rsi > 70:
-        parts.append(f"RSI overbought ({rsi:.0f})")
+        parts.append(f"RSI OB({rsi:.0f})")
     elif rsi < 30:
-        parts.append(f"RSI oversold ({rsi:.0f})")
-    else:
-        parts.append(f"RSI {rsi:.0f}")
+        parts.append(f"RSI OS({rsi:.0f})")
 
     # MACD
     parts.append("MACD+" if row["macd"] > row["macd_signal"] else "MACD-")
@@ -121,40 +120,38 @@ def _reason_summary(row, regime: str) -> str:
     # ADX
     adx = row["adx"]
     if adx > 40:
-        parts.append(f"Strong trend (ADX {adx:.0f})")
+        parts.append(f"Strong trend(ADX {adx:.0f})")
     elif adx > 25:
-        parts.append(f"Moderate trend (ADX {adx:.0f})")
-    else:
-        parts.append(f"Weak trend (ADX {adx:.0f})")
+        parts.append(f"Trend(ADX {adx:.0f})")
 
-    # Patterns
-    if row.get("engulfing") == 1:
-        parts.append("Bull engulfing")
-    elif row.get("engulfing") == -1:
-        parts.append("Bear engulfing")
-    if row.get("hammer") == 1:
-        parts.append("Hammer")
-    if row.get("shooting_star") == 1:
-        parts.append("Shooting star")
+    # Meta
+    meta_r = result.get("meta_reliability", 0)
+    parts.append(f"Meta:{meta_r:.0%}")
+
+    # HTF
+    if row.get("h1_ema_alignment") == 1:
+        parts.append("H1 bullish")
+    elif row.get("h1_ema_alignment") == -1:
+        parts.append("H1 bearish")
 
     return "; ".join(parts)
 
 
-# ─── App ────────────────────────────────────────────────────────────────────
+# --- App ---------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not _connect_mt5():
-        log.error("MT5 not available — predictions will fail.")
+        log.error("MT5 not available.")
     yield
     mt5.shutdown()
     log.info("MT5 disconnected.")
 
 
 app = FastAPI(
-    title="Regime-Aware Next Candle Probability Engine",
+    title="Regime-Aware Dual-Layer Meta Learning Engine",
     version="2.0.0",
-    description="Predicts M5 candle direction with regime-aware dynamic thresholds.",
+    description="Predicts M5 candle direction with primary + meta reliability models.",
     lifespan=lifespan,
 )
 
@@ -168,26 +165,24 @@ app.add_middleware(
 
 @app.post("/predict")
 def predict_endpoint(req: PredictRequest):
-    """
-    Full prediction pipeline:
-    1. Fetch live candles
-    2. Compute features
-    3. Detect regime
-    4. Run risk filters
-    5. Generate prediction
-    6. Log & return
-    """
+    """Full dual-layer prediction pipeline."""
     symbol = req.symbol
     now = datetime.now(timezone.utc)
 
-    # 1) Fetch
+    # 1) Fetch multi-timeframe
+    import pandas as pd
     try:
-        df = _fetch_live(symbol)
+        data = fetch_multi_timeframe(symbol, CANDLES_TO_FETCH)
+        df = data.get("M5")
+        if df is None or len(df) == 0:
+            raise RuntimeError(f"No M5 data for {symbol}")
+        m15 = data.get("M15")
+        h1 = data.get("H1")
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
     # 2) Features
-    df = compute_features(df)
+    df = compute_features(df, m15_df=m15, h1_df=h1)
     if df.empty:
         raise HTTPException(status_code=500, detail="Not enough data after feature computation.")
 
@@ -199,41 +194,43 @@ def predict_endpoint(req: PredictRequest):
     spread = _get_spread(symbol)
     should_skip, reasons = apply_filters(df, current_spread=spread)
     if should_skip:
-        return SkippedResponse(
-            symbol=symbol,
-            reasons=reasons,
-            timestamp=now.isoformat(),
-        )
+        return SkippedResponse(symbol=symbol, reasons=reasons, timestamp=now.isoformat())
 
-    # 5) Predict
+    # 5) Dual-layer predict
     try:
         result = predict(df, regime)
     except FileNotFoundError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # 6) Build response
-    reason = _reason_summary(df.iloc[-1], regime)
+    # 6) Smooth probability
+    smoothed_green = _smoother.smooth(result["green_probability"])
+
+    # 7) Build response
+    reason = _reason_summary(df.iloc[-1], regime, result)
 
     response = PredictResponse(
         symbol=symbol,
         timestamp=now.isoformat(),
         market_regime=regime,
-        green_probability=result["green_probability"],
-        red_probability=result["red_probability"],
-        threshold_used=result["threshold_used"],
+        primary_green_probability=result["green_probability"],
+        meta_reliability_probability=result["meta_reliability"],
+        primary_threshold=result["primary_threshold"],
+        meta_threshold=result["meta_threshold"],
+        final_decision=result["suggested_trade"],
         confidence_level=result["confidence_level"],
-        suggested_trade=result["suggested_trade"],
         volatility_status=vol_status,
         reason_summary=reason,
     )
 
-    # 7) Log
+    # 8) Log
     log_prediction(symbol, regime, result, timestamp=now)
-    log.info("Response: %s", response.model_dump())
-
     return response
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+    return HealthResponse(
+        status="ok",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        accuracy_tracker=_tracker.status(),
+    )
