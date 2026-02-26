@@ -128,3 +128,14 @@ SESSION_NEW_YORK = (13, 21)
 # --- Logging -----------------------------------------------------------------
 LOG_LEVEL = "INFO"
 LOG_FORMAT = "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
+
+# --- Telegram Bot ------------------------------------------------------------
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_SEND_BEFORE_CLOSE_SEC = 5
+
+# --- Auto-Learning -----------------------------------------------------------
+AUTO_RETRAIN_ACCURACY_TRIGGER = 0.52
+AUTO_RETRAIN_CORRELATION_TRIGGER = 0.1
+DATA_BUFFER_SIZE = 20000
+MODEL_BACKUP_DIR = os.path.join(BASE_DIR, "models", "backup")
+
