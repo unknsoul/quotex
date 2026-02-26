@@ -15,6 +15,8 @@ CHART_DIR = os.path.join(BASE_DIR, "charts")
 MODEL_PATH = os.path.join(MODEL_DIR, "primary_model.pkl")
 FEATURE_LIST_PATH = os.path.join(MODEL_DIR, "primary_features.pkl")
 ENSEMBLE_MODEL_PATH = os.path.join(MODEL_DIR, "ensemble_models.pkl")
+ENSEMBLE_TRENDING_PATH = os.path.join(MODEL_DIR, "ensemble_trending.pkl")
+ENSEMBLE_RANGING_PATH = os.path.join(MODEL_DIR, "ensemble_ranging.pkl")
 META_MODEL_PATH = os.path.join(MODEL_DIR, "meta_model.pkl")
 META_FEATURE_LIST_PATH = os.path.join(MODEL_DIR, "meta_features.pkl")
 OOF_PREDICTIONS_PATH = os.path.join(MODEL_DIR, "oof_predictions.pkl")
@@ -62,6 +64,9 @@ RANGE_POSITION_WINDOW = 20
 LIQUIDITY_SWEEP_WINDOW = 10
 VOLATILITY_ZSCORE_WINDOW = 50
 ATR_PERCENTILE_WINDOW = 100  # v4: for ATR percentile rank
+
+# --- v5 Target Threshold -----------------------------------------------------
+TARGET_ATR_THRESHOLD = 0.3  # only train on moves > 0.3 × ATR
 
 # --- Regime Detection --------------------------------------------------------
 ADX_TRENDING_THRESHOLD = 25

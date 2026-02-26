@@ -15,6 +15,7 @@ import pandas as pd
 
 from config import (
     MODEL_PATH, FEATURE_LIST_PATH, ENSEMBLE_MODEL_PATH,
+    ENSEMBLE_TRENDING_PATH, ENSEMBLE_RANGING_PATH,
     META_MODEL_PATH, META_FEATURE_LIST_PATH, WEIGHT_MODEL_PATH,
     LOG_DIR, PREDICTION_LOG_CSV, PREDICTION_LOG_JSON,
     CONFIDENCE_HIGH_MIN, CONFIDENCE_MEDIUM_MIN,
@@ -28,6 +29,8 @@ log = logging.getLogger("predict_engine")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 
 _ensemble = None
+_ensemble_trending = None
+_ensemble_ranging = None
 _primary_features = None
 _meta_model = None
 _meta_features = None
@@ -35,6 +38,8 @@ _weight_model = None
 _prediction_history = []
 
 REGIME_ENCODING = {"Trending": 0, "Ranging": 1, "High_Volatility": 2, "Low_Volatility": 3}
+TRENDING_REGIMES = {"Trending", "High_Volatility"}
+RANGING_REGIMES = {"Ranging", "Low_Volatility"}
 
 
 def _binary_entropy(p):
@@ -43,18 +48,27 @@ def _binary_entropy(p):
 
 
 def load_models():
-    global _ensemble, _primary_features, _meta_model, _meta_features, _weight_model
+    global _ensemble, _ensemble_trending, _ensemble_ranging
+    global _primary_features, _meta_model, _meta_features, _weight_model
 
     if _ensemble is None:
         if os.path.exists(ENSEMBLE_MODEL_PATH):
             _ensemble = joblib.load(ENSEMBLE_MODEL_PATH)
-            log.info("Ensemble loaded (%d models).", len(_ensemble))
+            log.info("Global ensemble loaded (%d models).", len(_ensemble))
         elif os.path.exists(MODEL_PATH):
             _ensemble = [joblib.load(MODEL_PATH)]
             log.info("Single model loaded (fallback).")
         else:
             raise FileNotFoundError("No model found.")
         _primary_features = joblib.load(FEATURE_LIST_PATH)
+
+    # Regime-routed ensembles
+    if _ensemble_trending is None and os.path.exists(ENSEMBLE_TRENDING_PATH):
+        _ensemble_trending = joblib.load(ENSEMBLE_TRENDING_PATH)
+        log.info("Trending ensemble loaded (%d models).", len(_ensemble_trending))
+    if _ensemble_ranging is None and os.path.exists(ENSEMBLE_RANGING_PATH):
+        _ensemble_ranging = joblib.load(ENSEMBLE_RANGING_PATH)
+        log.info("Ranging ensemble loaded (%d models).", len(_ensemble_ranging))
 
     if _meta_model is None:
         _meta_model = joblib.load(META_MODEL_PATH)
@@ -114,8 +128,16 @@ def predict(df, regime):
 
     row = df[feat_cols].iloc[-1].values.reshape(1, -1)
 
+    # Route to regime-specific ensemble
+    if regime in TRENDING_REGIMES and _ensemble_trending is not None:
+        active_ensemble = _ensemble_trending
+    elif regime in RANGING_REGIMES and _ensemble_ranging is not None:
+        active_ensemble = _ensemble_ranging
+    else:
+        active_ensemble = ensemble
+
     # Ensemble predictions
-    all_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
+    all_probs = np.array([m.predict_proba(row)[0][1] for m in active_ensemble])
     green_p = float(all_probs.mean())
     red_p = 1.0 - green_p
     variance = float(all_probs.var())

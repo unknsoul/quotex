@@ -273,7 +273,36 @@ def compute_features(df, m15_df=None, h1_df=None):
 
 
 def add_target(df):
+    """Simple binary target (used at prediction time)."""
     df = df.copy()
     df["target"] = (df["close"].shift(-1) > df["close"]).astype(float)
     df.loc[df.index[-1], "target"] = np.nan
     return df
+
+
+def add_target_atr_filtered(df, threshold=None):
+    """
+    ATR-threshold target (v5): only significant moves count.
+    Moves within ±threshold×ATR are marked NaN (dropped from training).
+    """
+    from config import TARGET_ATR_THRESHOLD
+    if threshold is None:
+        threshold = TARGET_ATR_THRESHOLD
+
+    df = df.copy()
+    move = df["close"].shift(-1) - df["close"]
+    atr = df["atr_14"]
+    min_move = threshold * atr
+
+    df["target"] = np.nan
+    df.loc[move > min_move, "target"] = 1.0
+    df.loc[move < -min_move, "target"] = 0.0
+    # Last row always NaN
+    df.loc[df.index[-1], "target"] = np.nan
+
+    valid = df["target"].notna().sum()
+    total = len(df) - 1  # exclude last
+    log.info("ATR-filtered target: %d/%d rows (%.1f%% kept, threshold=%.2f)",
+             valid, total, valid / total * 100 if total else 0, threshold)
+    return df
+
