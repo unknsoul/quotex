@@ -1,0 +1,11 @@
+MetaTrader5
+pandas
+numpy
+xgboost
+scikit-learn
+joblib
+fastapi
+uvicorn[standard]
+pydantic
+matplotlib
+ta
