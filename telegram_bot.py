@@ -253,59 +253,62 @@ def _back_keyboard(chat_id=None):
 # =============================================================================
 
 def _format_prediction(pred: dict, is_auto=False) -> str:
-    green = pred["green_probability_percent"]
-    red = pred["red_probability_percent"]
+    """Format a single prediction — compact version."""
     direction = "🟢 UP" if pred["suggested_direction"] == "UP" else "🔴 DOWN"
     conf = pred["final_confidence_percent"]
-    adaptive = pred.get("adaptive_confidence_percent", conf)
-    meta = pred["meta_reliability_percent"]
-    unc = pred["uncertainty_percent"]
+    green = pred["green_probability_percent"]
     kelly = pred.get("kelly_fraction_percent", 0.0)
-    regime = pred.get("market_regime", pred.get("regime", "Unknown"))
+    regime = pred.get("market_regime", "Unknown")
     trade = pred["suggested_trade"]
-    conf_level = pred["confidence_level"]
+    latency = pred.get("latency_ms", -1)
 
-    if kelly > 3:
-        size_emoji, size_label = "🟢", "1.5x"
-    elif kelly > 2:
-        size_emoji, size_label = "🟡", "1.2x"
-    elif kelly > 1:
-        size_emoji, size_label = "🟠", "0.8x"
-    else:
-        size_emoji, size_label = "🔴", "0.5x"
-
-    filled = int(conf / 10)
-    conf_bar = "█" * filled + "░" * (10 - filled)
-
-    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    header = "🤖 AUTO-SIGNAL" if is_auto else "📊 PREDICTION"
-
-    regime_emoji = {"Trending": "📈", "Ranging": "↔️",
+    regime_emoji = {"↑Trend": "📈", "Trending": "📈", "Ranging": "↔️",
                    "High_Volatility": "🔥", "Low_Volatility": "❄️"}.get(regime, "❓")
 
+    now_utc = datetime.now(timezone.utc)
+    ist = now_utc + timedelta(hours=5, minutes=30)
+    time_str = f"{now_utc.strftime('%H:%M')} UTC / {ist.strftime('%H:%M')} IST"
+
+    header = "🤖 AUTO" if is_auto else "📊 PRED"
+
+    return (
+        f"*{header}* — {time_str}\n"
+        f"📊 *{pred['symbol']}* M5 {regime_emoji}\n"
+        f"{direction} | Prob *{green:.0f}%* | Conf *{conf:.0f}%*\n"
+        f"💰 Kelly *{kelly:.1f}%* | 💡 *{trade}*"
+    )
+
+
+def _format_combined_signal(predictions: dict, filtered: dict) -> str:
+    """Format all pairs into one compact combined message."""
+    now_utc = datetime.now(timezone.utc)
+    ist = now_utc + timedelta(hours=5, minutes=30)
+    time_str = f"{now_utc.strftime('%H:%M')} UTC / {ist.strftime('%H:%M')} IST"
+
     lines = [
-        f"*{header}* — {now}",
+        f"🤖 *AUTO-SIGNAL* — {time_str}",
         f"━━━━━━━━━━━━━━━━━━━━━",
-        f"📊 *{pred['symbol']}* M5 | {regime_emoji} {regime}",
-        "",
-        f"📈 *{direction}*",
-        f"🟢 {green:.1f}%  |  🔴 {red:.1f}%",
-        "",
-        f"🎯 Confidence: *{conf:.1f}%* ({conf_level})",
-        f"`[{conf_bar}]`",
-        f"📎 Adaptive: *{adaptive:.1f}%*",
-        "",
-        f"🔬 Meta: *{meta:.1f}%* | Unc: *{unc:.1f}%*",
-        f"💰 Kelly: *{kelly:.1f}%* → {size_emoji} Size *{size_label}*",
-        "",
-        f"━━━━━━━━━━━━━━━━━━━━━",
-        f"💡 *{trade}*",
     ]
 
-    if pred.get("risk_warnings"):
-        lines.append("")
-        for w in pred["risk_warnings"]:
-            lines.append(f"⚠️ {w}")
+    for sym, pred in sorted(predictions.items()):
+        d = "⬆️" if pred["suggested_direction"] == "UP" else "⬇️"
+        conf = pred["final_confidence_percent"]
+        green = pred["green_probability_percent"]
+        kelly = pred.get("kelly_fraction_percent", 0.0)
+        trade = pred["suggested_trade"]
+        regime = pred.get("market_regime", "?")
+        r_emoji = {"Trending": "📈", "Ranging": "↔️",
+                   "High_Volatility": "🔥", "Low_Volatility": "❄️"}.get(regime, "")
+
+        lines.append(
+            f"\n{d} *{sym}* {r_emoji}\n"
+            f"   Prob *{green:.0f}%* | Conf *{conf:.0f}%* | K *{kelly:.1f}%*\n"
+            f"   💡 *{trade}*"
+        )
+
+    if filtered:
+        skipped = ", ".join(f"{s} ({r})" for s, r in filtered.items())
+        lines.append(f"\n⏭️ Skipped: {skipped}")
 
     return "\n".join(lines)
 
@@ -404,26 +407,32 @@ async def _auto_signal_job(app: Application):
                     log.error("Auto-signal prediction failed for %s: %s", sym, e)
                     record_error(f"auto-signal {sym}: {e}")
 
-            # Send to each subscriber (respecting alert mode)
+            # Send ONE combined message per subscriber (respecting alert mode)
             for chat_id, info in active_subs.items():
                 symbols = info.get("symbols", [DEFAULT_SYMBOL])
-                mode = info.get("mode", "all")  # "all" or "high"
+                mode = info.get("mode", "all")
+                # Filter predictions for this subscriber
+                sub_preds = {}
                 for sym in symbols:
                     if sym in predictions:
                         pred = predictions[sym]
                         conf = pred["final_confidence_percent"]
-                        # High-conf mode: skip signals below threshold
                         if mode == "high" and conf < HIGH_CONF_THRESHOLD:
                             continue
-                        msg = _format_prediction(pred, is_auto=True)
-                        try:
-                            await bot.send_message(
-                                chat_id=int(chat_id),
-                                text=msg,
-                                parse_mode="Markdown",
-                            )
-                        except Exception as e:
-                            log.error("Failed to send to %s: %s", chat_id, e)
+                        sub_preds[sym] = pred
+
+                if not sub_preds:
+                    continue
+
+                msg = _format_combined_signal(sub_preds, filtered_out)
+                try:
+                    await bot.send_message(
+                        chat_id=int(chat_id),
+                        text=msg,
+                        parse_mode="Markdown",
+                    )
+                except Exception as e:
+                    log.error("Failed to send to %s: %s", chat_id, e)
 
             if filtered_out:
                 log.info("Filtered signals: %s", filtered_out)

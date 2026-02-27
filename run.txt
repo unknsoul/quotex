@@ -1,0 +1,11 @@
+# FULL RETRAIN (run in order):
+python train_model.py --symbol EURUSD     # Step 1: Ensemble
+python meta_model.py --symbol EURUSD      # Step 2: Meta model
+python weight_learner.py --symbol EURUSD  # Step 3: Weight learner
+python backtest.py --symbol EURUSD        # Step 4: Validate
+
+# LITE RETRAIN (fast, meta+weight only):
+python auto_learner.py --symbol EURUSD --lite
+
+# START BOT:
+python telegram_bot.py
