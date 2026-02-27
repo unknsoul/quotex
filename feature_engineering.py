@@ -1,10 +1,9 @@
 """
-Feature Engineering v5 — structural features + all prior features.
+Feature Engineering v6 — structural + microstructure features.
 
-v5 adds: liquidity sweep signals (sweep_high, sweep_low), compression breakout,
-return skew/kurtosis, directional imbalance, regime transition momentum,
-multi-horizon confirmation.
-Total: 47 features.
+v6 adds: wick absorption, momentum decay, tick volume features,
+session interaction features, temporal features.
+Total: 55 features.
 """
 
 import numpy as np
@@ -58,6 +57,19 @@ FEATURE_COLUMNS = [
     "delta_adx_5", "delta_atr_5",
     # Multi-horizon confirmation
     "return_2bar_momentum", "return_3bar_trend",
+    # ---- v6: Microstructure features (8) ----
+    # Order flow proxy
+    "wick_absorption",
+    # Momentum exhaustion
+    "momentum_decay",
+    # Volume features
+    "tick_volume_zscore", "volume_price_divergence",
+    # Session interaction
+    "session_momentum_interaction", "session_volatility_interaction",
+    # Trend × regime
+    "ema_adx_interaction",
+    # Compression acceleration
+    "range_compression_speed",
 ]
 
 
@@ -307,6 +319,44 @@ def compute_features(df, m15_df=None, h1_df=None):
     # Multi-horizon confirmation
     df["return_2bar_momentum"] = returns.rolling(2, min_periods=1).sum()
     df["return_3bar_trend"] = c.pct_change(3)
+
+    # ---- v6: Microstructure features ----
+
+    # Wick absorption ratio (order flow proxy)
+    upper_wick = h - pd.concat([o, c], axis=1).max(axis=1)
+    lower_wick = pd.concat([o, c], axis=1).min(axis=1) - l
+    df["wick_absorption"] = lower_wick / (upper_wick + lower_wick + 1e-10)
+
+    # Momentum decay rate
+    mom_1 = returns.fillna(0)
+    mom_3_avg = returns.rolling(3, min_periods=1).mean()
+    df["momentum_decay"] = mom_1 / (mom_3_avg + 1e-10)
+    df["momentum_decay"] = df["momentum_decay"].clip(-10, 10)  # cap extremes
+
+    # Tick volume features
+    if "tick_volume" in df.columns:
+        tv = df["tick_volume"].astype(float)
+        tv_mean = tv.rolling(20, min_periods=5).mean()
+        tv_std = tv.rolling(20, min_periods=5).std()
+        df["tick_volume_zscore"] = (tv - tv_mean) / (tv_std + 1e-10)
+        # Volume-price divergence: price up + volume down = weakness
+        price_dir = (returns > 0).astype(float) * 2 - 1  # +1 or -1
+        vol_dir = (tv > tv_mean).astype(float) * 2 - 1    # +1 or -1
+        df["volume_price_divergence"] = price_dir * vol_dir  # +1=confirm, -1=diverge
+    else:
+        df["tick_volume_zscore"] = 0.0
+        df["volume_price_divergence"] = 0.0
+
+    # Session interaction features
+    session = df["session_flag"]
+    df["session_momentum_interaction"] = session * df["momentum_rolling_5"]
+    df["session_volatility_interaction"] = session * df["volatility_zscore"]
+
+    # Trend × regime interaction
+    df["ema_adx_interaction"] = df["ema_slope"] * df["adx_normalized"]
+
+    # Compression acceleration (how fast is range narrowing)
+    df["range_compression_speed"] = df["compression_ratio"] - df["compression_ratio"].shift(5)
 
     # Drop warmup
     warmup = max(EMA_200, BB_PERIOD, ATR_PERIOD, RSI_PERIOD, MACD_SLOW,

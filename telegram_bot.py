@@ -146,23 +146,35 @@ def _format_prediction(pred: dict) -> str:
     red = pred["red_probability_percent"]
     direction = "🟢 UP" if pred["suggested_direction"] == "UP" else "🔴 DOWN"
     conf = pred["final_confidence_percent"]
+    adaptive = pred.get("adaptive_confidence_percent", conf)
     meta = pred["meta_reliability_percent"]
     unc = pred["uncertainty_percent"]
+    kelly = pred.get("kelly_fraction_percent", 0.0)
     regime = pred.get("market_regime", pred.get("regime", "Unknown"))
     trade = pred["suggested_trade"]
     conf_level = pred["confidence_level"]
     conf_rel = pred.get("confidence_reliability_score", 0.0)
+
+    # Position sizing recommendation
+    if kelly > 3:
+        size_label = "1.5x"
+    elif kelly > 2:
+        size_label = "1.2x"
+    elif kelly > 1:
+        size_label = "0.8x"
+    else:
+        size_label = "0.5x"
 
     lines = [
         f"📊 *{pred['symbol']}* | M5 Prediction",
         "",
         f"🟢 Green: *{green:.1f}%*  🔴 Red: *{red:.1f}%*",
         f"📈 Direction: *{direction}*",
-        f"🎯 Confidence: *{conf:.1f}%* ({conf_level})",
-        f"🔬 Meta Reliability: *{meta:.1f}%*",
-        f"📉 Uncertainty: *{unc:.1f}%*",
+        f"🎯 Confidence: *{conf:.1f}%* → Adaptive: *{adaptive:.1f}%*",
+        f"🔬 Meta: *{meta:.1f}%* | Uncertainty: *{unc:.1f}%*",
         f"🌊 Regime: *{regime}*",
-        f"📊 Confidence Reliability: *{conf_rel:.2f}*",
+        f"💰 Kelly: *{kelly:.1f}%* → Size: *{size_label}*",
+        f"📊 Reliability: *{conf_rel:.2f}*",
         f"💡 Suggestion: *{trade}*",
     ]
 

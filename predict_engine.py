@@ -5,8 +5,10 @@ Features:
   - Race condition protection via retrain lock
   - Candle integrity verification (only closed candles)
   - Uncertainty from ensemble variance: confidence *= (1 - normalized_variance)
-  - Calibrated meta output (isotonic)
+  - Sigmoid-calibrated meta (Platt scaling)
   - Rolling confidence-accuracy correlation tracking
+  - Adaptive confidence (rolling calibration window)
+  - Kelly criterion position sizing
   - Model cached in memory
 
 Live parity: meta features built identically to training
@@ -47,6 +49,10 @@ _meta_features = None
 _weight_model = None
 _prediction_history = []
 _direction_history = []
+
+# Adaptive confidence: rolling calibration window
+_adaptive_history = []  # list of (confidence, correct) tuples
+ADAPTIVE_WINDOW = 200
 
 # --- Race condition protection -----------------------------------------------
 _retrain_in_progress = False
@@ -245,6 +251,16 @@ def predict(df, regime):
     else:
         conf_level = "Low"
 
+    # Adaptive confidence (rolling calibration)
+    adaptive_conf = _adaptive_confidence(confidence_pct)
+
+    # Kelly criterion position sizing (quarter-Kelly for safety)
+    win_prob = max(min(green_p if green_p >= 0.5 else (1 - green_p), 0.99), 0.51)
+    # Binary payout: win 1, lose 1 → b=1 → f = 2p - 1
+    kelly_full = 2 * win_prob - 1
+    kelly_quarter = max(0, kelly_full * 0.25)
+    kelly_pct = round(kelly_quarter * 100, 1)
+
     # Trade suggestion
     thresholds = get_regime_thresholds(regime)
     if green_p >= thresholds["primary"] and meta_rel >= thresholds["meta"]:
@@ -266,15 +282,17 @@ def predict(df, regime):
         "meta_reliability_percent": meta_pct,
         "uncertainty_percent": uncertainty_pct,
         "final_confidence_percent": confidence_pct,
+        "adaptive_confidence_percent": adaptive_conf,
         "confidence_level": conf_level,
         "confidence_reliability_score": conf_reliability,
+        "kelly_fraction_percent": kelly_pct,
         "suggested_trade": trade,
         "suggested_direction": "UP" if green_p >= 0.5 else "DOWN",
         "market_regime": regime,
     }
 
-    log.info("Pred: green=%.1f%% meta=%.1f%% unc=%.1f%% conf=%.1f%% rel=%.3f -> %s",
-             green_pct, meta_pct, uncertainty_pct, confidence_pct, conf_reliability, direction)
+    log.info("Pred: green=%.1f%% meta=%.1f%% unc=%.1f%% conf=%.1f%% adapt=%.1f%% kelly=%.1f%% -> %s",
+             green_pct, meta_pct, uncertainty_pct, confidence_pct, adaptive_conf, kelly_pct, direction)
     return result
 
 
@@ -287,6 +305,35 @@ def update_prediction_history(green_p, was_correct, confidence=0.5):
     })
     if len(_prediction_history) > CONFIDENCE_CORRELATION_WINDOW * 2:
         _prediction_history.pop(0)
+
+    # Update adaptive calibration history
+    _adaptive_history.append((confidence, was_correct))
+    if len(_adaptive_history) > ADAPTIVE_WINDOW * 2:
+        _adaptive_history.pop(0)
+
+
+def _adaptive_confidence(raw_confidence):
+    """
+    Adjust confidence based on rolling historical accuracy per confidence tier.
+    If raw confidence says 70% but historical accuracy at 70% tier is 60%,
+    adaptive confidence returns 60%.
+    """
+    if len(_adaptive_history) < 50:
+        return raw_confidence  # not enough data yet
+
+    recent = _adaptive_history[-ADAPTIVE_WINDOW:]
+    # Find similar confidence predictions
+    tier_lo = max(0, raw_confidence - 10)
+    tier_hi = raw_confidence + 10
+    in_tier = [(c, cor) for c, cor in recent if tier_lo <= c < tier_hi]
+
+    if len(in_tier) < 10:
+        return raw_confidence  # not enough data in this tier
+
+    historical_acc = sum(cor for _, cor in in_tier) / len(in_tier) * 100
+    # Blend: 70% raw, 30% historical (smooth transition)
+    adapted = 0.7 * raw_confidence + 0.3 * historical_acc
+    return round(adapted, 2)
 
 
 def log_prediction(symbol, regime, prediction, risk_warnings=None, timestamp=None):
