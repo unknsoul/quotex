@@ -78,8 +78,6 @@ HIGH_CONF_THRESHOLD = 70.0
 COOLDOWN_CANDLES = 3
 MAX_CONSECUTIVE_LOSSES = 3
 REGIME_SKIP_CANDLES = 2  # skip after regime transition
-# Low-liquidity hours (UTC): skip 22:00 - 02:00
-SKIP_HOURS_UTC = {22, 23, 0, 1}
 
 
 # =============================================================================
@@ -165,10 +163,8 @@ def _connect_mt5():
 
 
 def _get_server_time():
-    tick = mt5.symbol_info_tick(DEFAULT_SYMBOL)
-    if tick is None:
-        return datetime.now(timezone.utc)
-    return datetime.fromtimestamp(tick.time, tz=timezone.utc)
+    """Get current time — always use system UTC clock for reliability."""
+    return datetime.now(timezone.utc)
 
 
 def _next_m5_close_time(server_time: datetime) -> datetime:
@@ -434,11 +430,11 @@ async def _auto_signal_job(app: Application):
             for info in active_subs.values():
                 needed_symbols.update(info.get("symbols", [DEFAULT_SYMBOL]))
 
-            # --- Time-of-day filter (global) ---
-            current_hour = datetime.now(timezone.utc).hour
-            if current_hour in SKIP_HOURS_UTC:
-                log.info("SKIPPED: low-liquidity hour %02d:00 UTC", current_hour)
-                await asyncio.sleep(15)
+            # Weekend check (Sat/Sun)
+            now_utc = datetime.now(timezone.utc)
+            if now_utc.weekday() >= 5:  # Saturday=5, Sunday=6
+                log.info("Auto-signal: market closed (weekend). Sleeping 30 min.")
+                await asyncio.sleep(1800)
                 continue
 
             predictions = {}
