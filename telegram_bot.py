@@ -22,6 +22,7 @@ import json
 import os
 import logging
 import math
+import time
 from datetime import datetime, timezone, timedelta
 
 import MetaTrader5 as mt5
@@ -34,6 +35,7 @@ from config import (
     DEFAULT_SYMBOL, CANDLES_TO_FETCH,
     MT5_PATH, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER,
     TELEGRAM_BOT_TOKEN, TELEGRAM_SEND_BEFORE_CLOSE_SEC,
+    INFERENCE_TIMEOUT_SEC, MODEL_PATH, MODEL_VERSION,
     LOG_LEVEL, LOG_FORMAT, LOG_DIR,
 )
 from data_collector import fetch_multi_timeframe
@@ -45,6 +47,7 @@ from predict_engine import (
 )
 from risk_filter import check_warnings
 from stability import AccuracyTracker, ConfidenceCorrelationTracker
+from production_state import update_runtime_metrics, set_last_retrain_time
 
 log = logging.getLogger("telegram_bot")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
@@ -100,7 +103,20 @@ def _connect_mt5():
     return True
 
 
+
+
+def _ensure_mt5_connection() -> bool:
+    """Keep MT5 session alive for long-running Telegram process."""
+    try:
+        if mt5.terminal_info() is not None:
+            return True
+    except Exception:
+        pass
+    return _connect_mt5()
+
 def _get_server_time():
+    if not _ensure_mt5_connection():
+        return datetime.now(timezone.utc)
     tick = mt5.symbol_info_tick(DEFAULT_SYMBOL)
     if tick is None:
         return datetime.now(timezone.utc)
@@ -118,13 +134,24 @@ def _next_m5_close_time(server_time: datetime) -> datetime:
 
 
 def _validate_symbol(symbol: str) -> bool:
-    info = mt5.symbol_info(symbol)
-    return info is not None
+    try:
+        info = mt5.symbol_info(symbol)
+        if info is None:
+            return False
+        if not info.visible:
+            mt5.symbol_select(symbol, True)
+            info = mt5.symbol_info(symbol)
+        return info is not None
+    except Exception:
+        return False
 
 
 def _get_spread(symbol: str) -> float:
-    info = mt5.symbol_info(symbol)
-    return float(info.spread) if info else 0.0
+    try:
+        info = mt5.symbol_info(symbol)
+        return float(info.spread) if info else 0.0
+    except Exception:
+        return 0.0
 
 
 # =============================================================================
@@ -132,27 +159,40 @@ def _get_spread(symbol: str) -> float:
 # =============================================================================
 
 def _run_prediction(symbol: str) -> dict:
-    data = fetch_multi_timeframe(symbol, CANDLES_TO_FETCH)
-    df = data.get("M5")
-    if df is None or len(df) == 0:
-        raise RuntimeError(f"No M5 data for {symbol}")
-    m15, h1 = data.get("M15"), data.get("H1")
+    """Run one inference cycle with MT5/inference hardening."""
+    if not _ensure_mt5_connection():
+        raise RuntimeError("MT5 connection unavailable")
 
-    df = compute_features(df, m15_df=m15, h1_df=h1)
+    data = fetch_multi_timeframe(symbol, CANDLES_TO_FETCH)
+    m5_raw = data.get("M5")
+    if m5_raw is None or len(m5_raw) == 0:
+        raise RuntimeError(f"No M5 data for {symbol}")
+
+    # Ensure we only use closed candles before feature generation.
+    if not verify_candle_closed(m5_raw, timeframe_minutes=5):
+        m5_raw = m5_raw.iloc[:-1].reset_index(drop=True)
+        if len(m5_raw) < 50:
+            raise RuntimeError("No closed M5 candle available.")
+
+    m15, h1 = data.get("M15"), data.get("H1")
+    df = compute_features(m5_raw, m15_df=m15, h1_df=h1)
     if df.empty:
         raise RuntimeError("Not enough data for features.")
-
-    if not verify_candle_closed(df):
-        df = df.iloc[:-1]
-        if df.empty:
-            raise RuntimeError("No closed candle available.")
 
     regime = detect_regime(df)
     spread = _get_spread(symbol)
     risk_warnings = check_warnings(df, current_spread=spread)
+
+    t0 = time.perf_counter()
     result = predict(df, regime)
+    infer_latency = time.perf_counter() - t0
+    if infer_latency > INFERENCE_TIMEOUT_SEC:
+        raise TimeoutError(
+            f"Inference latency {infer_latency:.3f}s exceeded {INFERENCE_TIMEOUT_SEC:.1f}s limit"
+        )
 
     now = datetime.now(timezone.utc)
+    result["inference_latency_ms"] = round(infer_latency * 1000, 2)
     log_prediction(symbol, regime, result, risk_warnings=risk_warnings, timestamp=now)
 
     return {
@@ -494,7 +534,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("next_"):
         symbol = data.replace("next_", "")
         if not _validate_symbol(symbol):
-            await query.edit_message_text(f"❌ `{symbol}` not found.",
+            await query.edit_message_text(f"❌ `{symbol}` not found in MT5.",
                                           reply_markup=_back_keyboard(chat_id))
             return
 
@@ -503,23 +543,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         send_time = close_time - timedelta(seconds=TELEGRAM_SEND_BEFORE_CLOSE_SEC)
         wait_seconds = max(0, (send_time - server_time).total_seconds())
 
+        asyncio.create_task(_send_next_candle_prediction(chat_id, symbol, close_time, context.bot))
         await query.edit_message_text(
-            f"⏳ *{symbol}* M5 close at `{close_time.strftime('%H:%M:%S')}` UTC\n"
-            f"Prediction in ~{int(wait_seconds)}s...",
+            f"⏳ Scheduled *{symbol}* next-candle prediction.\n"
+            f"Candle close: `{close_time.strftime('%H:%M:%S')}` UTC\n"
+            f"Send time: `{send_time.strftime('%H:%M:%S')}` UTC (~{int(wait_seconds)}s)",
             parse_mode="Markdown",
+            reply_markup=_back_keyboard(chat_id),
         )
-
-        if wait_seconds > 0:
-            await asyncio.sleep(wait_seconds)
-
-        try:
-            pred = _run_prediction(symbol)
-            msg = _format_prediction(pred)
-            await query.edit_message_text(msg, parse_mode="Markdown",
-                                          reply_markup=_back_keyboard(chat_id))
-        except Exception as e:
-            await query.edit_message_text(f"❌ Error: {e}",
-                                          reply_markup=_back_keyboard(chat_id))
 
     # ----- Multi-Symbol -----
     elif data == "multi_symbol":
@@ -547,6 +578,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "status":
         acc_status = _tracker.status()
         conf_status = _conf_tracker.status()
+        _sync_production_state()
         n_subs = sum(1 for s in _subscribers.values() if s.get("active"))
         msg = (
             f"📊 *Engine Status*\n"
@@ -644,6 +676,40 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       reply_markup=_back_keyboard(chat_id))
 
 
+
+
+async def _sleep_until(target_time: datetime):
+    while True:
+        remaining = (target_time - _get_server_time()).total_seconds()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(remaining, 1.0))
+
+
+async def _send_next_candle_prediction(chat_id: int, symbol: str, close_time: datetime, bot: Bot):
+    send_time = close_time - timedelta(seconds=TELEGRAM_SEND_BEFORE_CLOSE_SEC)
+    try:
+        await _sleep_until(send_time)
+        pred = _run_prediction(symbol)
+        msg = _format_prediction(pred)
+        await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown",
+                               reply_markup=_back_keyboard(chat_id))
+    except Exception as e:
+        log.exception("Scheduled next-candle prediction failed for %s", symbol)
+        await bot.send_message(chat_id=chat_id,
+                               text=f"❌ Prediction failed for {symbol}: {e}")
+
+
+
+def _sync_production_state():
+    acc_status = _tracker.status()
+    conf_status = _conf_tracker.status()
+    update_runtime_metrics(
+        rolling_accuracy=acc_status.get("rolling_accuracy", 0.5),
+        rolling_spearman=conf_status.get("confidence_correlation", 0.0),
+        model_version=MODEL_VERSION,
+    )
+
 def _count_today_signals():
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     return sum(1 for s in _signal_history if s["time"].startswith(today))
@@ -655,7 +721,7 @@ async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = args[0].upper() if args else DEFAULT_SYMBOL
 
     if not _validate_symbol(symbol):
-        await update.message.reply_text(f"❌ `{symbol}` not found.")
+        await update.message.reply_text(f"❌ `{symbol}` not found in MT5.")
         return
 
     server_time = _get_server_time()
@@ -663,27 +729,20 @@ async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
     send_time = close_time - timedelta(seconds=TELEGRAM_SEND_BEFORE_CLOSE_SEC)
     wait_seconds = max(0, (send_time - server_time).total_seconds())
 
+    chat_id = update.effective_chat.id
+    asyncio.create_task(_send_next_candle_prediction(chat_id, symbol, close_time, context.bot))
     await update.message.reply_text(
-        f"⏳ *{symbol}* M5 close at `{close_time.strftime('%H:%M:%S')}` UTC\n"
-        f"Prediction in ~{int(wait_seconds)}s...",
+        f"⏳ Scheduled *{symbol}* next-candle prediction.\n"
+        f"Candle close: `{close_time.strftime('%H:%M:%S')}` UTC\n"
+        f"Send time: `{send_time.strftime('%H:%M:%S')}` UTC (~{int(wait_seconds)}s)",
         parse_mode="Markdown",
     )
-    if wait_seconds > 0:
-        await asyncio.sleep(wait_seconds)
-
-    try:
-        pred = _run_prediction(symbol)
-        msg = _format_prediction(pred)
-        chat_id = update.effective_chat.id
-        await update.message.reply_text(msg, parse_mode="Markdown",
-                                        reply_markup=_back_keyboard(chat_id))
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     acc_status = _tracker.status()
     conf_status = _conf_tracker.status()
+    _sync_production_state()
     await update.message.reply_text(
         f"📊 *Engine Status*\n\n"
         f"Accuracy: *{acc_status['rolling_accuracy']:.1%}*\n"
@@ -692,6 +751,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Retrain: *{acc_status['should_retrain']}*",
         parse_mode="Markdown",
     )
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    log.exception("Telegram handler error: %s", context.error)
 
 
 # =============================================================================
@@ -717,6 +780,10 @@ def main():
     try:
         load_models()
         log.info("Models pre-loaded.")
+        if os.path.exists(MODEL_PATH):
+            model_mtime = datetime.fromtimestamp(os.path.getmtime(MODEL_PATH), tz=timezone.utc).isoformat()
+            set_last_retrain_time(model_mtime)
+        _sync_production_state()
     except Exception as e:
         log.warning("Could not pre-load models: %s", e)
 
@@ -734,6 +801,7 @@ def main():
     app.add_handler(CommandHandler("next", cmd_next))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_error_handler(on_error)
 
     log.info("Telegram bot starting (with auto-signal)...")
     app.run_polling(drop_pending_updates=True)
