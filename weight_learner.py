@@ -3,14 +3,14 @@ Weight Learner — OOF-only, no in-sample bias.
 
 CRITICAL: Uses ONLY OOF predictions from train_model.py.
 Does NOT re-run ensemble on OOF rows (that would be in-sample).
-Instead, uses the per-seed OOF probabilities stored in oof_data.pkl
-to compute variance-based uncertainty.
+Uses stored per-seed OOF probabilities for variance computation.
+
+Fixes applied:
+  - OOF indices sorted ascending before slicing
+  - Uses meta calibrator for calibrated meta reliability
+  - Matches meta feature list exactly (no spread_ratio, has ensemble_variance)
 
 Input features: primary_strength, meta_reliability, regime_strength, uncertainty
-Output: optimal weighted confidence (probability of being correct)
-
-Usage:
-    python weight_learner.py --symbol EURUSD
 """
 
 import argparse
@@ -29,7 +29,7 @@ from config import (
     MODEL_DIR, WEIGHT_MODEL_PATH, OOF_PREDICTIONS_PATH,
     META_MODEL_PATH, META_FEATURE_LIST_PATH,
     DEFAULT_SYMBOL,
-    META_ROLLING_WINDOW, WIN_STREAK_CAP, ATR_PERCENTILE_WINDOW,
+    ATR_PERCENTILE_WINDOW,
     LOG_LEVEL, LOG_FORMAT,
 )
 from data_collector import load_csv, load_multi_tf
@@ -40,6 +40,8 @@ log = logging.getLogger("weight_learner")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 
 REGIME_ENCODING = {"Trending": 0, "Ranging": 1, "High_Volatility": 2, "Low_Volatility": 3}
+
+META_CALIBRATOR_PATH = os.path.join(MODEL_DIR, "meta_calibrator.pkl")
 
 WEIGHT_FEATURES = [
     "primary_strength",
@@ -67,13 +69,22 @@ def train_weights(symbol):
     meta_model = joblib.load(META_MODEL_PATH)
     meta_feat_cols = joblib.load(META_FEATURE_LIST_PATH)
 
-    oof_proba = oof_data["oof_proba"]       # OOF mean probabilities
-    oof_all = oof_data["oof_all_proba"]     # [n_seeds × valid_count] per-seed OOF proba
-    actual = oof_data["actual"]
-    indices = oof_data["indices"]
+    # Load meta calibrator if available
+    meta_calibrator = None
+    if os.path.exists(META_CALIBRATOR_PATH):
+        meta_calibrator = joblib.load(META_CALIBRATOR_PATH)
+        print("   Meta calibrator loaded.")
+
+    # FIX #1: Sort indices ascending before slicing
+    raw_indices = oof_data["indices"]
+    sort_order = np.argsort(raw_indices)
+    indices = raw_indices[sort_order]
+    oof_proba = oof_data["oof_proba"][sort_order]
+    oof_all = oof_data["oof_all_proba"][:, sort_order]
+    actual = oof_data["actual"][sort_order]
 
     print(f"\n>> Loaded OOF data: {len(oof_proba)} rows, {oof_all.shape[0]} seeds")
-    print(f"   (Using stored per-seed OOF probabilities — no re-inference)")
+    print(f"   (Indices sorted ascending — chronological order guaranteed)")
 
     # Load features for meta feature building
     mtf = load_multi_tf(symbol)
@@ -92,25 +103,17 @@ def train_weights(symbol):
     primary_dir = (oof_proba >= 0.5).astype(int)
     correct = (primary_dir == actual).astype(int)
 
-    # Uncertainty from stored per-seed OOF probabilities (NOT from production ensemble)
+    # Uncertainty from stored per-seed OOF probabilities
     oof_var = oof_all.var(axis=0)
     oof_var_norm = oof_var / (oof_var.max() + 1e-10)
 
     # Primary strength from OOF
     primary_strength = np.abs(oof_proba - 0.5) * 2
 
-    # Build meta features for OOF rows
+    # Build meta features for OOF rows (matching META_FEATURE_COLUMNS exactly)
     proba_s = pd.Series(oof_proba, index=sub.index)
     regimes = detect_regime_series(sub)
     regime_enc = regimes.map(REGIME_ENCODING).fillna(1).astype(int)
-
-    correct_s = pd.Series(correct, index=sub.index)
-    rolling_acc = correct_s.rolling(META_ROLLING_WINDOW, min_periods=1).mean()
-    win_streaks = []
-    streak = 0
-    for v in correct:
-        streak = streak + 1 if v == 1 else 0
-        win_streaks.append(min(streak, WIN_STREAK_CAP))
 
     dir_streaks = []
     ds = 1
@@ -126,13 +129,11 @@ def train_weights(symbol):
         "primary_green_prob": oof_proba,
         "prob_distance_from_half": np.abs(oof_proba - 0.5),
         "primary_entropy": _binary_entropy(oof_proba),
+        "ensemble_variance": oof_var,
         "regime_encoded": regime_enc.values,
         "atr_value": sub["atr_14"].values if "atr_14" in sub.columns else 0,
-        "spread_ratio": 0.0,
         "volatility_zscore": sub["volatility_zscore"].values if "volatility_zscore" in sub.columns else 0,
         "range_position": sub["range_position"].values if "range_position" in sub.columns else 0.5,
-        "recent_model_accuracy": rolling_acc.values,
-        "recent_win_streak": win_streaks,
         "body_percentile_rank": (
             sub["body_size"].rolling(ATR_PERCENTILE_WINDOW, min_periods=1).rank(pct=True).values
             if "body_size" in sub.columns else 0.5
@@ -144,7 +145,15 @@ def train_weights(symbol):
         ),
     })
     meta_input = meta_rows[meta_feat_cols].fillna(0)
-    meta_proba = meta_model.predict_proba(meta_input.values)[:, 1]
+    meta_raw_proba = meta_model.predict_proba(meta_input.values)[:, 1]
+
+    # Apply meta calibration if available
+    if meta_calibrator is not None:
+        meta_proba = meta_calibrator.predict(meta_raw_proba)
+        meta_proba = np.clip(meta_proba, 0, 1)
+        print("   Meta probabilities calibrated.")
+    else:
+        meta_proba = meta_raw_proba
 
     # Regime strength
     regime_strength = sub["adx_normalized"].values if "adx_normalized" in sub.columns else np.zeros(len(sub))

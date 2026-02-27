@@ -5,10 +5,12 @@ Features:
   - Race condition protection via retrain lock
   - Candle integrity verification (only closed candles)
   - Uncertainty from ensemble variance: confidence *= (1 - normalized_variance)
+  - Calibrated meta output (isotonic)
   - Rolling confidence-accuracy correlation tracking
-  - Model cached in memory, no disk load per request
+  - Model cached in memory
 
-Always returns probabilities (0-100%). Never skips.
+Live parity: meta features built identically to training
+  (ensemble_variance, no spread_ratio, no correctness-derived features)
 """
 
 import os
@@ -25,11 +27,10 @@ from scipy import stats
 from config import (
     MODEL_PATH, FEATURE_LIST_PATH, ENSEMBLE_MODEL_PATH,
     META_MODEL_PATH, META_FEATURE_LIST_PATH, WEIGHT_MODEL_PATH,
-    LOG_DIR, PREDICTION_LOG_CSV, PREDICTION_LOG_JSON,
+    MODEL_DIR, LOG_DIR, PREDICTION_LOG_CSV, PREDICTION_LOG_JSON,
     CONFIDENCE_HIGH_MIN, CONFIDENCE_MEDIUM_MIN,
-    META_ROLLING_WINDOW, WIN_STREAK_CAP, ATR_PERCENTILE_WINDOW,
+    ATR_PERCENTILE_WINDOW,
     CONFIDENCE_CORRELATION_WINDOW, CONFIDENCE_CORRELATION_ALERT,
-    ROLLING_CONFIDENCE_WINDOW,
     LOG_LEVEL, LOG_FORMAT,
 )
 from regime_detection import get_regime_thresholds
@@ -42,13 +43,17 @@ logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 _ensemble = None
 _primary_features = None
 _meta_model = None
+_meta_calibrator = None
 _meta_features = None
 _weight_model = None
 _prediction_history = []
+_direction_history = []
 
 # --- Race condition protection -----------------------------------------------
 _retrain_in_progress = False
 _model_lock = threading.RLock()
+
+META_CALIBRATOR_PATH = os.path.join(MODEL_DIR, "meta_calibrator.pkl")
 
 REGIME_ENCODING = {"Trending": 0, "Ranging": 1, "High_Volatility": 2, "Low_Volatility": 3}
 
@@ -67,11 +72,13 @@ def set_retrain_flag(active):
 
 def reload_models():
     """Force reload models from disk (called after retrain completes)."""
-    global _ensemble, _primary_features, _meta_model, _meta_features, _weight_model
+    global _ensemble, _primary_features, _meta_model, _meta_calibrator
+    global _meta_features, _weight_model
     with _model_lock:
         _ensemble = None
         _primary_features = None
         _meta_model = None
+        _meta_calibrator = None
         _meta_features = None
         _weight_model = None
     load_models()
@@ -79,7 +86,8 @@ def reload_models():
 
 
 def load_models():
-    global _ensemble, _primary_features, _meta_model, _meta_features, _weight_model
+    global _ensemble, _primary_features, _meta_model, _meta_calibrator
+    global _meta_features, _weight_model
 
     with _model_lock:
         if _ensemble is None:
@@ -97,6 +105,13 @@ def load_models():
             _meta_model = joblib.load(META_MODEL_PATH)
             _meta_features = joblib.load(META_FEATURE_LIST_PATH)
             log.info("Meta model loaded (%d features).", len(_meta_features))
+            # Load meta calibrator
+            if os.path.exists(META_CALIBRATOR_PATH):
+                _meta_calibrator = joblib.load(META_CALIBRATOR_PATH)
+                log.info("Meta calibrator loaded.")
+            else:
+                _meta_calibrator = None
+                log.warning("No meta calibrator found — using raw probabilities.")
 
         if _weight_model is None and os.path.exists(WEIGHT_MODEL_PATH):
             _weight_model = joblib.load(WEIGHT_MODEL_PATH)
@@ -111,7 +126,7 @@ def verify_candle_closed(df, timeframe_minutes=5):
     Returns True if the last candle's close time is in the past.
     """
     if "time" not in df.columns:
-        return True  # Can't verify, assume OK
+        return True
 
     last_time = pd.Timestamp(df["time"].iloc[-1])
     if last_time.tzinfo is None:
@@ -122,46 +137,37 @@ def verify_candle_closed(df, timeframe_minutes=5):
     is_closed = candle_close <= now
 
     if not is_closed:
-        log.warning("Last candle NOT closed yet (time=%s, closes=%s, now=%s). "
-                     "Using second-to-last candle.", last_time, candle_close, now)
+        log.warning("Last candle NOT closed (time=%s, closes=%s, now=%s). "
+                     "Using second-to-last.", last_time, candle_close, now)
     return is_closed
 
 
-def _build_meta_row(green_p, df_row, regime_enc):
-    global _prediction_history
-    if _prediction_history:
-        recent = _prediction_history[-META_ROLLING_WINDOW:]
-        recent_acc = sum(r["correct"] for r in recent) / len(recent)
-        streak = 0
-        for r in reversed(recent):
-            if r["correct"]:
-                streak += 1
-            else:
-                break
-        streak = min(streak, WIN_STREAK_CAP)
-        # Direction streak
-        dstreak = 1
-        for r in reversed(_prediction_history[:-1]):
-            if (r["green_p"] >= 0.5) == (green_p >= 0.5):
-                dstreak += 1
-            else:
-                break
-    else:
-        recent_acc = 0.5
-        streak = 0
-        dstreak = 1
+def _build_meta_row(green_p, df_row, regime_enc, ensemble_variance):
+    """
+    Build meta feature row matching META_FEATURE_COLUMNS exactly.
+    
+    LIVE PARITY: same features as training (no spread_ratio,
+    no correctness-derived features, has ensemble_variance).
+    """
+    global _direction_history
+
+    cur_dir = 1 if green_p >= 0.5 else 0
+    dstreak = 1
+    for d in reversed(_direction_history):
+        if d == cur_dir:
+            dstreak += 1
+        else:
+            break
 
     return {
         "primary_green_prob": green_p,
         "prob_distance_from_half": abs(green_p - 0.5),
         "primary_entropy": float(_binary_entropy(green_p)),
+        "ensemble_variance": ensemble_variance,
         "regime_encoded": regime_enc,
         "atr_value": float(df_row.get("atr_14", 0)),
-        "spread_ratio": 0.0,
         "volatility_zscore": float(df_row.get("volatility_zscore", 0)),
         "range_position": float(df_row.get("range_position", 0.5)),
-        "recent_model_accuracy": recent_acc,
-        "recent_win_streak": streak,
         "body_percentile_rank": float(df_row.get("body_size", 0.5)),
         "direction_streak": dstreak,
         "rolling_vol_percentile": float(df_row.get("atr_percentile_rank", 0.5)),
@@ -169,10 +175,7 @@ def _build_meta_row(green_p, df_row, regime_enc):
 
 
 def get_confidence_reliability():
-    """
-    Compute rolling Spearman correlation between confidence and correctness.
-    Returns correlation score (0-1 range) and alert status.
-    """
+    """Compute rolling Spearman correlation between confidence and correctness."""
     if len(_prediction_history) < 30:
         return 0.5, False
 
@@ -209,16 +212,21 @@ def predict(df, regime):
     green_p = float(all_probs.mean())
     red_p = 1.0 - green_p
     variance = float(all_probs.var())
-    max_var = 0.25  # max possible variance for [0,1]
+    max_var = 0.25
     norm_var = min(variance / max_var, 1.0)
     uncertainty_pct = round(norm_var * 100, 2)
 
-    # Meta
+    # Meta (with calibration)
     regime_enc = REGIME_ENCODING.get(regime, 1)
-    meta_row = _build_meta_row(green_p, df.iloc[-1], regime_enc)
+    meta_row = _build_meta_row(green_p, df.iloc[-1], regime_enc, variance)
     meta_input = pd.DataFrame([meta_row])[meta_feat_cols]
-    meta_proba = meta_model.predict_proba(meta_input.values)[0]
-    meta_rel = float(meta_proba[1])
+    meta_raw = meta_model.predict_proba(meta_input.values)[0][1]
+
+    # Apply meta calibration if available
+    if _meta_calibrator is not None:
+        meta_rel = float(np.clip(_meta_calibrator.predict([meta_raw])[0], 0, 1))
+    else:
+        meta_rel = float(meta_raw)
 
     # Confidence with uncertainty adjustment
     primary_strength = abs(green_p - 0.5) * 2
@@ -235,7 +243,6 @@ def predict(df, regime):
     else:
         weighted_score = primary_strength * meta_rel
 
-    # Apply uncertainty adjustment: final_confidence = weighted_score × (1 - variance_factor)
     confidence = weighted_score * (1.0 - norm_var)
 
     # Confidence reliability (rolling correlation)
@@ -263,6 +270,11 @@ def predict(df, regime):
         trade = "SELL"
     else:
         trade = "HOLD"
+
+    # Update direction history for live parity
+    _direction_history.append(1 if green_p >= 0.5 else 0)
+    if len(_direction_history) > 500:
+        _direction_history.pop(0)
 
     result = {
         "green_probability_percent": green_pct,

@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import TimeSeriesSplit
 from scipy import stats
@@ -59,7 +60,8 @@ REGIME_ENCODING = {"Trending": 0, "Ranging": 1, "High_Volatility": 2, "Low_Volat
 
 META_FEATURE_COLUMNS = [
     "primary_green_prob", "prob_distance_from_half", "primary_entropy",
-    "regime_encoded", "atr_value", "spread_ratio", "volatility_zscore",
+    "ensemble_variance",
+    "regime_encoded", "atr_value", "volatility_zscore",
     "range_position",
     "body_percentile_rank", "direction_streak", "rolling_vol_percentile",
 ]
@@ -94,20 +96,9 @@ def _regime_for_row(df, idx, lookback=200):
     return detect_regime(w) if len(w) >= 50 else "Ranging"
 
 
-def _build_meta_row(green_p, regime, row, history, dir_history):
+def _build_meta_row(green_p, regime, row, dir_history, ensemble_variance=0.0):
+    """Build meta row matching META_FEATURE_COLUMNS exactly."""
     regime_enc = REGIME_ENCODING.get(regime, 1)
-    if history:
-        recent = history[-META_ROLLING_WINDOW:]
-        recent_acc = sum(recent) / len(recent)
-        streak = 0
-        for v in reversed(recent):
-            if v == 1:
-                streak += 1
-            else:
-                break
-        streak = min(streak, WIN_STREAK_CAP)
-    else:
-        recent_acc, streak = 0.5, 0
 
     cur_dir = 1 if green_p >= 0.5 else 0
     dstreak = 1
@@ -121,13 +112,11 @@ def _build_meta_row(green_p, regime, row, history, dir_history):
         "primary_green_prob": green_p,
         "prob_distance_from_half": abs(green_p - 0.5),
         "primary_entropy": float(_binary_entropy(green_p)),
+        "ensemble_variance": ensemble_variance,
         "regime_encoded": regime_enc,
         "atr_value": float(row.get("atr_14", 0)),
-        "spread_ratio": 0.0,
         "volatility_zscore": float(row.get("volatility_zscore", 0)),
         "range_position": float(row.get("range_position", 0.5)),
-        "recent_model_accuracy": recent_acc,
-        "recent_win_streak": streak,
         "body_percentile_rank": float(row.get("body_size", 0.5)),
         "direction_streak": dstreak,
         "rolling_vol_percentile": float(row.get("atr_percentile_rank", 0.5)),
@@ -273,27 +262,41 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
             if len(oof_indices) > 0 else pd.DataFrame()
 
         meta_rows = []
-        mh_local, dh_local = [], []
+        dh_local = []
         for k in range(len(oof_indices)):
             idx = X_main.index[oof_indices[k]] if oof_indices[k] < len(X_main) else oof_indices[k]
             regime = _regime_for_row(df_eval, idx) if idx > 50 else "Ranging"
-            mr = _build_meta_row(oof_p[k], regime, df_eval.iloc[min(idx, len(df_eval)-1)], mh_local, dh_local)
+            mr = _build_meta_row(oof_p[k], regime, df_eval.iloc[min(idx, len(df_eval)-1)],
+                                 dh_local, ensemble_variance=oof_var[k])
             mr["meta_target"] = oof_correct[k]
             meta_rows.append(mr)
-            mh_local.append(oof_correct[k])
             dh_local.append(1 if oof_p[k] >= 0.5 else 0)
 
         meta_df = pd.DataFrame(meta_rows)
         X_meta_tr = meta_df[META_FEATURE_COLUMNS].fillna(0)
         y_meta_tr = meta_df["meta_target"].values
+
+        # Split meta training data for calibration
+        meta_cal_n = int(len(X_meta_tr) * CALIBRATION_SPLIT_RATIO)
+        X_meta_main, y_meta_main = X_meta_tr.iloc[:meta_cal_n], y_meta_tr[:meta_cal_n]
+        X_meta_cal, y_meta_cal = X_meta_tr.iloc[meta_cal_n:], y_meta_tr[meta_cal_n:]
         meta_model = _build_meta()
-        meta_model.fit(X_meta_tr, y_meta_tr)
+        meta_model.fit(X_meta_main, y_meta_main)
+
+        # Calibrate meta output
+        meta_raw_cal = meta_model.predict_proba(X_meta_cal.values)[:, 1]
+        meta_iso = IsotonicRegression(y_min=0, y_max=1, out_of_bounds="clip")
+        if len(np.unique(y_meta_cal)) > 1:
+            meta_iso.fit(meta_raw_cal, y_meta_cal)
+        else:
+            meta_iso.fit(meta_raw_cal, meta_raw_cal)  # identity fallback
 
         # =================================================================
         # Step 5: Train weight learner on OOF (LEAKAGE-FREE)
         # =================================================================
         oof_strength = np.abs(oof_p - 0.5) * 2
-        meta_rel_oof = meta_model.predict_proba(X_meta_tr.values)[:, 1]
+        meta_raw_oof = meta_model.predict_proba(X_meta_tr.values)[:, 1]
+        meta_rel_oof = np.clip(meta_iso.predict(meta_raw_oof), 0, 1)
         regime_str_oof = np.zeros(len(oof_indices))
         for k, oi in enumerate(oof_indices):
             idx = X_main.index[oi] if oi < len(X_main) else oi
@@ -323,9 +326,11 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
             norm_var = min(variance / 0.25, 1.0)
             actual = y_all[i]
 
-            meta_row = _build_meta_row(green_p, regime, df_eval.iloc[i], meta_history, dir_history)
+            meta_row = _build_meta_row(green_p, regime, df_eval.iloc[i], dir_history,
+                                       ensemble_variance=variance)
             meta_in = pd.DataFrame([meta_row])[META_FEATURE_COLUMNS]
-            meta_rel = float(meta_model.predict_proba(meta_in)[:, 1][0])
+            meta_raw = float(meta_model.predict_proba(meta_in)[:, 1][0])
+            meta_rel = float(np.clip(meta_iso.predict([meta_raw])[0], 0, 1))
 
             primary_str = abs(green_p - 0.5) * 2
             regime_str = float(df_eval.iloc[i].get("adx_normalized", 0.25))
