@@ -91,7 +91,7 @@ def run_forward_test(symbol, n_bars=500, holdout_ratio=0.1):
         pred = predict(row_df, regime)
 
         actual = df["target"].iloc[i]
-        predicted_dir = 1 if pred["green_probability_percent"] >= 50 else 0
+        predicted_dir = 1 if pred["primary_direction"] == "GREEN" else 0
         correct = 1 if predicted_dir == actual else 0
 
         green_p = pred["green_probability_percent"] / 100.0
