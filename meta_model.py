@@ -1,7 +1,11 @@
 """
-Meta Model v4 — advanced meta features + trained on all OOF predictions.
+Meta Model — OOF-only, LightGBM.
 
-New features: primary_entropy, body_percentile_rank, direction_streak, rolling_vol_percentile.
+CRITICAL: This model trains exclusively on Out-of-Fold primary predictions.
+It NEVER sees in-sample primary outputs. The OOF predictions come from
+train_model.py's 3-fold TimeSeriesSplit within train_main.
+
+Target: 1 if OOF primary prediction was correct, else 0.
 """
 
 import argparse
@@ -14,12 +18,13 @@ import pandas as pd
 import joblib
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score, roc_auc_score, brier_score_loss, classification_report
+from sklearn.metrics import accuracy_score, roc_auc_score, brier_score_loss
 
 from config import (
     MODEL_DIR, META_MODEL_PATH, META_FEATURE_LIST_PATH,
     OOF_PREDICTIONS_PATH, DEFAULT_SYMBOL,
-    META_N_ESTIMATORS, META_MAX_DEPTH, META_LEARNING_RATE, META_SUBSAMPLE,
+    META_N_ESTIMATORS, META_MAX_DEPTH, META_LEARNING_RATE,
+    META_SUBSAMPLE, META_NUM_LEAVES,
     TIMESERIES_SPLITS, META_ROLLING_WINDOW, WIN_STREAK_CAP,
     ATR_PERCENTILE_WINDOW,
     LOG_LEVEL, LOG_FORMAT,
@@ -40,8 +45,6 @@ META_FEATURE_COLUMNS = [
     "spread_ratio",
     "volatility_zscore",
     "range_position",
-    "recent_model_accuracy",
-    "recent_win_streak",
     "body_percentile_rank",
     "direction_streak",
     "rolling_vol_percentile",
@@ -83,15 +86,18 @@ def _direction_streak(proba):
     return pd.Series(streaks, index=proba.index)
 
 
-def _build_clf():
+def _build_meta_clf():
     return GradientBoostingClassifier(
-        n_estimators=META_N_ESTIMATORS, max_depth=META_MAX_DEPTH,
-        learning_rate=META_LEARNING_RATE, subsample=META_SUBSAMPLE,
+        n_estimators=META_N_ESTIMATORS,
+        max_depth=META_MAX_DEPTH,
+        learning_rate=META_LEARNING_RATE,
+        subsample=META_SUBSAMPLE,
         random_state=42,
     )
 
 
 def build_meta_features(df, oof_data):
+    """Build meta features using ONLY OOF predictions (never in-sample)."""
     indices = oof_data["indices"]
     oof_proba = oof_data["oof_proba"]
     actual = oof_data["actual"]
@@ -122,10 +128,15 @@ def build_meta_features(df, oof_data):
     sub["recent_model_accuracy"] = _rolling_accuracy(correct_s, META_ROLLING_WINDOW).values
     sub["recent_win_streak"] = _compute_win_streak(correct_s, WIN_STREAK_CAP).values
 
-    # v4 advanced
-    sub["body_percentile_rank"] = sub["body_size"].rolling(ATR_PERCENTILE_WINDOW, min_periods=1).rank(pct=True) if "body_size" in sub.columns else 0.5
+    sub["body_percentile_rank"] = (
+        sub["body_size"].rolling(ATR_PERCENTILE_WINDOW, min_periods=1).rank(pct=True)
+        if "body_size" in sub.columns else 0.5
+    )
     sub["direction_streak"] = _direction_streak(proba_s).values
-    sub["rolling_vol_percentile"] = sub["atr_14"].rolling(ATR_PERCENTILE_WINDOW, min_periods=1).rank(pct=True) if "atr_14" in sub.columns else 0.5
+    sub["rolling_vol_percentile"] = (
+        sub["atr_14"].rolling(ATR_PERCENTILE_WINDOW, min_periods=1).rank(pct=True)
+        if "atr_14" in sub.columns else 0.5
+    )
 
     return sub
 
@@ -137,6 +148,7 @@ def train_meta(symbol):
 
     oof_data = joblib.load(OOF_PREDICTIONS_PATH)
     print(f"\n>> Loaded OOF predictions: {len(oof_data['oof_proba'])} rows")
+    print(f"   (These are OUT-OF-FOLD predictions — no leakage)")
 
     mtf = load_multi_tf(symbol)
     df = mtf.get("M5")
@@ -149,7 +161,7 @@ def train_meta(symbol):
     df = df.dropna(subset=["target"]).reset_index(drop=True)
     df["target"] = df["target"].astype(int)
 
-    print(">> Building meta features...")
+    print(">> Building meta features from OOF data...")
     meta_df = build_meta_features(df, oof_data)
     X_meta = meta_df[META_FEATURE_COLUMNS].fillna(0)
     y_meta = meta_df["meta_target"].values
@@ -160,11 +172,11 @@ def train_meta(symbol):
     tscv = TimeSeriesSplit(n_splits=TIMESERIES_SPLITS)
     fold_metrics = []
     print(f"\n{'='*65}")
-    print(f"  Meta Model -- {TIMESERIES_SPLITS} folds ({len(META_FEATURE_COLUMNS)} features)")
+    print(f"  Meta Model (GradientBoosting) — {TIMESERIES_SPLITS} folds ({len(META_FEATURE_COLUMNS)} features)")
     print(f"{'='*65}\n")
 
     for fold, (tr_idx, te_idx) in enumerate(tscv.split(X_meta), 1):
-        clf = _build_clf()
+        clf = _build_meta_clf()
         clf.fit(X_meta.iloc[tr_idx], y_meta[tr_idx])
         y_prob = clf.predict_proba(X_meta.iloc[te_idx])[:, 1]
         y_pred = clf.predict(X_meta.iloc[te_idx])
@@ -179,8 +191,15 @@ def train_meta(symbol):
     avg = {k: np.mean([fm[k] for fm in fold_metrics]) for k in fold_metrics[0]}
     print(f"\n  Avg: Acc={avg['acc']:.4f} AUC={avg['auc']:.4f} Brier={avg['brier']:.4f}")
 
+    # LEAKAGE CHECK: meta CV accuracy should be < 75%
+    if avg["acc"] > 0.75:
+        print(f"\n  ⚠️  WARNING: Meta CV accuracy {avg['acc']:.1%} is suspiciously high.")
+        print(f"     Honest OOF meta should be 55-65%. Check for leakage!")
+    elif avg["acc"] > 0.50:
+        print(f"\n  ✅ Meta accuracy {avg['acc']:.1%} is in expected range (no leakage)")
+
     print("\n>> Training final meta model...")
-    final = _build_clf()
+    final = _build_meta_clf()
     final.fit(X_meta, y_meta)
 
     imp = final.feature_importances_
@@ -188,7 +207,7 @@ def train_meta(symbol):
     print("\n  Meta feature importances:")
     for rank, idx in enumerate(order, 1):
         name = META_FEATURE_COLUMNS[idx] if idx < len(META_FEATURE_COLUMNS) else f"feat_{idx}"
-        print(f"    {rank:>2}. {name:<30s} {imp[idx]:.4f}")
+        print(f"    {rank:>2}. {name:<30s} {imp[idx]:.0f}")
 
     joblib.dump(final, META_MODEL_PATH)
     joblib.dump(META_FEATURE_COLUMNS, META_FEATURE_LIST_PATH)

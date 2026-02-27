@@ -6,6 +6,12 @@ Commands:
     /next <symbol>  — Wait until 5s before next M5 close, send prediction
     /status         — Show accuracy tracker status
 
+Features:
+    - Candle integrity verification (only closed candles)
+    - Race condition safe (retrain never blocks predictions)
+    - Full prediction logging
+    - Confidence reliability score in output
+
 Usage:
     set TELEGRAM_BOT_TOKEN=<your_token>
     python telegram_bot.py
@@ -31,14 +37,18 @@ from config import (
 from data_collector import fetch_multi_timeframe
 from feature_engineering import compute_features, FEATURE_COLUMNS
 from regime_detection import detect_regime
-from predict_engine import predict, load_models, log_prediction
+from predict_engine import (
+    predict, load_models, log_prediction,
+    verify_candle_closed, update_prediction_history,
+)
 from risk_filter import check_warnings
-from stability import AccuracyTracker
+from stability import AccuracyTracker, ConfidenceCorrelationTracker
 
 log = logging.getLogger("telegram_bot")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 
 _tracker = AccuracyTracker()
+_conf_tracker = ConfidenceCorrelationTracker()
 _retrain_lock = asyncio.Lock()
 
 
@@ -104,6 +114,13 @@ def _run_prediction(symbol: str) -> dict:
     if df.empty:
         raise RuntimeError("Not enough data for features.")
 
+    # Candle integrity: verify last candle is closed
+    if not verify_candle_closed(df):
+        # Use second-to-last candle
+        df = df.iloc[:-1]
+        if df.empty:
+            raise RuntimeError("No closed candle available.")
+
     regime = detect_regime(df)
     spread = _get_spread(symbol)
     risk_warnings = check_warnings(df, current_spread=spread)
@@ -127,13 +144,14 @@ def _run_prediction(symbol: str) -> dict:
 def _format_prediction(pred: dict) -> str:
     green = pred["green_probability_percent"]
     red = pred["red_probability_percent"]
-    direction = "🟢 UP" if pred["primary_direction"] == "GREEN" else "🔴 DOWN"
+    direction = "🟢 UP" if pred["suggested_direction"] == "UP" else "🔴 DOWN"
     conf = pred["final_confidence_percent"]
     meta = pred["meta_reliability_percent"]
     unc = pred["uncertainty_percent"]
-    regime = pred["regime"]
+    regime = pred.get("market_regime", pred.get("regime", "Unknown"))
     trade = pred["suggested_trade"]
     conf_level = pred["confidence_level"]
+    conf_rel = pred.get("confidence_reliability_score", 0.0)
 
     lines = [
         f"📊 *{pred['symbol']}* | M5 Prediction",
@@ -144,6 +162,7 @@ def _format_prediction(pred: dict) -> str:
         f"🔬 Meta Reliability: *{meta:.1f}%*",
         f"📉 Uncertainty: *{unc:.1f}%*",
         f"🌊 Regime: *{regime}*",
+        f"📊 Confidence Reliability: *{conf_rel:.2f}*",
         f"💡 Suggestion: *{trade}*",
     ]
 
@@ -160,17 +179,20 @@ def _format_prediction(pred: dict) -> str:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 *Candle Probability Engine*\n\n"
+        "🤖 *Adaptive Candle Probability Engine*\n\n"
         "Commands:\n"
         "  /next EURUSD — Prediction 5s before next M5 close\n"
-        "  /status — Accuracy tracker status\n\n"
-        "Predictions use only fully closed candle data.",
+        "  /status — Accuracy & confidence tracker\n\n"
+        "Features:\n"
+        "  • 5-seed XGBoost ensemble\n"
+        "  • Uncertainty-adjusted confidence\n"
+        "  • Leakage-free OOF meta model\n"
+        "  • Only closed candle data used",
         parse_mode="Markdown",
     )
 
 
 async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Parse symbol
     args = context.args
     symbol = args[0].upper() if args else DEFAULT_SYMBOL
 
@@ -178,7 +200,6 @@ async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Symbol `{symbol}` not found on MT5.")
         return
 
-    # Compute wait time
     server_time = _get_server_time()
     close_time = _next_m5_close_time(server_time)
     send_time = close_time - timedelta(seconds=TELEGRAM_SEND_BEFORE_CLOSE_SEC)
@@ -194,11 +215,9 @@ async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
-    # Wait until 5s before close
     if wait_seconds > 0:
         await asyncio.sleep(wait_seconds)
 
-    # Generate prediction
     try:
         pred = _run_prediction(symbol)
         msg = _format_prediction(pred)
@@ -209,12 +228,15 @@ async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status = _tracker.status()
+    acc_status = _tracker.status()
+    conf_status = _conf_tracker.status()
     await update.message.reply_text(
-        f"📊 *Accuracy Tracker*\n\n"
-        f"Rolling Accuracy: *{status['rolling_accuracy']:.1%}*\n"
-        f"Predictions Tracked: *{status['predictions_tracked']}*\n"
-        f"Should Retrain: *{status['should_retrain']}*",
+        f"📊 *Engine Status*\n\n"
+        f"Rolling Accuracy: *{acc_status['rolling_accuracy']:.1%}*\n"
+        f"Predictions Tracked: *{acc_status['predictions_tracked']}*\n"
+        f"Confidence Correlation: *{conf_status['confidence_correlation']:.3f}*\n"
+        f"Conf Alert: *{conf_status['alert']}*\n"
+        f"Should Retrain: *{acc_status['should_retrain']}*",
         parse_mode="Markdown",
     )
 
@@ -232,7 +254,6 @@ def main():
     if not _connect_mt5():
         print("WARNING: MT5 not connected. Predictions will fail.")
 
-    # Pre-load models
     try:
         load_models()
         log.info("Models pre-loaded.")

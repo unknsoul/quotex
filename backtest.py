@@ -1,6 +1,15 @@
 """
-Backtest v5 — Walk-forward with diverse ensemble, ATR-filtered target,
-regime-routed models, OOF meta training, cosine drift detection.
+Backtest — Honest walk-forward with leakage-free per-cycle training.
+
+Per expanding-window cycle:
+  1. Split train slice into train_main (80%) + cal_slice (20%)
+  2. Train 5 seeded XGBs on train_main
+  3. Calibrate on cal_slice
+  4. Generate OOF predictions on train_main via 3-fold TimeSeriesSplit
+  5. Train meta model (LightGBM) on OOF predictions only
+  6. Train weight learner on OOF data only
+  7. Predict on unseen test chunk
+  8. No model sees future data at any point
 
 Usage:
     python backtest.py --symbol EURUSD
@@ -16,23 +25,24 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 import numpy as np
 import pandas as pd
-import joblib
 import xgboost as xgb
-from sklearn.isotonic import IsotonicRegression
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score
+from scipy import stats
 
-from calibration import CalibratedModel, build_diverse_ensemble
+from calibration import CalibratedModel, build_seeded_xgb_ensemble
 from config import (
     DEFAULT_SYMBOL, CHART_DIR,
     META_ROLLING_WINDOW, WIN_STREAK_CAP, ATR_PERCENTILE_WINDOW,
     CONFIDENCE_HIGH_MIN, CONFIDENCE_MEDIUM_MIN,
     XGB_N_ESTIMATORS, XGB_MAX_DEPTH, XGB_LEARNING_RATE,
     XGB_SUBSAMPLE, XGB_COLSAMPLE_BYTREE, ENSEMBLE_SEEDS,
-    META_N_ESTIMATORS, META_MAX_DEPTH, META_LEARNING_RATE, META_SUBSAMPLE,
+    META_N_ESTIMATORS, META_MAX_DEPTH, META_LEARNING_RATE,
+    META_SUBSAMPLE, META_NUM_LEAVES,
     DRIFT_COSINE_THRESHOLD, TARGET_ATR_THRESHOLD,
+    CALIBRATION_SPLIT_RATIO, OOF_INTERNAL_SPLITS,
+    CONFIDENCE_CORRELATION_WINDOW, CONFIDENCE_CORRELATION_ALERT,
     LOG_LEVEL, LOG_FORMAT,
 )
 from data_collector import load_csv, load_multi_tf
@@ -46,19 +56,15 @@ log = logging.getLogger("backtest")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 
 REGIME_ENCODING = {"Trending": 0, "Ranging": 1, "High_Volatility": 2, "Low_Volatility": 3}
-TRENDING_REGIMES = {"Trending", "High_Volatility"}
-RANGING_REGIMES = {"Ranging", "Low_Volatility"}
 
 META_FEATURE_COLUMNS = [
     "primary_green_prob", "prob_distance_from_half", "primary_entropy",
     "regime_encoded", "atr_value", "spread_ratio", "volatility_zscore",
-    "range_position", "recent_model_accuracy", "recent_win_streak",
+    "range_position",
     "body_percentile_rank", "direction_streak", "rolling_vol_percentile",
 ]
 
 WEIGHT_FEATURES = ["primary_strength", "meta_reliability", "regime_strength", "uncertainty"]
-
-OOF_INTERNAL_SPLITS = 3
 
 
 def _binary_entropy(p):
@@ -129,27 +135,30 @@ def _build_meta_row(green_p, regime, row, history, dir_history):
 
 
 # =============================================================================
-#  OOF prediction generator
+#  OOF prediction generator (per-cycle, leakage-free)
 # =============================================================================
 
-def _generate_oof_predictions(X_tr, y_tr, spw, n_splits=OOF_INTERNAL_SPLITS):
-    oof = np.full(len(y_tr), np.nan)
+def _generate_oof_predictions(X_tr, y_tr, spw, seeds, n_splits=OOF_INTERNAL_SPLITS):
+    """Generate OOF predictions with 5 seeds × n_splits folds."""
+    n = len(y_tr)
+    oof_all = np.full((len(seeds), n), np.nan)
     tscv = TimeSeriesSplit(n_splits=n_splits)
 
-    for tr_idx, te_idx in tscv.split(X_tr):
-        clf = xgb.XGBClassifier(
-            n_estimators=XGB_N_ESTIMATORS, max_depth=XGB_MAX_DEPTH,
-            learning_rate=XGB_LEARNING_RATE, subsample=XGB_SUBSAMPLE,
-            colsample_bytree=XGB_COLSAMPLE_BYTREE, scale_pos_weight=spw,
-            objective="binary:logistic", eval_metric="logloss",
-            use_label_encoder=False, random_state=42, verbosity=0,
-        )
-        clf.fit(X_tr.iloc[tr_idx], y_tr[tr_idx],
-                eval_set=[(X_tr.iloc[te_idx], y_tr[te_idx])], verbose=False)
-        oof[te_idx] = clf.predict_proba(X_tr.iloc[te_idx])[:, 1]
+    for fold_idx, (tr_idx, te_idx) in enumerate(tscv.split(X_tr)):
+        for s_idx, seed in enumerate(seeds):
+            clf = xgb.XGBClassifier(
+                n_estimators=XGB_N_ESTIMATORS, max_depth=XGB_MAX_DEPTH,
+                learning_rate=XGB_LEARNING_RATE, subsample=XGB_SUBSAMPLE,
+                colsample_bytree=XGB_COLSAMPLE_BYTREE, scale_pos_weight=spw,
+                objective="binary:logistic", eval_metric="logloss",
+                use_label_encoder=False, random_state=seed, verbosity=0,
+            )
+            clf.fit(X_tr.iloc[tr_idx], y_tr[tr_idx], verbose=False)
+            oof_all[s_idx, te_idx] = clf.predict_proba(X_tr.iloc[te_idx])[:, 1]
 
-    valid_mask = ~np.isnan(oof)
-    return oof, valid_mask
+    oof_mask = ~np.isnan(oof_all[0])
+    oof_mean = np.nanmean(oof_all, axis=0)
+    return oof_mean, oof_all, oof_mask
 
 
 # =============================================================================
@@ -172,20 +181,19 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
     df_eval = df_eval.dropna(subset=["target"]).reset_index(drop=True)
     df_eval["target"] = df_eval["target"].astype(int)
 
-    # Use all rows for X/y (test uses simple target, train uses filtered)
     X_all = df_eval[FEATURE_COLUMNS]
     y_all = df_eval["target"].values
     n = len(df_eval)
     train_end = int(n * train_ratio)
     chunk = int(n * chunk_ratio)
 
-    # Also prepare the filtered dataset for train indexing
     df_filtered = df_filtered.dropna(subset=["target"]).reset_index(drop=True)
     df_filtered["target"] = df_filtered["target"].astype(int)
 
-    print(f"\n>> Walk-Forward v5 for {symbol}")
+    print(f"\n>> Walk-Forward (Leakage-Free) for {symbol}")
     print(f"   Bars: {n}, Train: {train_end}, Chunk: {chunk}")
-    print(f"   ATR threshold: {TARGET_ATR_THRESHOLD}, Diverse ensemble: 5 algos")
+    print(f"   ATR threshold: {TARGET_ATR_THRESHOLD}, Ensemble: {len(ENSEMBLE_SEEDS)} seeded XGB")
+    print(f"   Cal split: {CALIBRATION_SPLIT_RATIO:.0%}/{1-CALIBRATION_SPLIT_RATIO:.0%}, OOF splits: {OOF_INTERNAL_SPLITS}")
 
     all_results = []
     meta_history = []
@@ -196,7 +204,6 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
     drift_detector = CosineDriftDetector(DRIFT_COSINE_THRESHOLD)
     drift_reports = []
 
-    # Detect regimes for all rows
     all_regimes = detect_regime_series(df_eval)
 
     while train_end < n:
@@ -204,14 +211,10 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
         test_start = train_end
         test_end = min(train_end + chunk, n)
 
-        # Filter train data: only use ATR-significant rows for training
+        # Filter train data
         train_mask = df_filtered.index < train_end
         X_tr_filtered = df_filtered.loc[train_mask, FEATURE_COLUMNS]
         y_tr_filtered = df_filtered.loc[train_mask, "target"].values
-
-        # Also need unfiltered train data for OOF
-        X_tr_all = X_all.iloc[:train_end]
-        y_tr_all = y_all[:train_end]
 
         spw = np.sum(y_tr_filtered == 0) / max(np.sum(y_tr_filtered == 1), 1)
 
@@ -219,57 +222,24 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
         print(f"    ATR-filtered train: {len(X_tr_filtered)} / {train_end}")
 
         # =================================================================
-        # Step 1: Train diverse ensemble (global + regime routed)
+        # Step 1: Split into train_main + cal_slice (LEAKAGE-FREE)
         # =================================================================
-        cal_split = int(len(X_tr_filtered) * 0.8)
-        X_base = X_tr_filtered.iloc[:cal_split]
-        y_base = y_tr_filtered[:cal_split]
-        X_val = X_tr_filtered.iloc[cal_split:]
-        y_val = y_tr_filtered[cal_split:]
+        cal_split = int(len(X_tr_filtered) * CALIBRATION_SPLIT_RATIO)
+        X_main = X_tr_filtered.iloc[:cal_split]
+        y_main = y_tr_filtered[:cal_split]
+        X_cal = X_tr_filtered.iloc[cal_split:]
+        y_cal = y_tr_filtered[cal_split:]
 
-        # Global diverse ensemble
-        ensemble_global = build_diverse_ensemble(
-            X_base, y_base, X_val, y_val, spw, _xgb_params()
+        # =================================================================
+        # Step 2: Train ensemble on train_main, calibrate on cal_slice
+        # =================================================================
+        ensemble = build_seeded_xgb_ensemble(
+            X_main, y_main, X_cal, y_cal, spw, _xgb_params(), ENSEMBLE_SEEDS
         )
-
-        # Regime-routed ensembles
-        train_regimes = all_regimes.iloc[:train_end]
-        trending_idx = train_regimes[train_regimes.isin(TRENDING_REGIMES)].index
-        ranging_idx = train_regimes[train_regimes.isin(RANGING_REGIMES)].index
-
-        # Filter to ATR-significant within each regime
-        t_filt = [i for i in trending_idx if i in df_filtered.index[:len(X_tr_filtered)]]
-        r_filt = [i for i in ranging_idx if i in df_filtered.index[:len(X_tr_filtered)]]
-
-        if len(t_filt) >= 200:
-            X_t = X_tr_filtered.loc[X_tr_filtered.index.isin(t_filt)]
-            y_t = y_tr_filtered[X_tr_filtered.index.isin(t_filt)]
-            sp_t = int(len(y_t) * 0.8)
-            spw_t = np.sum(y_t == 0) / max(np.sum(y_t == 1), 1)
-            ensemble_trending = build_diverse_ensemble(
-                X_t.iloc[:sp_t], y_t[:sp_t],
-                X_t.iloc[sp_t:], y_t[sp_t:],
-                spw_t, _xgb_params()
-            )
-        else:
-            ensemble_trending = ensemble_global
-
-        if len(r_filt) >= 200:
-            X_r = X_tr_filtered.loc[X_tr_filtered.index.isin(r_filt)]
-            y_r = y_tr_filtered[X_tr_filtered.index.isin(r_filt)]
-            sp_r = int(len(y_r) * 0.8)
-            spw_r = np.sum(y_r == 0) / max(np.sum(y_r == 1), 1)
-            ensemble_ranging = build_diverse_ensemble(
-                X_r.iloc[:sp_r], y_r[:sp_r],
-                X_r.iloc[sp_r:], y_r[sp_r:],
-                spw_r, _xgb_params()
-            )
-        else:
-            ensemble_ranging = ensemble_global
 
         # Drift detection
         try:
-            base_est = ensemble_global[0].base_model
+            base_est = ensemble[0].base_model
             imp = base_est.feature_importances_
             cosine_sim, drifted, msg = drift_detector.check_drift(imp)
             drift_reports.append({"cycle": cycle, "cosine": cosine_sim, "drifted": drifted})
@@ -280,23 +250,34 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
             pass
 
         # =================================================================
-        # Step 2: OOF predictions (on unfiltered train for meta training)
+        # Step 3: Generate OOF predictions on train_main (LEAKAGE-FREE)
         # =================================================================
-        oof_proba, oof_mask = _generate_oof_predictions(X_tr_all, y_tr_all, spw)
+        oof_mean, oof_all, oof_mask = _generate_oof_predictions(
+            X_main, y_main, spw, ENSEMBLE_SEEDS
+        )
         oof_indices = np.where(oof_mask)[0]
-        oof_p = oof_proba[oof_mask]
-        oof_actual = y_tr_all[oof_mask]
+        oof_p = oof_mean[oof_mask]
+        oof_actual = y_main[oof_mask]
         oof_dir = (oof_p >= 0.5).astype(int)
         oof_correct = (oof_dir == oof_actual).astype(int)
 
+        # OOF per-seed for variance
+        oof_all_valid = oof_all[:, oof_mask]
+        oof_var = oof_all_valid.var(axis=0)
+        oof_var_norm = oof_var / (oof_var.max() + 1e-10)
+
         # =================================================================
-        # Step 3: Train meta model on OOF
+        # Step 4: Train meta model on OOF (LEAKAGE-FREE)
         # =================================================================
+        sub_main = df_eval.iloc[X_main.index[oof_indices]].copy().reset_index(drop=True) \
+            if len(oof_indices) > 0 else pd.DataFrame()
+
         meta_rows = []
         mh_local, dh_local = [], []
-        for k, idx in enumerate(oof_indices):
+        for k in range(len(oof_indices)):
+            idx = X_main.index[oof_indices[k]] if oof_indices[k] < len(X_main) else oof_indices[k]
             regime = _regime_for_row(df_eval, idx) if idx > 50 else "Ranging"
-            mr = _build_meta_row(oof_p[k], regime, df_eval.iloc[idx], mh_local, dh_local)
+            mr = _build_meta_row(oof_p[k], regime, df_eval.iloc[min(idx, len(df_eval)-1)], mh_local, dh_local)
             mr["meta_target"] = oof_correct[k]
             meta_rows.append(mr)
             mh_local.append(oof_correct[k])
@@ -309,16 +290,15 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
         meta_model.fit(X_meta_tr, y_meta_tr)
 
         # =================================================================
-        # Step 4: Train weight learner on OOF
+        # Step 5: Train weight learner on OOF (LEAKAGE-FREE)
         # =================================================================
-        oof_X = X_tr_all.iloc[oof_indices]
-        oof_ens_probs = np.array([m.predict_proba(oof_X)[:, 1] for m in ensemble_global])
-        oof_var = oof_ens_probs.var(axis=0)
-        oof_var_norm = oof_var / (oof_var.max() + 1e-10)
         oof_strength = np.abs(oof_p - 0.5) * 2
-
         meta_rel_oof = meta_model.predict_proba(X_meta_tr.values)[:, 1]
-        regime_str_oof = df_eval["adx_normalized"].iloc[oof_indices].values if "adx_normalized" in df_eval.columns else np.zeros(len(oof_indices))
+        regime_str_oof = np.zeros(len(oof_indices))
+        for k, oi in enumerate(oof_indices):
+            idx = X_main.index[oi] if oi < len(X_main) else oi
+            if idx < len(df_eval) and "adx_normalized" in df_eval.columns:
+                regime_str_oof[k] = df_eval["adx_normalized"].iloc[min(idx, len(df_eval)-1)]
 
         W_tr = pd.DataFrame({
             "primary_strength": oof_strength,
@@ -330,20 +310,14 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
         weight_model.fit(W_tr, oof_correct)
 
         # =================================================================
-        # Step 5: Test on unseen chunk (regime-routed)
+        # Step 6: Test on unseen chunk
         # =================================================================
         cycle_correct = 0
         for i in range(test_start, test_end):
             row_feat = X_all.iloc[[i]]
             regime = all_regimes.iloc[i] if i < len(all_regimes) else "Ranging"
 
-            # Route to regime-specific ensemble
-            if regime in TRENDING_REGIMES:
-                ens = ensemble_trending
-            else:
-                ens = ensemble_ranging
-
-            all_p = np.array([m.predict_proba(row_feat)[0][1] for m in ens])
+            all_p = np.array([m.predict_proba(row_feat)[0][1] for m in ensemble])
             green_p = float(all_p.mean())
             variance = float(all_p.var())
             norm_var = min(variance / 0.25, 1.0)
@@ -361,7 +335,8 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
                 "regime_strength": regime_str,
                 "uncertainty": norm_var,
             }])
-            confidence = float(weight_model.predict_proba(w_in)[:, 1][0]) * 100
+            weighted_score = float(weight_model.predict_proba(w_in)[:, 1][0])
+            confidence = weighted_score * (1.0 - norm_var) * 100
 
             direction = 1 if green_p >= 0.5 else 0
             correct = 1 if direction == actual else 0
@@ -400,22 +375,37 @@ def confidence_bin_analysis(results):
     return labels, accs, counts
 
 
+def compute_confidence_correlation(results, window=200):
+    """Compute Spearman correlation between confidence and correctness."""
+    if len(results) < 30:
+        return 0.0
+    recent = results[-window:]
+    confs = [r["confidence"] for r in recent]
+    corrects = [r["correct"] for r in recent]
+    corr, _ = stats.spearmanr(confs, corrects)
+    return round(float(corr) if not np.isnan(corr) else 0.0, 4)
+
+
 def stability_warnings(results, window=100):
-    warnings = []
+    warns = []
     corrects = [r["correct"] for r in results]
     if len(corrects) >= window:
         rolling = pd.Series(corrects).rolling(window).mean()
         if rolling.dropna().min() < 0.45:
-            warnings.append(f"ACCURACY COLLAPSE: min rolling {window}-bar = {rolling.dropna().min():.1%}")
+            warns.append(f"ACCURACY COLLAPSE: min rolling {window}-bar = {rolling.dropna().min():.1%}")
 
     high = [r for r in results if r["confidence"] >= CONFIDENCE_HIGH_MIN]
     if len(high) > 50:
         h_acc = sum(r["correct"] for r in high) / len(high)
         o_acc = sum(corrects) / len(corrects)
         if h_acc < o_acc:
-            warnings.append(f"OVERCONFIDENCE: high-conf {h_acc:.1%} < overall {o_acc:.1%}")
+            warns.append(f"OVERCONFIDENCE: high-conf {h_acc:.1%} < overall {o_acc:.1%}")
 
-    return warnings
+    conf_corr = compute_confidence_correlation(results)
+    if conf_corr < CONFIDENCE_CORRELATION_ALERT and len(results) > 50:
+        warns.append(f"CONFIDENCE UNCORRELATED: Spearman={conf_corr:.3f} < {CONFIDENCE_CORRELATION_ALERT}")
+
+    return warns
 
 
 def save_charts(results, equity):
@@ -431,7 +421,7 @@ def save_charts(results, equity):
 
     fig, ax = plt.subplots(figsize=(12, 4))
     ax.plot(equity, linewidth=0.8, color="#2196F3")
-    ax.set_title("Walk-Forward Equity (v5 — Diverse+Regime+ATR)", fontsize=13)
+    ax.set_title("Walk-Forward Equity (Leakage-Free)", fontsize=13)
     ax.set_xlabel("Prediction #"); ax.set_ylabel("Cumulative PnL")
     ax.grid(True, alpha=0.3); fig.tight_layout()
     fig.savefig(os.path.join(CHART_DIR, "equity_curve.png"), dpi=120)
@@ -454,7 +444,7 @@ def save_charts(results, equity):
     ax1.bar(x, [a * 100 for a in accs], color="#FF9800", alpha=0.7, label="Accuracy %")
     ax1.axhline(y=50, color="red", linestyle="--", alpha=0.5)
     ax1.set_xlabel("Confidence Bin"); ax1.set_ylabel("Accuracy %")
-    ax1.set_title("Confidence vs Accuracy (v5 Diverse+Regime)", fontsize=13)
+    ax1.set_title("Confidence vs Accuracy (Leakage-Free)", fontsize=13)
     ax1.set_xticks(x); ax1.set_xticklabels(labels, rotation=45)
     ax2 = ax1.twinx()
     ax2.plot(x, counts, "o-", color="#9C27B0", label="Count")
@@ -475,7 +465,7 @@ def print_report(result):
     overall_acc = correct / total * 100
 
     print(f"\n{'='*75}")
-    print(f"  WALK-FORWARD BACKTEST v5 (Diverse + Regime + ATR)")
+    print(f"  WALK-FORWARD BACKTEST (Leakage-Free)")
     print(f"  Cycles: {result['cycles']} | Predictions: {total}")
     print(f"{'='*75}")
 
@@ -521,6 +511,11 @@ def print_report(result):
     unc = [r["uncertainty"] for r in results]
     print(f"\n  Uncertainty: mean={np.mean(unc):.1f}% median={np.median(unc):.1f}% max={max(unc):.1f}%")
 
+    # Confidence-accuracy correlation
+    conf_corr = compute_confidence_correlation(results)
+    status = "✅" if conf_corr >= CONFIDENCE_CORRELATION_ALERT else "⚠️"
+    print(f"\n  Confidence-Accuracy Correlation: {conf_corr:.4f} {status}")
+
     if result["drift"]:
         print(f"\n  DRIFT DETECTION:")
         for d in result["drift"]:
@@ -530,10 +525,10 @@ def print_report(result):
     if equity:
         print(f"\n  Equity: final={equity[-1]:.0f} peak={max(equity):.0f}")
 
-    warnings = stability_warnings(results)
-    if warnings:
+    warns = stability_warnings(results)
+    if warns:
         print(f"\n  WARNINGS:")
-        for w in warnings:
+        for w in warns:
             print(f"    !! {w}")
     else:
         print(f"\n  No stability warnings.")

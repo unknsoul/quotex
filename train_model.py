@@ -1,10 +1,12 @@
 """
-Train Model v5 — Diverse ensemble + ATR-filtered target + regime routing.
+Train Model — Production leakage-free pipeline.
 
-Changes from v4.1:
-  - Diverse ensemble (XGB + ExtraTrees + HistGB + LogReg)
-  - ATR-threshold target (drops noise)
-  - Two sub-ensembles: trending + ranging (routed by regime)
+Architecture:
+  1. Split data into train_main (80%) + calibration_slice (20%)
+  2. Train 5 seeded XGBoost on train_main only
+  3. Calibrate each with isotonic on calibration_slice only
+  4. Generate OOF predictions from train_main via 3-fold TimeSeriesSplit
+  5. Save OOF data (proba + per-member proba) for meta/weight training
 
 Usage:
     python train_model.py --symbol EURUSD
@@ -21,27 +23,25 @@ import xgboost as xgb
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score, roc_auc_score, brier_score_loss
 
-from calibration import CalibratedModel, build_diverse_ensemble
+from calibration import CalibratedModel, build_seeded_xgb_ensemble
 
 from config import (
     MODEL_DIR, MODEL_PATH, FEATURE_LIST_PATH,
-    ENSEMBLE_MODEL_PATH, ENSEMBLE_TRENDING_PATH, ENSEMBLE_RANGING_PATH,
-    OOF_PREDICTIONS_PATH, DEFAULT_SYMBOL, TIMESERIES_SPLITS,
+    ENSEMBLE_MODEL_PATH, OOF_PREDICTIONS_PATH,
+    DEFAULT_SYMBOL, TIMESERIES_SPLITS,
     XGB_N_ESTIMATORS, XGB_MAX_DEPTH, XGB_LEARNING_RATE,
     XGB_SUBSAMPLE, XGB_COLSAMPLE_BYTREE,
+    CALIBRATION_SPLIT_RATIO, OOF_INTERNAL_SPLITS,
+    ENSEMBLE_SEEDS,
     LOG_LEVEL, LOG_FORMAT,
 )
 from data_collector import load_csv, load_multi_tf
 from feature_engineering import (
     compute_features, add_target_atr_filtered, add_target, FEATURE_COLUMNS,
 )
-from regime_detection import detect_regime_series
 
 log = logging.getLogger("train_model")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
-
-TRENDING_REGIMES = {"Trending", "High_Volatility"}
-RANGING_REGIMES = {"Ranging", "Low_Volatility"}
 
 
 def _xgb_params():
@@ -50,6 +50,38 @@ def _xgb_params():
         "learning_rate": XGB_LEARNING_RATE, "subsample": XGB_SUBSAMPLE,
         "colsample_bytree": XGB_COLSAMPLE_BYTREE,
     }
+
+
+def _generate_oof_predictions(X, y, spw, seeds, n_splits=OOF_INTERNAL_SPLITS):
+    """
+    Generate Out-of-Fold predictions using TimeSeriesSplit.
+
+    For each fold, trains 5 seeded XGBoost models on the in-fold data
+    and predicts on the out-fold data. Returns:
+      - oof_mean: mean probability across seeds for each OOF row
+      - oof_all: [n_seeds × n_samples] array of per-seed probabilities
+      - oof_mask: boolean mask of rows that have OOF predictions
+    """
+    n = len(y)
+    oof_all = np.full((len(seeds), n), np.nan)
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+
+    for fold_idx, (tr_idx, te_idx) in enumerate(tscv.split(X)):
+        for s_idx, seed in enumerate(seeds):
+            clf = xgb.XGBClassifier(
+                n_estimators=XGB_N_ESTIMATORS, max_depth=XGB_MAX_DEPTH,
+                learning_rate=XGB_LEARNING_RATE, subsample=XGB_SUBSAMPLE,
+                colsample_bytree=XGB_COLSAMPLE_BYTREE, scale_pos_weight=spw,
+                objective="binary:logistic", eval_metric="logloss",
+                use_label_encoder=False, random_state=seed, verbosity=0,
+            )
+            clf.fit(X.iloc[tr_idx], y[tr_idx], verbose=False)
+            oof_all[s_idx, te_idx] = clf.predict_proba(X.iloc[te_idx])[:, 1]
+
+    oof_mask = ~np.isnan(oof_all[0])
+    oof_mean = np.nanmean(oof_all, axis=0)
+
+    return oof_mean, oof_all, oof_mask
 
 
 def train(symbol):
@@ -68,28 +100,67 @@ def train(symbol):
     df_train = df_train.dropna(subset=["target"]).reset_index(drop=True)
     df_train["target"] = df_train["target"].astype(int)
 
-    # Simple target for OOF evaluation (all rows)
-    df_all = add_target(df)
-    df_all = df_all.dropna(subset=["target"]).reset_index(drop=True)
-    df_all["target"] = df_all["target"].astype(int)
-
     X = df_train[FEATURE_COLUMNS]
     y = df_train["target"].values
     n_green, n_red = int(y.sum()), len(y) - int(y.sum())
     spw = n_red / max(n_green, 1)
 
-    print(f"   ATR-filtered samples: {len(X)} (from {len(df_all)} total)")
+    print(f"   ATR-filtered samples: {len(X)}")
     print(f"   Green: {n_green} ({n_green/len(y):.1%}), Red: {n_red} ({n_red/len(y):.1%})")
 
     # =========================================================================
-    # Cross-validation (for metrics only, on filtered data)
+    # Split: train_main (80%) + calibration_slice (20%)
+    # =========================================================================
+    cal_split = int(len(y) * CALIBRATION_SPLIT_RATIO)
+    X_main, y_main = X.iloc[:cal_split], y[:cal_split]
+    X_cal, y_cal = X.iloc[cal_split:], y[cal_split:]
+
+    print(f"\n>> Split: train_main={cal_split}, calibration_slice={len(y) - cal_split}")
+
+    # =========================================================================
+    # Step 1: Generate OOF predictions from train_main
+    # =========================================================================
+    print(f"\n>> Generating OOF predictions ({OOF_INTERNAL_SPLITS}-fold on train_main)...")
+    oof_mean, oof_all, oof_mask = _generate_oof_predictions(
+        X_main, y_main, spw, ENSEMBLE_SEEDS
+    )
+
+    oof_valid_count = int(oof_mask.sum())
+    oof_p = oof_mean[oof_mask]
+    oof_actual = y_main[oof_mask]
+    oof_dir = (oof_p >= 0.5).astype(int)
+    oof_acc = (oof_dir == oof_actual).mean()
+    print(f"   OOF predictions: {oof_valid_count} rows, accuracy: {oof_acc:.4f}")
+
+    # Per-seed variance on OOF rows
+    oof_all_valid = oof_all[:, oof_mask]  # [n_seeds × valid_count]
+    oof_var = oof_all_valid.var(axis=0)
+    print(f"   OOF ensemble variance: mean={oof_var.mean():.4f} max={oof_var.max():.4f}")
+
+    # =========================================================================
+    # Step 2: Train production ensemble on full train_main, calibrate on cal_slice
+    # =========================================================================
+    print(f"\n>> Training 5-seeded XGBoost ensemble on train_main...")
+    ensemble = build_seeded_xgb_ensemble(
+        X_main, y_main, X_cal, y_cal, spw, _xgb_params(), ENSEMBLE_SEEDS
+    )
+    for m in ensemble:
+        p = m.predict_proba(X_cal)[:, 1]
+        brier = brier_score_loss(y_cal, p)
+        print(f"  {m.name}: Brier(cal)={brier:.4f}")
+
+    # Ensemble predictions on cal for variance check
+    cal_probs = np.array([m.predict_proba(X_cal)[:, 1] for m in ensemble])
+    cal_var = cal_probs.var(axis=0)
+    print(f"\n  Cal ensemble variance: mean={cal_var.mean():.4f} max={cal_var.max():.4f}")
+
+    # =========================================================================
+    # Step 3: Cross-validation metrics (for reporting only)
     # =========================================================================
     tscv = TimeSeriesSplit(n_splits=TIMESERIES_SPLITS)
-    oof_proba = np.full(len(y), np.nan)
     fold_metrics = []
-
     print(f"\n{'='*65}")
-    print(f"  TimeSeriesSplit -- {TIMESERIES_SPLITS} folds (ATR-filtered)")
+    print(f"  TimeSeriesSplit -- {TIMESERIES_SPLITS} folds (ATR-filtered, metrics only)")
     print(f"{'='*65}\n")
 
     for fold, (tr_idx, te_idx) in enumerate(tscv.split(X), 1):
@@ -100,11 +171,9 @@ def train(symbol):
             objective="binary:logistic", eval_metric="logloss",
             use_label_encoder=False, random_state=42, verbosity=0,
         )
-        clf.fit(X.iloc[tr_idx], y[tr_idx],
-                eval_set=[(X.iloc[te_idx], y[te_idx])], verbose=False)
+        clf.fit(X.iloc[tr_idx], y[tr_idx], verbose=False)
         y_prob = clf.predict_proba(X.iloc[te_idx])[:, 1]
         y_pred = (y_prob >= 0.5).astype(int)
-        oof_proba[te_idx] = y_prob
 
         m = {
             "acc": accuracy_score(y[te_idx], y_pred),
@@ -117,66 +186,8 @@ def train(symbol):
     avg = {k: np.mean([fm[k] for fm in fold_metrics]) for k in fold_metrics[0]}
     print(f"\n  Avg: Acc={avg['acc']:.4f} AUC={avg['auc']:.4f} Brier={avg['brier']:.4f}")
 
-    # =========================================================================
-    # Detect regimes for routing
-    # =========================================================================
-    regimes = detect_regime_series(df_train)
-    trending_mask = regimes.isin(TRENDING_REGIMES)
-    ranging_mask = regimes.isin(RANGING_REGIMES)
-
-    print(f"\n>> Regime split: Trending={trending_mask.sum()}, Ranging={ranging_mask.sum()}")
-
-    # =========================================================================
-    # Train diverse ensembles (global + regime-routed)
-    # =========================================================================
-    cal_split = int(len(y) * 0.8)
-    X_base, y_base = X.iloc[:cal_split], y[:cal_split]
-    X_cal, y_cal = X.iloc[cal_split:], y[cal_split:]
-    print(f"   Base: {cal_split}, Cal val: {len(y) - cal_split}")
-
-    # Global ensemble
-    print(f"\n>> Training global diverse ensemble...")
-    ensemble = build_diverse_ensemble(X_base, y_base, X_cal, y_cal, spw, _xgb_params())
-    for m in ensemble:
-        p = m.predict_proba(X_cal)[:, 1]
-        brier = brier_score_loss(y_cal, p)
-        print(f"  {m.name}: Brier(val)={brier:.4f}")
-
-    # Ensemble predictions for variance check
-    all_probs = np.array([m.predict_proba(X)[:, 1] for m in ensemble])
-    ens_mean = all_probs.mean(axis=0)
-    ens_var = all_probs.var(axis=0)
-    print(f"\n  Ensemble variance: mean={ens_var.mean():.4f} max={ens_var.max():.4f}")
-
-    # Regime-routed ensembles
-    for label, mask, path in [
-        ("Trending", trending_mask, ENSEMBLE_TRENDING_PATH),
-        ("Ranging", ranging_mask, ENSEMBLE_RANGING_PATH),
-    ]:
-        idx = mask[mask].index
-        if len(idx) < 200:
-            print(f"  {label}: too few samples ({len(idx)}), using global ensemble")
-            joblib.dump(ensemble, path)
-            continue
-
-        X_r = X.iloc[idx]
-        y_r = y[idx]
-        split_r = int(len(y_r) * 0.8)
-        spw_r = np.sum(y_r == 0) / max(np.sum(y_r == 1), 1)
-        print(f"\n>> Training {label} ensemble ({len(idx)} samples)...")
-        ens_r = build_diverse_ensemble(
-            X_r.iloc[:split_r], y_r[:split_r],
-            X_r.iloc[split_r:], y_r[split_r:],
-            spw_r, _xgb_params()
-        )
-        for m in ens_r:
-            p = m.predict_proba(X_r.iloc[split_r:])[:, 1]
-            brier = brier_score_loss(y_r[split_r:], p)
-            print(f"  {m.name}: Brier(val)={brier:.4f}")
-        joblib.dump(ens_r, path)
-        print(f"  Saved -> {path}")
-
     # Feature importances
+    imp = None
     try:
         base_est = ensemble[0].base_model
         imp = base_est.feature_importances_
@@ -186,7 +197,7 @@ def train(symbol):
             name = FEATURE_COLUMNS[idx] if idx < len(FEATURE_COLUMNS) else f"feat_{idx}"
             print(f"    {rank:>2}. {name:<26s} {imp[idx]:.4f}")
     except Exception:
-        imp = None
+        pass
 
     # =========================================================================
     # Save
@@ -195,20 +206,23 @@ def train(symbol):
     joblib.dump(ensemble[0], MODEL_PATH)
     joblib.dump(ensemble, ENSEMBLE_MODEL_PATH)
     joblib.dump(FEATURE_COLUMNS, FEATURE_LIST_PATH)
-    print(f"\n>> Saved global ensemble -> {ENSEMBLE_MODEL_PATH}")
+    print(f"\n>> Saved ensemble ({len(ensemble)} models) -> {ENSEMBLE_MODEL_PATH}")
 
-    # OOF predictions for meta model
-    oof_mask = ~np.isnan(oof_proba)
+    # OOF data for meta + weight training
+    oof_indices = np.where(oof_mask)[0]
     oof_data = {
-        "oof_proba": oof_proba[oof_mask],
-        "oof_pred": (oof_proba[oof_mask] >= 0.5).astype(int),
-        "actual": y[oof_mask],
-        "indices": np.where(oof_mask)[0],
+        "oof_proba": oof_p,                          # mean OOF proba
+        "oof_all_proba": oof_all_valid,               # [n_seeds × valid_count] per-seed
+        "oof_pred": (oof_p >= 0.5).astype(int),
+        "actual": oof_actual,
+        "indices": oof_indices,
         "feature_importances": imp.tolist() if imp is not None else [],
         "feature_names": list(FEATURE_COLUMNS),
+        "df_train_len": len(X),                       # for integrity check
     }
     joblib.dump(oof_data, OOF_PREDICTIONS_PATH)
-    print(f">> Saved OOF predictions -> {OOF_PREDICTIONS_PATH} ({int(oof_mask.sum())} rows)")
+    print(f">> Saved OOF predictions -> {OOF_PREDICTIONS_PATH} ({oof_valid_count} rows)")
+    print(f"   OOF data includes per-seed probabilities for variance-based uncertainty")
     print(f"\n>> Done. Next: python meta_model.py --symbol {symbol}")
 
 

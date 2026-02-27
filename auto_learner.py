@@ -1,5 +1,5 @@
 """
-Auto-Learning Controller — semi-automatic retrain with validation safeguard.
+Auto-Learning Controller — production-safe retrain with validation safeguard.
 
 Monitors:
   - Rolling accuracy (< 52% triggers retrain)
@@ -7,10 +7,10 @@ Monitors:
   - Feature importance drift (cosine < threshold triggers retrain)
 
 Retrain process:
-  1. Train new model on latest data
-  2. Validate on holdout slice
-  3. Compare with current production model
-  4. Deploy only if new model is better
+  1. Backup current models
+  2. Train new models (never blocks predictions)
+  3. Validate on holdout slice
+  4. Deploy only if new model >= old model - 2pp
   5. Rollback if worse
 
 Usage:
@@ -35,9 +35,8 @@ from scipy import stats
 
 from config import (
     DEFAULT_SYMBOL, MODEL_DIR, MODEL_BACKUP_DIR,
-    ENSEMBLE_MODEL_PATH, ENSEMBLE_TRENDING_PATH, ENSEMBLE_RANGING_PATH,
-    META_MODEL_PATH, META_FEATURE_LIST_PATH, WEIGHT_MODEL_PATH,
-    OOF_PREDICTIONS_PATH, FEATURE_LIST_PATH,
+    ENSEMBLE_MODEL_PATH, META_MODEL_PATH, META_FEATURE_LIST_PATH,
+    WEIGHT_MODEL_PATH, OOF_PREDICTIONS_PATH, FEATURE_LIST_PATH,
     AUTO_RETRAIN_ACCURACY_TRIGGER, AUTO_RETRAIN_CORRELATION_TRIGGER,
     PREDICTION_LOG_CSV, DATA_BUFFER_SIZE,
     DRIFT_COSINE_THRESHOLD,
@@ -62,19 +61,6 @@ def load_prediction_log():
         return pd.DataFrame()
     df = pd.read_csv(PREDICTION_LOG_CSV)
     return df
-
-
-def compute_rolling_accuracy(df, window=100):
-    """Compute rolling accuracy from prediction log."""
-    if "suggested_trade" not in df.columns:
-        return None, 0
-    total = len(df)
-    if total < window:
-        return None, total
-    recent = df.tail(window)
-    # Approximate: we don't have actual outcomes in the CSV
-    # But we have confidence and direction — this is a placeholder
-    return None, total
 
 
 def compute_confidence_correlation(predictions, actuals, confidences):
@@ -148,9 +134,8 @@ class PerformanceMonitor:
 # =============================================================================
 
 MODEL_FILES = [
-    ENSEMBLE_MODEL_PATH, ENSEMBLE_TRENDING_PATH, ENSEMBLE_RANGING_PATH,
-    META_MODEL_PATH, META_FEATURE_LIST_PATH, WEIGHT_MODEL_PATH,
-    OOF_PREDICTIONS_PATH, FEATURE_LIST_PATH,
+    ENSEMBLE_MODEL_PATH, META_MODEL_PATH, META_FEATURE_LIST_PATH,
+    WEIGHT_MODEL_PATH, OOF_PREDICTIONS_PATH, FEATURE_LIST_PATH,
 ]
 
 
@@ -185,11 +170,13 @@ def rollback_models(backup_dir):
 
 def retrain(symbol, validate=True):
     """
-    Full retrain pipeline:
-    1. Backup current models
-    2. Train new models
-    3. Validate on holdout
-    4. Deploy only if better
+    Full retrain pipeline (NEVER blocks predictions):
+    1. Set retrain flag
+    2. Backup current models
+    3. Train new models
+    4. Validate on holdout
+    5. Deploy only if better
+    6. Reload cached models
     """
     global _retrain_in_progress
 
@@ -199,6 +186,13 @@ def retrain(symbol, validate=True):
             return False
         _retrain_in_progress = True
 
+    # Notify predict_engine
+    try:
+        from predict_engine import set_retrain_flag, reload_models as pe_reload
+        set_retrain_flag(True)
+    except ImportError:
+        pe_reload = None
+
     try:
         log.info("=" * 60)
         log.info("AUTO-RETRAIN STARTED for %s", symbol)
@@ -207,7 +201,7 @@ def retrain(symbol, validate=True):
         # Step 1: Backup
         backup_dir = backup_current_models()
 
-        # Step 2: Get current model performance (on last 500 bars)
+        # Step 2: Get current model performance
         old_score = _evaluate_current_model(symbol)
         log.info("Current model score: %.4f", old_score if old_score else 0)
 
@@ -236,6 +230,10 @@ def retrain(symbol, validate=True):
                 rollback_models(backup_dir)
                 return False
 
+        # Step 5: Reload models in predict_engine
+        if pe_reload:
+            pe_reload()
+
         log.info("=" * 60)
         log.info("AUTO-RETRAIN COMPLETE — new models deployed.")
         log.info("=" * 60)
@@ -247,6 +245,11 @@ def retrain(symbol, validate=True):
     finally:
         with _retrain_lock:
             _retrain_in_progress = False
+        try:
+            from predict_engine import set_retrain_flag
+            set_retrain_flag(False)
+        except ImportError:
+            pass
 
 
 def retrain_in_background(symbol):

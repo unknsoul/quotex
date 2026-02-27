@@ -1,6 +1,7 @@
 """
-Central configuration v4 — Quant Stability & Precision.
-Ensemble models, continuous regime, dynamic weights.
+Central configuration — Production-Ready Adaptive Candle Probability Engine.
+
+Leakage-free pipeline: 5 seeded XGBoost + isotonic calibration + OOF meta/weight.
 """
 
 import os
@@ -15,8 +16,6 @@ CHART_DIR = os.path.join(BASE_DIR, "charts")
 MODEL_PATH = os.path.join(MODEL_DIR, "primary_model.pkl")
 FEATURE_LIST_PATH = os.path.join(MODEL_DIR, "primary_features.pkl")
 ENSEMBLE_MODEL_PATH = os.path.join(MODEL_DIR, "ensemble_models.pkl")
-ENSEMBLE_TRENDING_PATH = os.path.join(MODEL_DIR, "ensemble_trending.pkl")
-ENSEMBLE_RANGING_PATH = os.path.join(MODEL_DIR, "ensemble_ranging.pkl")
 META_MODEL_PATH = os.path.join(MODEL_DIR, "meta_model.pkl")
 META_FEATURE_LIST_PATH = os.path.join(MODEL_DIR, "meta_features.pkl")
 OOF_PREDICTIONS_PATH = os.path.join(MODEL_DIR, "oof_predictions.pkl")
@@ -63,7 +62,7 @@ RETURN_LOOKBACK = 5
 RANGE_POSITION_WINDOW = 20
 LIQUIDITY_SWEEP_WINDOW = 10
 VOLATILITY_ZSCORE_WINDOW = 50
-ATR_PERCENTILE_WINDOW = 100  # v4: for ATR percentile rank
+ATR_PERCENTILE_WINDOW = 100
 
 # --- v5 Target Threshold -----------------------------------------------------
 TARGET_ATR_THRESHOLD = 0.3  # only train on moves > 0.3 × ATR
@@ -94,7 +93,7 @@ MIN_ATR_CLOSE_RATIO = 0.0003
 SPREAD_PERCENTILE = 90
 ATR_SPIKE_MULTIPLIER = 3.0
 
-# --- Ensemble (v4) ----------------------------------------------------------
+# --- Ensemble (5 seeded XGBoost) --------------------------------------------
 ENSEMBLE_SEEDS = [42, 123, 456, 789, 1024]
 ENSEMBLE_SIZE = len(ENSEMBLE_SEEDS)
 
@@ -106,11 +105,23 @@ XGB_SUBSAMPLE = 0.8
 XGB_COLSAMPLE_BYTREE = 0.8
 TIMESERIES_SPLITS = 5
 
-# --- Meta Model Hyperparams -------------------------------------------------
+# --- Calibration Split -------------------------------------------------------
+CALIBRATION_SPLIT_RATIO = 0.8  # 80% train_main, 20% calibration
+
+# --- OOF Settings ------------------------------------------------------------
+OOF_INTERNAL_SPLITS = 3  # For generating OOF predictions within train_main
+
+# --- Meta Model (LightGBM) --------------------------------------------------
 META_N_ESTIMATORS = 200
 META_MAX_DEPTH = 4
 META_LEARNING_RATE = 0.05
 META_SUBSAMPLE = 0.8
+META_NUM_LEAVES = 31
+
+# --- Confidence Correlation Monitoring ---------------------------------------
+CONFIDENCE_CORRELATION_WINDOW = 200
+CONFIDENCE_CORRELATION_ALERT = 0.1
+ROLLING_CONFIDENCE_WINDOW = 100
 
 # --- Stability ---------------------------------------------------------------
 PROBABILITY_SMOOTHING_SPAN = 5
@@ -118,7 +129,7 @@ ROLLING_ACCURACY_WINDOW = 50
 RETRAINING_ACCURACY_TRIGGER = 0.48
 META_ROLLING_WINDOW = 50
 WIN_STREAK_CAP = 10
-DRIFT_COSINE_THRESHOLD = 0.85  # v4: alert if cosine sim < this
+DRIFT_COSINE_THRESHOLD = 0.85
 
 # --- Session Hours (UTC) ----------------------------------------------------
 SESSION_ASIA = (0, 8)
@@ -138,4 +149,3 @@ AUTO_RETRAIN_ACCURACY_TRIGGER = 0.52
 AUTO_RETRAIN_CORRELATION_TRIGGER = 0.1
 DATA_BUFFER_SIZE = 20000
 MODEL_BACKUP_DIR = os.path.join(BASE_DIR, "models", "backup")
-

@@ -1,15 +1,18 @@
 """
-Stability v4 — probability smoothing, accuracy tracking, cosine drift detection.
+Stability — probability smoothing, accuracy tracking, cosine drift,
+confidence-accuracy correlation monitoring.
 """
 
 import logging
 import numpy as np
 import pandas as pd
 from collections import deque
+from scipy import stats
 
 from config import (
     PROBABILITY_SMOOTHING_SPAN, ROLLING_ACCURACY_WINDOW,
     RETRAINING_ACCURACY_TRIGGER, DRIFT_COSINE_THRESHOLD,
+    CONFIDENCE_CORRELATION_WINDOW, CONFIDENCE_CORRELATION_ALERT,
     LOG_LEVEL, LOG_FORMAT,
 )
 
@@ -60,6 +63,47 @@ class AccuracyTracker:
         }
 
 
+class ConfidenceCorrelationTracker:
+    """
+    Track rolling Spearman correlation between confidence and correctness.
+    Alert if correlation drops below threshold (indicates confidence is unreliable).
+    """
+
+    def __init__(self, window=CONFIDENCE_CORRELATION_WINDOW,
+                 alert_threshold=CONFIDENCE_CORRELATION_ALERT):
+        self.window = window
+        self.alert_threshold = alert_threshold
+        self._confidences = deque(maxlen=window * 2)
+        self._corrects = deque(maxlen=window * 2)
+
+    def record(self, confidence, was_correct):
+        self._confidences.append(confidence)
+        self._corrects.append(1 if was_correct else 0)
+
+    @property
+    def correlation(self):
+        if len(self._confidences) < 30:
+            return 0.5
+        recent_c = list(self._confidences)[-self.window:]
+        recent_r = list(self._corrects)[-self.window:]
+        corr, _ = stats.spearmanr(recent_c, recent_r)
+        return float(corr) if not np.isnan(corr) else 0.0
+
+    @property
+    def alert(self):
+        if len(self._confidences) < 50:
+            return False
+        return self.correlation < self.alert_threshold
+
+    def status(self):
+        corr = self.correlation
+        return {
+            "confidence_correlation": round(corr, 4),
+            "alert": self.alert,
+            "samples": len(self._confidences),
+        }
+
+
 class CosineDriftDetector:
     """
     Monitor feature importance drift via cosine similarity.
@@ -83,7 +127,6 @@ class CosineDriftDetector:
         if len(current) != len(self._baseline):
             return 0.0, True, "Feature count changed"
 
-        # Cosine similarity
         dot = np.dot(self._baseline, current)
         norm_a = np.linalg.norm(self._baseline)
         norm_b = np.linalg.norm(current)

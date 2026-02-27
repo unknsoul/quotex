@@ -1,7 +1,10 @@
 """
-Weight Learner v4 — learns optimal confidence weighting from validation data.
+Weight Learner — OOF-only, no in-sample bias.
 
-Replaces fixed strength × reliability formula with a trained LogisticRegression.
+CRITICAL: Uses ONLY OOF predictions from train_model.py.
+Does NOT re-run ensemble on OOF rows (that would be in-sample).
+Instead, uses the per-seed OOF probabilities stored in oof_data.pkl
+to compute variance-based uncertainty.
 
 Input features: primary_strength, meta_reliability, regime_strength, uncertainty
 Output: optimal weighted confidence (probability of being correct)
@@ -20,19 +23,18 @@ import pandas as pd
 import joblib
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score, roc_auc_score, brier_score_loss
+from sklearn.metrics import accuracy_score, roc_auc_score
 
 from config import (
     MODEL_DIR, WEIGHT_MODEL_PATH, OOF_PREDICTIONS_PATH,
-    ENSEMBLE_MODEL_PATH, META_MODEL_PATH, META_FEATURE_LIST_PATH,
-    FEATURE_LIST_PATH, DEFAULT_SYMBOL,
+    META_MODEL_PATH, META_FEATURE_LIST_PATH,
+    DEFAULT_SYMBOL,
     META_ROLLING_WINDOW, WIN_STREAK_CAP, ATR_PERCENTILE_WINDOW,
     LOG_LEVEL, LOG_FORMAT,
 )
 from data_collector import load_csv, load_multi_tf
 from feature_engineering import compute_features, add_target, FEATURE_COLUMNS
 from regime_detection import detect_regime_series
-from calibration import CalibratedModel  # needed for joblib.load
 
 log = logging.getLogger("weight_learner")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
@@ -53,55 +55,52 @@ def _binary_entropy(p):
 
 
 def train_weights(symbol):
-    # Load OOF + models
+    # Load OOF + meta model
     if not os.path.exists(OOF_PREDICTIONS_PATH):
         print("ERROR: No OOF predictions. Run train_model.py first.")
-        sys.exit(1)
-    if not os.path.exists(ENSEMBLE_MODEL_PATH):
-        print("ERROR: No ensemble models. Run train_model.py first.")
         sys.exit(1)
     if not os.path.exists(META_MODEL_PATH):
         print("ERROR: No meta model. Run meta_model.py first.")
         sys.exit(1)
 
     oof_data = joblib.load(OOF_PREDICTIONS_PATH)
-    ensemble = joblib.load(ENSEMBLE_MODEL_PATH)
     meta_model = joblib.load(META_MODEL_PATH)
     meta_feat_cols = joblib.load(META_FEATURE_LIST_PATH)
 
-    # Load data
+    oof_proba = oof_data["oof_proba"]       # OOF mean probabilities
+    oof_all = oof_data["oof_all_proba"]     # [n_seeds × valid_count] per-seed OOF proba
+    actual = oof_data["actual"]
+    indices = oof_data["indices"]
+
+    print(f"\n>> Loaded OOF data: {len(oof_proba)} rows, {oof_all.shape[0]} seeds")
+    print(f"   (Using stored per-seed OOF probabilities — no re-inference)")
+
+    # Load features for meta feature building
     mtf = load_multi_tf(symbol)
     df = mtf.get("M5")
     if df is None:
         df = load_csv(symbol, "M5")
     m15, h1 = mtf.get("M15"), mtf.get("H1")
-
     df = compute_features(df, m15_df=m15, h1_df=h1)
     df = add_target(df)
     df = df.dropna(subset=["target"]).reset_index(drop=True)
     df["target"] = df["target"].astype(int)
 
-    indices = oof_data["indices"]
-    actual = oof_data["actual"]
     sub = df.iloc[indices].copy().reset_index(drop=True)
 
-    print(f"\n>> Building weight training data ({len(indices)} rows)...")
-
-    # Get ensemble predictions on OOF rows
-    X_oof = sub[FEATURE_COLUMNS]
-    all_probs = np.array([m.predict_proba(X_oof)[:, 1] for m in ensemble])
-    ens_mean = all_probs.mean(axis=0)
-    ens_var = all_probs.var(axis=0)
-    ens_var_norm = ens_var / (ens_var.max() + 1e-10)
-
-    # Primary strength
-    primary_strength = np.abs(ens_mean - 0.5) * 2
-
-    # Meta reliability (build meta features for each row)
-    proba_s = pd.Series(ens_mean, index=sub.index)
-    primary_dir = (ens_mean >= 0.5).astype(int)
+    # Compute correctness from OOF predictions
+    primary_dir = (oof_proba >= 0.5).astype(int)
     correct = (primary_dir == actual).astype(int)
 
+    # Uncertainty from stored per-seed OOF probabilities (NOT from production ensemble)
+    oof_var = oof_all.var(axis=0)
+    oof_var_norm = oof_var / (oof_var.max() + 1e-10)
+
+    # Primary strength from OOF
+    primary_strength = np.abs(oof_proba - 0.5) * 2
+
+    # Build meta features for OOF rows
+    proba_s = pd.Series(oof_proba, index=sub.index)
     regimes = detect_regime_series(sub)
     regime_enc = regimes.map(REGIME_ENCODING).fillna(1).astype(int)
 
@@ -115,7 +114,7 @@ def train_weights(symbol):
 
     dir_streaks = []
     ds = 1
-    dirs = (ens_mean >= 0.5).astype(int)
+    dirs = (oof_proba >= 0.5).astype(int)
     for i in range(len(dirs)):
         if i > 0 and dirs[i] == dirs[i - 1]:
             ds += 1
@@ -124,9 +123,9 @@ def train_weights(symbol):
         dir_streaks.append(ds)
 
     meta_rows = pd.DataFrame({
-        "primary_green_prob": ens_mean,
-        "prob_distance_from_half": np.abs(ens_mean - 0.5),
-        "primary_entropy": _binary_entropy(ens_mean),
+        "primary_green_prob": oof_proba,
+        "prob_distance_from_half": np.abs(oof_proba - 0.5),
+        "primary_entropy": _binary_entropy(oof_proba),
         "regime_encoded": regime_enc.values,
         "atr_value": sub["atr_14"].values if "atr_14" in sub.columns else 0,
         "spread_ratio": 0.0,
@@ -134,14 +133,20 @@ def train_weights(symbol):
         "range_position": sub["range_position"].values if "range_position" in sub.columns else 0.5,
         "recent_model_accuracy": rolling_acc.values,
         "recent_win_streak": win_streaks,
-        "body_percentile_rank": sub["body_size"].rolling(ATR_PERCENTILE_WINDOW, min_periods=1).rank(pct=True).values if "body_size" in sub.columns else 0.5,
+        "body_percentile_rank": (
+            sub["body_size"].rolling(ATR_PERCENTILE_WINDOW, min_periods=1).rank(pct=True).values
+            if "body_size" in sub.columns else 0.5
+        ),
         "direction_streak": dir_streaks,
-        "rolling_vol_percentile": sub["atr_14"].rolling(ATR_PERCENTILE_WINDOW, min_periods=1).rank(pct=True).values if "atr_14" in sub.columns else 0.5,
+        "rolling_vol_percentile": (
+            sub["atr_14"].rolling(ATR_PERCENTILE_WINDOW, min_periods=1).rank(pct=True).values
+            if "atr_14" in sub.columns else 0.5
+        ),
     })
     meta_input = meta_rows[meta_feat_cols].fillna(0)
     meta_proba = meta_model.predict_proba(meta_input.values)[:, 1]
 
-    # Regime strength (continuous: use adx_normalized)
+    # Regime strength
     regime_strength = sub["adx_normalized"].values if "adx_normalized" in sub.columns else np.zeros(len(sub))
 
     # Build weight training data
@@ -149,10 +154,11 @@ def train_weights(symbol):
         "primary_strength": primary_strength,
         "meta_reliability": meta_proba,
         "regime_strength": regime_strength,
-        "uncertainty": ens_var_norm,
+        "uncertainty": oof_var_norm,
     })
     y_weight = correct
 
+    print(f"\n>> Building weight training data ({len(indices)} rows)...")
     print(f"   X shape: {X_weight.shape}")
     print(f"   Correct: {int(y_weight.sum())} ({y_weight.mean():.1%})")
 
@@ -160,7 +166,7 @@ def train_weights(symbol):
     tscv = TimeSeriesSplit(n_splits=5)
     fold_metrics = []
     print(f"\n{'='*50}")
-    print(f"  Weight Learner -- 5 folds")
+    print(f"  Weight Learner — 5 folds")
     print(f"{'='*50}\n")
 
     for fold, (tr, te) in enumerate(tscv.split(X_weight), 1):
@@ -187,6 +193,12 @@ def train_weights(symbol):
     coefs = dict(zip(WEIGHT_FEATURES, final.coef_[0]))
     print(f"  Coefficients: {coefs}")
     print(f"  Intercept: {final.intercept_[0]:.4f}")
+
+    # Verify uncertainty coef is negative (higher uncertainty → lower confidence)
+    if coefs["uncertainty"] < 0:
+        print("  ✅ Uncertainty coefficient is negative (correct)")
+    else:
+        print("  ⚠️  Uncertainty coefficient is positive (unexpected)")
 
     joblib.dump(final, WEIGHT_MODEL_PATH)
     print(f"\n>> Saved weight model -> {WEIGHT_MODEL_PATH}")
