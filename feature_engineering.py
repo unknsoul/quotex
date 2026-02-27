@@ -1,8 +1,10 @@
 """
-Feature Engineering v4 — continuous regime features + all prior features.
+Feature Engineering v5 — structural features + all prior features.
 
-New: adx_normalized, ema_slope_magnitude, atr_percentile_rank (soft regime).
-Total: 35 features.
+v5 adds: liquidity sweep signals (sweep_high, sweep_low), compression breakout,
+return skew/kurtosis, directional imbalance, regime transition momentum,
+multi-horizon confirmation.
+Total: 47 features.
 """
 
 import numpy as np
@@ -43,6 +45,19 @@ FEATURE_COLUMNS = [
     "h1_trend_direction", "h1_ema_alignment", "h1_atr", "m15_momentum",
     # Continuous regime (v4) (3)
     "adx_normalized", "ema_slope_magnitude", "atr_percentile_rank",
+    # ---- v5: Structural features (12) ----
+    # Liquidity sweep detection
+    "sweep_high", "sweep_low",
+    # Compression breakout
+    "compression_ratio",
+    # Return distribution shape
+    "rolling_skew_20", "rolling_kurt_20",
+    # Directional imbalance
+    "bullish_count_10", "bearish_count_10", "imbalance_10",
+    # Regime transition momentum
+    "delta_adx_5", "delta_atr_5",
+    # Multi-horizon confirmation
+    "return_2bar_momentum", "return_3bar_trend",
 ]
 
 
@@ -259,6 +274,39 @@ def compute_features(df, m15_df=None, h1_df=None):
     df["adx_normalized"] = df["adx"] / 100.0
     df["ema_slope_magnitude"] = df["ema_slope"].abs()
     df["atr_percentile_rank"] = _atr_percentile_rank(df["atr_14"], ATR_PERCENTILE_WINDOW)
+
+    # ---- v5: Structural features ----
+    returns = c.pct_change()
+
+    # Liquidity sweep detection (separate high/low sweeps)
+    roll_high_20 = h.rolling(20).max().shift(1)
+    roll_low_20 = l.rolling(20).min().shift(1)
+    df["sweep_high"] = ((h > roll_high_20) & (c < h)).astype(int)  # fake breakout up
+    df["sweep_low"] = ((l < roll_low_20) & (c > l)).astype(int)    # fake breakout down
+
+    # Compression breakout probability
+    range_width = h.rolling(20).max() - l.rolling(20).min()
+    range_mean_100 = range_width.rolling(100, min_periods=20).mean()
+    df["compression_ratio"] = range_width / (range_mean_100 + 1e-10)
+
+    # Return distribution shape
+    df["rolling_skew_20"] = returns.rolling(20, min_periods=10).skew()
+    df["rolling_kurt_20"] = returns.rolling(20, min_periods=10).kurt()
+
+    # Directional imbalance
+    is_bull = (c > o).astype(int)
+    is_bear = (c < o).astype(int)
+    df["bullish_count_10"] = is_bull.rolling(10, min_periods=1).sum()
+    df["bearish_count_10"] = is_bear.rolling(10, min_periods=1).sum()
+    df["imbalance_10"] = df["bullish_count_10"] - df["bearish_count_10"]
+
+    # Regime transition momentum
+    df["delta_adx_5"] = df["adx"] - df["adx"].shift(5)
+    df["delta_atr_5"] = df["atr_14"] - df["atr_14"].shift(5)
+
+    # Multi-horizon confirmation
+    df["return_2bar_momentum"] = returns.rolling(2, min_periods=1).sum()
+    df["return_3bar_trend"] = c.pct_change(3)
 
     # Drop warmup
     warmup = max(EMA_200, BB_PERIOD, ATR_PERIOD, RSI_PERIOD, MACD_SLOW,
