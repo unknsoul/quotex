@@ -9,6 +9,10 @@ Usage:
 import argparse
 import os
 import logging
+import warnings
+
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 import numpy as np
 import pandas as pd
@@ -330,7 +334,7 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
         # =================================================================
         cycle_correct = 0
         for i in range(test_start, test_end):
-            row_feat = X_all.iloc[i].values.reshape(1, -1)
+            row_feat = X_all.iloc[[i]]
             regime = all_regimes.iloc[i] if i < len(all_regimes) else "Ranging"
 
             # Route to regime-specific ensemble
@@ -347,7 +351,7 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
 
             meta_row = _build_meta_row(green_p, regime, df_eval.iloc[i], meta_history, dir_history)
             meta_in = pd.DataFrame([meta_row])[META_FEATURE_COLUMNS]
-            meta_rel = float(meta_model.predict_proba(meta_in.values)[0][1])
+            meta_rel = float(meta_model.predict_proba(meta_in)[:, 1][0])
 
             primary_str = abs(green_p - 0.5) * 2
             regime_str = float(df_eval.iloc[i].get("adx_normalized", 0.25))
