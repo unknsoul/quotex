@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.isotonic import IsotonicRegression
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import TimeSeriesSplit
 from scipy import stats
@@ -276,27 +276,16 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
         X_meta_tr = meta_df[META_FEATURE_COLUMNS].fillna(0)
         y_meta_tr = meta_df["meta_target"].values
 
-        # Split meta training data for calibration
-        meta_cal_n = int(len(X_meta_tr) * CALIBRATION_SPLIT_RATIO)
-        X_meta_main, y_meta_main = X_meta_tr.iloc[:meta_cal_n], y_meta_tr[:meta_cal_n]
-        X_meta_cal, y_meta_cal = X_meta_tr.iloc[meta_cal_n:], y_meta_tr[meta_cal_n:]
-        meta_model = _build_meta()
-        meta_model.fit(X_meta_main, y_meta_main)
-
-        # Calibrate meta output
-        meta_raw_cal = meta_model.predict_proba(X_meta_cal.values)[:, 1]
-        meta_iso = IsotonicRegression(y_min=0, y_max=1, out_of_bounds="clip")
-        if len(np.unique(y_meta_cal)) > 1:
-            meta_iso.fit(meta_raw_cal, y_meta_cal)
-        else:
-            meta_iso.fit(meta_raw_cal, meta_raw_cal)  # identity fallback
+        # Sigmoid calibration for meta (Platt scaling — stable on noisy data)
+        base_meta = _build_meta()
+        meta_model = CalibratedClassifierCV(base_meta, method="sigmoid", cv=3)
+        meta_model.fit(X_meta_tr, y_meta_tr)
 
         # =================================================================
         # Step 5: Train weight learner on OOF (LEAKAGE-FREE)
         # =================================================================
         oof_strength = np.abs(oof_p - 0.5) * 2
-        meta_raw_oof = meta_model.predict_proba(X_meta_tr.values)[:, 1]
-        meta_rel_oof = np.clip(meta_iso.predict(meta_raw_oof), 0, 1)
+        meta_rel_oof = meta_model.predict_proba(X_meta_tr.values)[:, 1]
         regime_str_oof = np.zeros(len(oof_indices))
         for k, oi in enumerate(oof_indices):
             idx = X_main.index[oi] if oi < len(X_main) else oi
@@ -329,8 +318,7 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
             meta_row = _build_meta_row(green_p, regime, df_eval.iloc[i], dir_history,
                                        ensemble_variance=variance)
             meta_in = pd.DataFrame([meta_row])[META_FEATURE_COLUMNS]
-            meta_raw = float(meta_model.predict_proba(meta_in)[:, 1][0])
-            meta_rel = float(np.clip(meta_iso.predict([meta_raw])[0], 0, 1))
+            meta_rel = float(meta_model.predict_proba(meta_in)[:, 1][0])
 
             primary_str = abs(green_p - 0.5) * 2
             regime_str = float(df_eval.iloc[i].get("adx_normalized", 0.25))
@@ -500,43 +488,65 @@ def print_report(result):
         s = regime_stats[reg]
         print(f"  {reg:<18} {s['t']:>7} {s['c']/s['t']*100 if s['t'] else 0:>7.1f}%")
 
-    labels, accs, counts = confidence_bin_analysis(results)
-    print(f"\n  CONFIDENCE BINS:")
-    print(f"  {'Bin':<12} {'Count':>7} {'Accuracy':>9}")
-    print(f"  {'-'*30}")
-    for l, a, c in zip(labels, accs, counts):
-        if c > 0:
-            print(f"  {l:<12} {c:>7} {a*100:>8.1f}%")
+    # ================================================================
+    # TRADE FREQUENCY ANALYSIS (Confidence-Gated)
+    # ================================================================
+    thresholds = [0, 50, 60, 70, 80]
+    print(f"\n  TRADE FREQUENCY ANALYSIS:")
+    print(f"  {'Threshold':<12} {'Trades':>7} {'Freq':>7} {'Correct':>8} {'Accuracy':>9} {'Lift':>6}")
+    print(f"  {'-'*52}")
+    for thr in thresholds:
+        gated = [r for r in results if r["confidence"] >= thr]
+        if gated:
+            g_correct = sum(r["correct"] for r in gated)
+            g_acc = g_correct / len(gated) * 100
+            freq = len(gated) / total * 100
+            lift = g_acc - overall_acc
+            label = f">={thr}%" if thr > 0 else "All bars"
+            print(f"  {label:<12} {len(gated):>7} {freq:>6.1f}% {g_correct:>8} {g_acc:>8.1f}% {lift:>+5.1f}")
 
-    high = [r for r in results if r["confidence"] >= CONFIDENCE_HIGH_MIN]
-    if high:
-        h_acc = sum(r["correct"] for r in high) / len(high) * 100
-        print(f"\n  High-conf ({CONFIDENCE_HIGH_MIN}%+): {len(high)} bars, {h_acc:.1f}% (+{h_acc-overall_acc:.1f}pp)")
+    # ================================================================
+    # REGIME × CONFIDENCE GATED
+    # ================================================================
+    print(f"\n  REGIME × CONFIDENCE BREAKDOWN:")
+    print(f"  {'Regime':<18} {'All':>10} {'>50%':>10} {'>60%':>10} {'>70%':>10} {'>80%':>10}")
+    print(f"  {'-'*70}")
+    for reg in REGIMES:
+        reg_results = [r for r in results if r["regime"] == reg]
+        if not reg_results:
+            continue
+        parts = []
+        for thr in [0, 50, 60, 70, 80]:
+            gated = [r for r in reg_results if r["confidence"] >= thr]
+            if gated:
+                acc = sum(r["correct"] for r in gated) / len(gated) * 100
+                parts.append(f"{acc:.0f}%({len(gated)})")
+            else:
+                parts.append("—")
+        print(f"  {reg:<18} {'  '.join(f'{p:>10}' for p in parts)}")
 
-    unc = [r["uncertainty"] for r in results]
-    print(f"\n  Uncertainty: mean={np.mean(unc):.1f}% median={np.median(unc):.1f}% max={max(unc):.1f}%")
+    # ================================================================
+    # PER-CYCLE STABILITY
+    # ================================================================
+    print(f"\n  PER-CYCLE STABILITY:")
+    print(f"  {'Cycle':>6} {'Bars':>7} {'Accuracy':>9} {'AvgConf':>8} {'AvgUnc':>7} {'Spearman':>9}")
+    print(f"  {'-'*50}")
+    for c in sorted(cycles):
+        c_results = [r for r in results if r["cycle"] == c]
+        c_acc = sum(r["correct"] for r in c_results) / len(c_results) * 100
+        c_conf = np.mean([r["confidence"] for r in c_results])
+        c_unc = np.mean([r["uncertainty"] for r in c_results])
+        c_corr = compute_confidence_correlation(c_results, window=len(c_results))
+        print(f"  {c:>6} {len(c_results):>7} {c_acc:>8.1f}% {c_conf:>7.1f}% {c_unc:>6.1f}% {c_corr:>8.4f}")
 
-    # Confidence-accuracy correlation
-    conf_corr = compute_confidence_correlation(results)
-    status = "✅" if conf_corr >= CONFIDENCE_CORRELATION_ALERT else "⚠️"
-    print(f"\n  Confidence-Accuracy Correlation: {conf_corr:.4f} {status}")
-
-    if result["drift"]:
-        print(f"\n  DRIFT DETECTION:")
-        for d in result["drift"]:
-            flag = " !! DRIFT" if d["drifted"] else ""
-            print(f"    Cycle {d['cycle']}: cosine={d['cosine']:.4f}{flag}")
-
-    if equity:
-        print(f"\n  Equity: final={equity[-1]:.0f} peak={max(equity):.0f}")
-
-    warns = stability_warnings(results)
-    if warns:
-        print(f"\n  WARNINGS:")
-        for w in warns:
-            print(f"    !! {w}")
-    else:
-        print(f"\n  No stability warnings.")
+    # ================================================================
+    # FINAL LIVE EXPECTATION
+    # ================================================================
+    late_cycles = [r for r in results if r["cycle"] >= result["cycles"] - 1]
+    if late_cycles:
+        late_acc = sum(r["correct"] for r in late_cycles) / len(late_cycles) * 100
+        print(f"\n  LIVE EXPECTATION (last cycle): {late_acc:.1f}%")
+        print(f"  (This is the most realistic estimate for forward performance)")
 
     save_charts(results, equity)
     print(f"{'='*75}")

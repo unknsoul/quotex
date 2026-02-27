@@ -43,7 +43,6 @@ logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 _ensemble = None
 _primary_features = None
 _meta_model = None
-_meta_calibrator = None
 _meta_features = None
 _weight_model = None
 _prediction_history = []
@@ -52,8 +51,6 @@ _direction_history = []
 # --- Race condition protection -----------------------------------------------
 _retrain_in_progress = False
 _model_lock = threading.RLock()
-
-META_CALIBRATOR_PATH = os.path.join(MODEL_DIR, "meta_calibrator.pkl")
 
 REGIME_ENCODING = {"Trending": 0, "Ranging": 1, "High_Volatility": 2, "Low_Volatility": 3}
 
@@ -72,13 +69,12 @@ def set_retrain_flag(active):
 
 def reload_models():
     """Force reload models from disk (called after retrain completes)."""
-    global _ensemble, _primary_features, _meta_model, _meta_calibrator
+    global _ensemble, _primary_features, _meta_model
     global _meta_features, _weight_model
     with _model_lock:
         _ensemble = None
         _primary_features = None
         _meta_model = None
-        _meta_calibrator = None
         _meta_features = None
         _weight_model = None
     load_models()
@@ -104,14 +100,7 @@ def load_models():
         if _meta_model is None:
             _meta_model = joblib.load(META_MODEL_PATH)
             _meta_features = joblib.load(META_FEATURE_LIST_PATH)
-            log.info("Meta model loaded (%d features).", len(_meta_features))
-            # Load meta calibrator
-            if os.path.exists(META_CALIBRATOR_PATH):
-                _meta_calibrator = joblib.load(META_CALIBRATOR_PATH)
-                log.info("Meta calibrator loaded.")
-            else:
-                _meta_calibrator = None
-                log.warning("No meta calibrator found — using raw probabilities.")
+            log.info("Meta model loaded (sigmoid-calibrated, %d features).", len(_meta_features))
 
         if _weight_model is None and os.path.exists(WEIGHT_MODEL_PATH):
             _weight_model = joblib.load(WEIGHT_MODEL_PATH)
@@ -216,17 +205,11 @@ def predict(df, regime):
     norm_var = min(variance / max_var, 1.0)
     uncertainty_pct = round(norm_var * 100, 2)
 
-    # Meta (with calibration)
+    # Meta (sigmoid-calibrated model — calibration is internal)
     regime_enc = REGIME_ENCODING.get(regime, 1)
     meta_row = _build_meta_row(green_p, df.iloc[-1], regime_enc, variance)
     meta_input = pd.DataFrame([meta_row])[meta_feat_cols]
-    meta_raw = meta_model.predict_proba(meta_input.values)[0][1]
-
-    # Apply meta calibration if available
-    if _meta_calibrator is not None:
-        meta_rel = float(np.clip(_meta_calibrator.predict([meta_raw])[0], 0, 1))
-    else:
-        meta_rel = float(meta_raw)
+    meta_rel = float(meta_model.predict_proba(meta_input.values)[0][1])
 
     # Confidence with uncertainty adjustment
     primary_strength = abs(green_p - 0.5) * 2

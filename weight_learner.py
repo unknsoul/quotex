@@ -41,8 +41,6 @@ logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 
 REGIME_ENCODING = {"Trending": 0, "Ranging": 1, "High_Volatility": 2, "Low_Volatility": 3}
 
-META_CALIBRATOR_PATH = os.path.join(MODEL_DIR, "meta_calibrator.pkl")
-
 WEIGHT_FEATURES = [
     "primary_strength",
     "meta_reliability",
@@ -68,12 +66,6 @@ def train_weights(symbol):
     oof_data = joblib.load(OOF_PREDICTIONS_PATH)
     meta_model = joblib.load(META_MODEL_PATH)
     meta_feat_cols = joblib.load(META_FEATURE_LIST_PATH)
-
-    # Load meta calibrator if available
-    meta_calibrator = None
-    if os.path.exists(META_CALIBRATOR_PATH):
-        meta_calibrator = joblib.load(META_CALIBRATOR_PATH)
-        print("   Meta calibrator loaded.")
 
     # FIX #1: Sort indices ascending before slicing
     raw_indices = oof_data["indices"]
@@ -145,15 +137,9 @@ def train_weights(symbol):
         ),
     })
     meta_input = meta_rows[meta_feat_cols].fillna(0)
-    meta_raw_proba = meta_model.predict_proba(meta_input.values)[:, 1]
-
-    # Apply meta calibration if available
-    if meta_calibrator is not None:
-        meta_proba = meta_calibrator.predict(meta_raw_proba)
-        meta_proba = np.clip(meta_proba, 0, 1)
-        print("   Meta probabilities calibrated.")
-    else:
-        meta_proba = meta_raw_proba
+    # CalibratedClassifierCV already applies sigmoid internally
+    meta_proba = meta_model.predict_proba(meta_input.values)[:, 1]
+    print("   Meta probabilities from sigmoid-calibrated model.")
 
     # Regime strength
     regime_strength = sub["adx_normalized"].values if "adx_normalized" in sub.columns else np.zeros(len(sub))

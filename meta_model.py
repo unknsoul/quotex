@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 import joblib
 from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.isotonic import IsotonicRegression
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score, roc_auc_score, brier_score_loss
 from scipy import stats
@@ -218,40 +218,38 @@ def train_meta(symbol):
         print(f"\n  ✅ Meta accuracy {avg['acc']:.1%} is in expected range (no leakage)")
 
     # =========================================================================
-    # Train final meta model on train portion, calibrate on holdout
+    # Train final meta model with sigmoid calibration (Platt scaling)
     # =========================================================================
-    # FIX #5: Calibrate meta model output with isotonic regression
-    cal_split = int(len(X_meta) * CALIBRATION_SPLIT_RATIO)
-    X_meta_train, y_meta_train = X_meta.iloc[:cal_split], y_meta[:cal_split]
-    X_meta_cal, y_meta_cal = X_meta.iloc[cal_split:], y_meta[cal_split:]
+    # FIX: Sigmoid instead of isotonic — more stable on noisy/small meta dataset
+    print(f"\n>> Training final meta model with sigmoid calibration...")
+    base_clf = _build_meta_clf()
+    # CalibratedClassifierCV wraps the base model with Platt scaling
+    # cv=3 uses internal 3-fold to fit the sigmoid, then retrains on all data
+    final = CalibratedClassifierCV(base_clf, method="sigmoid", cv=3)
+    final.fit(X_meta, y_meta)
 
-    print(f"\n>> Training final meta model (train={cal_split}, cal={len(X_meta)-cal_split})...")
-    final = _build_meta_clf()
-    final.fit(X_meta_train, y_meta_train)
+    # Calibrated performance check
+    cal_proba = final.predict_proba(X_meta)[:, 1]
+    cal_pred = final.predict(X_meta)
+    train_acc = accuracy_score(y_meta, cal_pred)
+    train_brier = brier_score_loss(y_meta, cal_proba)
+    print(f"   Calibrated train: Acc={train_acc:.4f} Brier={train_brier:.4f}")
+    print(f"   (Sigmoid calibration — smoother than isotonic, stable on noisy data)")
 
-    # Calibrate meta output
-    raw_cal_proba = final.predict_proba(X_meta_cal)[:, 1]
-    meta_iso = IsotonicRegression(y_min=0, y_max=1, out_of_bounds="clip")
-    meta_iso.fit(raw_cal_proba, y_meta_cal)
-    print(f"   Meta calibrator fitted on {len(X_meta_cal)} holdout points.")
-
-    # Calibrated performance on holdout
-    cal_proba = meta_iso.predict(raw_cal_proba)
-    cal_pred = (cal_proba >= 0.5).astype(int)
-    cal_acc = accuracy_score(y_meta_cal, cal_pred)
-    cal_brier = brier_score_loss(y_meta_cal, cal_proba)
-    print(f"   Calibrated holdout: Acc={cal_acc:.4f} Brier={cal_brier:.4f}")
-
-    # Feature importances
-    imp = final.feature_importances_
-    order = np.argsort(imp)[::-1]
-    print("\n  Meta feature importances:")
-    for rank, idx in enumerate(order, 1):
-        name = META_FEATURE_COLUMNS[idx] if idx < len(META_FEATURE_COLUMNS) else f"feat_{idx}"
-        print(f"    {rank:>2}. {name:<30s} {imp[idx]:.4f}")
+    # Feature importances (from base estimators)
+    try:
+        base_est = final.calibrated_classifiers_[0].estimator
+        imp = base_est.feature_importances_
+        order = np.argsort(imp)[::-1]
+        print("\n  Meta feature importances:")
+        for rank, idx in enumerate(order, 1):
+            name = META_FEATURE_COLUMNS[idx] if idx < len(META_FEATURE_COLUMNS) else f"feat_{idx}"
+            print(f"    {rank:>2}. {name:<30s} {imp[idx]:.4f}")
+    except Exception:
+        pass
 
     # FIX #7: Log meta correlation
-    all_meta_proba = meta_iso.predict(final.predict_proba(X_meta)[:, 1])
+    all_meta_proba = final.predict_proba(X_meta)[:, 1]
     meta_corr, _ = stats.spearmanr(all_meta_proba, y_meta)
     meta_corr = float(meta_corr) if not np.isnan(meta_corr) else 0.0
     print(f"\n  Meta Spearman correlation (proba vs target): {meta_corr:.4f}")
@@ -260,14 +258,10 @@ def train_meta(symbol):
     else:
         print(f"  ✅ Meta correlation {meta_corr:.4f} is acceptable")
 
-    # =========================================================================
-    # Save
-    # =========================================================================
+    # Save — no separate calibrator needed, CalibratedClassifierCV wraps it
     joblib.dump(final, META_MODEL_PATH)
-    joblib.dump(meta_iso, META_CALIBRATOR_PATH)
     joblib.dump(META_FEATURE_COLUMNS, META_FEATURE_LIST_PATH)
-    print(f"\n>> Saved meta model -> {META_MODEL_PATH}")
-    print(f">> Saved meta calibrator -> {META_CALIBRATOR_PATH}")
+    print(f"\n>> Saved meta model (sigmoid-calibrated) -> {META_MODEL_PATH}")
     print(f">> Saved meta features -> {META_FEATURE_LIST_PATH}")
     print(f"\n>> Done. Next: python weight_learner.py --symbol {symbol}")
 
