@@ -94,9 +94,11 @@ def record_error(error_msg: str):
 
 
 def record_startup():
-    """Record bot startup time."""
+    """Record bot startup time and reset session errors."""
     state = load_state()
     state["uptime_start"] = datetime.now(timezone.utc).isoformat()
+    state["error_count"] = 0
+    state["last_error"] = None
     save_state(state)
 
 

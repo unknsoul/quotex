@@ -103,6 +103,50 @@ def _save_subscribers():
         json.dump(_subscribers, f)
 
 
+def _load_today_from_csv():
+    """Load today's signals and outcomes from CSV on startup."""
+    global _signal_history, _outcome_results
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    import csv
+
+    # Load outcomes
+    if os.path.exists(SIGNAL_CSV):
+        try:
+            with open(SIGNAL_CSV, "r") as f:
+                for row in csv.DictReader(f):
+                    if row.get("timestamp", "").startswith(today):
+                        _outcome_results.append({
+                            "symbol": row.get("symbol", ""),
+                            "predicted": row.get("predicted", ""),
+                            "actual": row.get("actual", ""),
+                            "correct": row.get("correct", "False") == "True",
+                            "confidence": float(row.get("confidence", 0)),
+                            "time": row.get("timestamp", ""),
+                        })
+            log.info("Loaded %d outcomes from CSV.", len(_outcome_results))
+        except Exception as e:
+            log.warning("CSV outcomes load failed: %s", e)
+
+    # Load predictions/signals
+    if os.path.exists(PREDICTION_CSV):
+        try:
+            with open(PREDICTION_CSV, "r") as f:
+                for row in csv.DictReader(f):
+                    if row.get("timestamp", "").startswith(today):
+                        _signal_history.append({
+                            "symbol": row.get("symbol", ""),
+                            "direction": row.get("direction", ""),
+                            "confidence": float(row.get("confidence", 0)),
+                            "kelly": float(row.get("kelly", 0)),
+                            "trade": row.get("trade", ""),
+                            "regime": row.get("regime", ""),
+                            "time": row.get("timestamp", ""),
+                        })
+            log.info("Loaded %d signals from CSV.", len(_signal_history))
+        except Exception as e:
+            log.warning("CSV signals load failed: %s", e)
+
+
 # =============================================================================
 #  MT5 Helpers
 # =============================================================================
@@ -1192,7 +1236,7 @@ def main():
         print("WARNING: MT5 not connected.")
 
     _load_subscribers()
-    record_startup()
+    _load_today_from_csv()
 
     try:
         load_models()
