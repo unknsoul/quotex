@@ -155,7 +155,7 @@ def _generate_oof_predictions(X_tr, y_tr, spw, seeds, n_splits=OOF_INTERNAL_SPLI
 #  Walk-Forward Engine
 # =============================================================================
 
-def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
+def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0):
     mtf = load_multi_tf(symbol)
     df = mtf.get("M5")
     if df is None:
@@ -180,8 +180,11 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
     df_filtered = df_filtered.dropna(subset=["target"]).reset_index(drop=True)
     df_filtered["target"] = df_filtered["target"].astype(int)
 
-    print(f"\n>> Walk-Forward (Leakage-Free) for {symbol}")
+    mode_str = f"Rolling({rolling_window})" if rolling_window > 0 else "Expanding"
+    print(f"\n>> Walk-Forward ({mode_str}, Leakage-Free) for {symbol}")
     print(f"   Bars: {n}, Train: {train_end}, Chunk: {chunk}")
+    if rolling_window > 0:
+        print(f"   Rolling window: {rolling_window} bars (~{rolling_window * 5 / 60 / 24:.0f} days)")
     print(f"   ATR threshold: {TARGET_ATR_THRESHOLD}, Ensemble: {len(ENSEMBLE_SEEDS)} seeded XGB")
     print(f"   Cal split: {CALIBRATION_SPLIT_RATIO:.0%}/{1-CALIBRATION_SPLIT_RATIO:.0%}, OOF splits: {OOF_INTERNAL_SPLITS}")
 
@@ -201,14 +204,24 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1):
         test_start = train_end
         test_end = min(train_end + chunk, n)
 
-        # Filter train data
-        train_mask = df_filtered.index < train_end
+        # Filter train data — rolling or expanding window
+        if rolling_window > 0:
+            # Rolling: use only last N bars before test start
+            roll_start = max(0, train_end - rolling_window)
+            train_mask = (df_filtered.index >= roll_start) & (df_filtered.index < train_end)
+        else:
+            # Expanding: use all bars from 0 to train_end
+            train_mask = df_filtered.index < train_end
         X_tr_filtered = df_filtered.loc[train_mask, FEATURE_COLUMNS]
         y_tr_filtered = df_filtered.loc[train_mask, "target"].values
 
         spw = np.sum(y_tr_filtered == 0) / max(np.sum(y_tr_filtered == 1), 1)
 
-        print(f"\n  Cycle {cycle}: train[0:{train_end}] test[{test_start}:{test_end}]")
+        if rolling_window > 0:
+            roll_start = max(0, train_end - rolling_window)
+            print(f"\n  Cycle {cycle}: train[{roll_start}:{train_end}] test[{test_start}:{test_end}]")
+        else:
+            print(f"\n  Cycle {cycle}: train[0:{train_end}] test[{test_start}:{test_end}]")
         print(f"    ATR-filtered train: {len(X_tr_filtered)} / {train_end}")
 
         # =================================================================
@@ -633,8 +646,12 @@ def main():
     parser.add_argument("--symbol", default=DEFAULT_SYMBOL)
     parser.add_argument("--train-ratio", type=float, default=0.6)
     parser.add_argument("--chunk-ratio", type=float, default=0.1)
+    parser.add_argument("--rolling-window", type=int, default=0,
+                        help="Rolling window size in bars. 0=expanding (default). "
+                             "3500≈12 months of M5 data.")
     args = parser.parse_args()
-    result = run_walk_forward(args.symbol, args.train_ratio, args.chunk_ratio)
+    result = run_walk_forward(args.symbol, args.train_ratio, args.chunk_ratio,
+                              args.rolling_window)
     print_report(result)
 
 
