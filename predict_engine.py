@@ -19,6 +19,7 @@ import os
 import json
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 
 import joblib
@@ -193,108 +194,146 @@ def predict(df, regime):
     """
     Generate prediction using cached models.
     If retrain is in progress, uses the previous stable model (cached in memory).
+    Measures latency and aborts if inference exceeds 1 second.
+    Never crashes — returns safe fallback on any error.
     """
-    if _retrain_in_progress:
-        log.info("Retrain in progress — using cached stable model.")
+    t_start = time.perf_counter()
 
-    with _model_lock:
-        ensemble, feat_cols, meta_model, meta_feat_cols, weight_model = load_models()
+    try:
+        if _retrain_in_progress:
+            log.info("Retrain in progress — using cached stable model.")
 
-    row = df[feat_cols].iloc[-1].values.reshape(1, -1)
+        with _model_lock:
+            ensemble, feat_cols, meta_model, meta_feat_cols, weight_model = load_models()
 
-    # Ensemble predictions (5 seeded XGBoost)
-    all_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
-    green_p = float(all_probs.mean())
-    red_p = 1.0 - green_p
-    variance = float(all_probs.var())
-    max_var = 0.25
-    norm_var = min(variance / max_var, 1.0)
-    uncertainty_pct = round(norm_var * 100, 2)
+        row = df[feat_cols].iloc[-1].values.reshape(1, -1)
 
-    # Meta (sigmoid-calibrated model — calibration is internal)
-    regime_enc = REGIME_ENCODING.get(regime, 1)
-    meta_row = _build_meta_row(green_p, df.iloc[-1], regime_enc, variance)
-    meta_input = pd.DataFrame([meta_row])[meta_feat_cols]
-    meta_rel = float(meta_model.predict_proba(meta_input.values)[0][1])
+        # Ensemble predictions (5 seeded XGBoost)
+        all_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
+        green_p = float(all_probs.mean())
+        red_p = 1.0 - green_p
+        variance = float(all_probs.var())
+        max_var = 0.25
+        norm_var = min(variance / max_var, 1.0)
+        uncertainty_pct = round(norm_var * 100, 2)
 
-    # Confidence with uncertainty adjustment
-    primary_strength = abs(green_p - 0.5) * 2
-    regime_strength = float(df.iloc[-1].get("adx_normalized", 0.25))
+        # Latency check after ensemble inference
+        t_ensemble = time.perf_counter()
+        if (t_ensemble - t_start) > 1.0:
+            log.error("LATENCY ABORT: ensemble took %.2fs (>1s limit)", t_ensemble - t_start)
+            return _safe_fallback("Inference too slow")
 
-    if weight_model is not None:
-        w_input = pd.DataFrame([{
-            "primary_strength": primary_strength,
-            "meta_reliability": meta_rel,
-            "regime_strength": regime_strength,
-            "uncertainty": norm_var,
-        }])
-        weighted_score = float(weight_model.predict_proba(w_input)[:, 1][0])
-    else:
-        weighted_score = primary_strength * meta_rel
+        # Meta (sigmoid-calibrated model — calibration is internal)
+        regime_enc = REGIME_ENCODING.get(regime, 1)
+        meta_row = _build_meta_row(green_p, df.iloc[-1], regime_enc, variance)
+        meta_input = pd.DataFrame([meta_row])[meta_feat_cols]
+        meta_rel = float(meta_model.predict_proba(meta_input.values)[0][1])
 
-    confidence = weighted_score * (1.0 - norm_var)
+        # Confidence with uncertainty adjustment
+        primary_strength = abs(green_p - 0.5) * 2
+        regime_strength = float(df.iloc[-1].get("adx_normalized", 0.25))
 
-    # Confidence reliability (rolling correlation)
-    conf_reliability, conf_alert = get_confidence_reliability()
+        if weight_model is not None:
+            w_input = pd.DataFrame([{
+                "primary_strength": primary_strength,
+                "meta_reliability": meta_rel,
+                "regime_strength": regime_strength,
+                "uncertainty": norm_var,
+            }])
+            weighted_score = float(weight_model.predict_proba(w_input)[:, 1][0])
+        else:
+            weighted_score = primary_strength * meta_rel
 
-    # Convert to percentages
-    green_pct = round(green_p * 100, 2)
-    red_pct = round(red_p * 100, 2)
-    meta_pct = round(meta_rel * 100, 2)
-    confidence_pct = round(confidence * 100, 2)
-    direction = "GREEN" if green_p >= 0.5 else "RED"
+        confidence = weighted_score * (1.0 - norm_var)
 
-    if confidence_pct >= CONFIDENCE_HIGH_MIN:
-        conf_level = "High"
-    elif confidence_pct >= CONFIDENCE_MEDIUM_MIN:
-        conf_level = "Medium"
-    else:
-        conf_level = "Low"
+        # Confidence reliability (rolling correlation)
+        conf_reliability, conf_alert = get_confidence_reliability()
 
-    # Adaptive confidence (rolling calibration)
-    adaptive_conf = _adaptive_confidence(confidence_pct)
+        # Convert to percentages
+        green_pct = round(green_p * 100, 2)
+        red_pct = round(red_p * 100, 2)
+        meta_pct = round(meta_rel * 100, 2)
+        confidence_pct = round(confidence * 100, 2)
+        direction = "GREEN" if green_p >= 0.5 else "RED"
 
-    # Kelly criterion position sizing (quarter-Kelly for safety)
-    win_prob = max(min(green_p if green_p >= 0.5 else (1 - green_p), 0.99), 0.51)
-    # Binary payout: win 1, lose 1 → b=1 → f = 2p - 1
-    kelly_full = 2 * win_prob - 1
-    kelly_quarter = max(0, kelly_full * 0.25)
-    kelly_pct = round(kelly_quarter * 100, 1)
+        if confidence_pct >= CONFIDENCE_HIGH_MIN:
+            conf_level = "High"
+        elif confidence_pct >= CONFIDENCE_MEDIUM_MIN:
+            conf_level = "Medium"
+        else:
+            conf_level = "Low"
 
-    # Trade suggestion
-    thresholds = get_regime_thresholds(regime)
-    if green_p >= thresholds["primary"] and meta_rel >= thresholds["meta"]:
-        trade = "BUY"
-    elif green_p <= (1 - thresholds["primary"]) and meta_rel >= thresholds["meta"]:
-        trade = "SELL"
-    else:
-        trade = "HOLD"
+        # Adaptive confidence (rolling calibration)
+        adaptive_conf = _adaptive_confidence(confidence_pct)
 
-    # Update direction history for live parity
-    _direction_history.append(1 if green_p >= 0.5 else 0)
-    if len(_direction_history) > 500:
-        _direction_history.pop(0)
+        # Kelly criterion position sizing (quarter-Kelly for safety)
+        win_prob = max(min(green_p if green_p >= 0.5 else (1 - green_p), 0.99), 0.51)
+        kelly_full = 2 * win_prob - 1
+        kelly_quarter = max(0, kelly_full * 0.25)
+        kelly_pct = round(kelly_quarter * 100, 1)
 
-    result = {
-        "green_probability_percent": green_pct,
-        "red_probability_percent": red_pct,
-        "primary_direction": direction,
-        "meta_reliability_percent": meta_pct,
-        "uncertainty_percent": uncertainty_pct,
-        "final_confidence_percent": confidence_pct,
-        "adaptive_confidence_percent": adaptive_conf,
-        "confidence_level": conf_level,
-        "confidence_reliability_score": conf_reliability,
-        "kelly_fraction_percent": kelly_pct,
-        "suggested_trade": trade,
-        "suggested_direction": "UP" if green_p >= 0.5 else "DOWN",
-        "market_regime": regime,
+        # Trade suggestion
+        thresholds = get_regime_thresholds(regime)
+        if green_p >= thresholds["primary"] and meta_rel >= thresholds["meta"]:
+            trade = "BUY"
+        elif green_p <= (1 - thresholds["primary"]) and meta_rel >= thresholds["meta"]:
+            trade = "SELL"
+        else:
+            trade = "HOLD"
+
+        # Update direction history for live parity
+        _direction_history.append(1 if green_p >= 0.5 else 0)
+        if len(_direction_history) > 500:
+            _direction_history.pop(0)
+
+        # Latency measurement
+        latency_ms = round((time.perf_counter() - t_start) * 1000, 1)
+
+        result = {
+            "green_probability_percent": green_pct,
+            "red_probability_percent": red_pct,
+            "primary_direction": direction,
+            "meta_reliability_percent": meta_pct,
+            "uncertainty_percent": uncertainty_pct,
+            "final_confidence_percent": confidence_pct,
+            "adaptive_confidence_percent": adaptive_conf,
+            "confidence_level": conf_level,
+            "confidence_reliability_score": conf_reliability,
+            "kelly_fraction_percent": kelly_pct,
+            "suggested_trade": trade,
+            "suggested_direction": "UP" if green_p >= 0.5 else "DOWN",
+            "market_regime": regime,
+            "latency_ms": latency_ms,
+        }
+
+        log.info("Pred: green=%.1f%% conf=%.1f%% kelly=%.1f%% latency=%dms -> %s",
+                 green_pct, confidence_pct, kelly_pct, latency_ms, direction)
+        return result
+
+    except Exception as e:
+        log.exception("PREDICT CRASH (safe fallback returned): %s", e)
+        return _safe_fallback(str(e))
+
+
+def _safe_fallback(reason="unknown"):
+    """Return a safe HOLD prediction — never crashes the caller."""
+    return {
+        "green_probability_percent": 50.0,
+        "red_probability_percent": 50.0,
+        "primary_direction": "NEUTRAL",
+        "meta_reliability_percent": 0.0,
+        "uncertainty_percent": 100.0,
+        "final_confidence_percent": 0.0,
+        "adaptive_confidence_percent": 0.0,
+        "confidence_level": "Low",
+        "confidence_reliability_score": 0.0,
+        "kelly_fraction_percent": 0.0,
+        "suggested_trade": "HOLD",
+        "suggested_direction": "HOLD",
+        "market_regime": "Unknown",
+        "latency_ms": -1,
+        "error": reason,
     }
-
-    log.info("Pred: green=%.1f%% meta=%.1f%% unc=%.1f%% conf=%.1f%% adapt=%.1f%% kelly=%.1f%% -> %s",
-             green_pct, meta_pct, uncertainty_pct, confidence_pct, adaptive_conf, kelly_pct, direction)
-    return result
-
 
 def update_prediction_history(green_p, was_correct, confidence=0.5):
     """Record prediction outcome for rolling metrics."""

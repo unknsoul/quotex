@@ -6,6 +6,13 @@ Leakage-free pipeline: 5 seeded XGBoost + isotonic calibration + OOF meta/weight
 
 import os
 
+# Load .env file if present (python-dotenv)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not installed, rely on system env vars
+
 # --- Project Paths -----------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")

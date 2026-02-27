@@ -45,6 +45,10 @@ from predict_engine import (
 )
 from risk_filter import check_warnings
 from stability import AccuracyTracker, ConfidenceCorrelationTracker
+from production_state import (
+    record_startup, record_prediction, record_error,
+    get_state_summary,
+)
 
 log = logging.getLogger("telegram_bot")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
@@ -182,7 +186,8 @@ def _main_menu_keyboard(chat_id=None):
          InlineKeyboardButton("ℹ️ Model Info", callback_data="model_info")],
         [InlineKeyboardButton("💰 Position Guide", callback_data="position_guide"),
          InlineKeyboardButton("📜 Today's Signals", callback_data="today_signals")],
-        [InlineKeyboardButton("🎯 Results", callback_data="today_results")],
+        [InlineKeyboardButton("🎯 Results", callback_data="today_results"),
+         InlineKeyboardButton("🏭 Prod State", callback_data="prod_state")],
     ])
 
 
@@ -421,6 +426,8 @@ async def _check_outcomes(bot: Bot, predictions: dict, subscribers: dict):
                 correct,
                 confidence=conf,
             )
+            # Update production state
+            record_prediction(correct, conf, pred.get("latency_ms", 0))
 
             # Rolling win rate
             recent = _outcome_results[-50:]
@@ -673,16 +680,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ----- Model Info -----
     elif data == "model_info":
         msg = (
-            "ℹ️ *Model Architecture*\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "ℹ️ *Model Architecture v7*\n━━━━━━━━━━━━━━━━━━━━━\n\n"
             "🏗️ *Primary:* 5-seed temporal XGB\n"
             "   Windows: 40/40/70/70/100%\n\n"
             "🧠 *Meta:* GBM + Sigmoid (11 feat)\n"
             "⚖️ *Weight:* Logistic regression\n"
-            "📊 *Features:* 55 total\n\n"
-            "🎯 Backtest: 72.5% (all bars)\n"
-            "   ≥80% conf: 85.4%\n"
+            "📊 *Features:* 66 total (v7)\n\n"
+            "🎯 Backtest: 72.4% (all bars)\n"
+            "   ≥80% conf: 84.1%\n"
+            "   Brier Skill: 0.2526\n"
             "   Live exp: ~63%"
         )
+        await query.edit_message_text(msg, parse_mode="Markdown",
+                                      reply_markup=_back_keyboard(chat_id))
+
+    # ----- Production State -----
+    elif data == "prod_state":
+        msg = get_state_summary()
         await query.edit_message_text(msg, parse_mode="Markdown",
                                       reply_markup=_back_keyboard(chat_id))
 
@@ -820,6 +834,7 @@ def main():
         print("WARNING: MT5 not connected.")
 
     _load_subscribers()
+    record_startup()
 
     try:
         load_models()

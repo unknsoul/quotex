@@ -1,14 +1,25 @@
-MetaTrader5>=5.0.45
-pandas>=2.0
+# Core
 numpy>=1.24
-xgboost>=2.0
-lightgbm>=4.0
+pandas>=2.0
 scikit-learn>=1.3
 scipy>=1.11
 joblib>=1.3
+xgboost>=2.0
+
+# Data
+MetaTrader5>=5.0.45
+
+# Telegram
+python-telegram-bot>=20.0
+httpx>=0.24
+
+# API
 fastapi>=0.100
 uvicorn[standard]>=0.23
 pydantic>=2.0
+
+# Charts
 matplotlib>=3.7
-python-telegram-bot>=20.0
-ta>=0.10
+
+# Environment
+python-dotenv>=1.0
