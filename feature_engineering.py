@@ -1,9 +1,9 @@
 """
-Feature Engineering v6 — structural + microstructure features.
+Feature Engineering v7 — volume imbalance + TF agreement + pattern sequences.
 
-v6 adds: wick absorption, momentum decay, tick volume features,
-session interaction features, temporal features.
-Total: 55 features.
+v7 adds: volume imbalance, multi-TF agreement, 5-bar patterns,
+regime acceleration, doji count, consecutive wicks.
+Total: 66 features.
 """
 
 import numpy as np
@@ -70,6 +70,19 @@ FEATURE_COLUMNS = [
     "ema_adx_interaction",
     # Compression acceleration
     "range_compression_speed",
+    # ---- v7: Accuracy upgrades (11) ----
+    # Volume imbalance (order flow)
+    "volume_imbalance_5", "volume_imbalance_10",
+    # Multi-TF agreement
+    "tf_agreement", "tf_momentum_strength",
+    # Candle pattern sequences
+    "five_candle_pattern", "doji_count_5", "consecutive_same_wicks",
+    # Regime acceleration
+    "delta_adx_accel", "delta_atr_accel",
+    # Spread-relative move size
+    "move_vs_spread",
+    # Hour granularity
+    "minute_sin",
 ]
 
 
@@ -357,6 +370,70 @@ def compute_features(df, m15_df=None, h1_df=None):
 
     # Compression acceleration (how fast is range narrowing)
     df["range_compression_speed"] = df["compression_ratio"] - df["compression_ratio"].shift(5)
+
+    # ---- v7: Accuracy upgrades ----
+
+    # 1. Tick volume imbalance bars (order flow proxy)
+    if "tick_volume" in df.columns:
+        tv = df["tick_volume"].astype(float)
+        buy_vol = tv * (c > o).astype(float)
+        sell_vol = tv * (c < o).astype(float)
+        buy_sum_5 = buy_vol.rolling(5, min_periods=1).sum()
+        sell_sum_5 = sell_vol.rolling(5, min_periods=1).sum()
+        df["volume_imbalance_5"] = buy_sum_5 / (sell_sum_5 + 1e-10)
+        buy_sum_10 = buy_vol.rolling(10, min_periods=1).sum()
+        sell_sum_10 = sell_vol.rolling(10, min_periods=1).sum()
+        df["volume_imbalance_10"] = buy_sum_10 / (sell_sum_10 + 1e-10)
+    else:
+        df["volume_imbalance_5"] = 1.0
+        df["volume_imbalance_10"] = 1.0
+
+    # 2. Multi-TF target agreement
+    m5_mom = df["momentum_rolling_5"]
+    m15_mom = df.get("m15_momentum", pd.Series(0, index=df.index))
+    h1_trend = df.get("h1_trend_direction", pd.Series(0, index=df.index))
+    m5_sign = (m5_mom > 0).astype(int) * 2 - 1
+    m15_sign = (m15_mom > 0).astype(int) * 2 - 1
+    # Agreement: +3 = all bullish, -3 = all bearish, mixed = near 0
+    df["tf_agreement"] = m5_sign + m15_sign + h1_trend
+    df["tf_momentum_strength"] = m5_mom.abs() + m15_mom.abs()
+
+    # 5. Candle pattern sequences
+    d0 = df["candle_direction"]
+    d1 = d0.shift(1).fillna(0).astype(int)
+    d2 = d0.shift(2).fillna(0).astype(int)
+    d3 = d0.shift(3).fillna(0).astype(int)
+    d4 = d0.shift(4).fillna(0).astype(int)
+    df["five_candle_pattern"] = d4 * 16 + d3 * 8 + d2 * 4 + d1 * 2 + d0
+
+    # Doji count (small body candles)
+    body_ratio = (c - o).abs() / candle_range
+    is_doji = (body_ratio < 0.3).astype(int)
+    df["doji_count_5"] = is_doji.rolling(5, min_periods=1).sum()
+
+    # Consecutive wicks in same direction
+    wick_dir = (lower_wick > upper_wick).astype(int)  # 1=demand, 0=supply
+    wick_same = (wick_dir == wick_dir.shift(1)).astype(int)
+    df["consecutive_same_wicks"] = wick_same.rolling(5, min_periods=1).sum()
+
+    # 6. Regime transition acceleration
+    df["delta_adx_accel"] = df["delta_adx_5"] - df["delta_adx_5"].shift(5)
+    df["delta_atr_accel"] = df["delta_atr_5"] - df["delta_atr_5"].shift(5)
+
+    # 4. Spread-relative move size (tradeable move filter feature)
+    if "spread" in df.columns:
+        spread_price = df["spread"].astype(float) * 0.00001  # convert points to price
+        avg_move = returns.abs().rolling(20, min_periods=5).mean() * c
+        df["move_vs_spread"] = avg_move / (spread_price + 1e-10)
+    else:
+        df["move_vs_spread"] = 10.0  # default: moves are large relative to spread
+
+    # 3. Hour granularity (minute-level cyclical encoding)
+    if "time" in df.columns:
+        minute_of_day = df["time"].dt.hour * 60 + df["time"].dt.minute
+        df["minute_sin"] = np.sin(2 * np.pi * minute_of_day / 1440)
+    else:
+        df["minute_sin"] = 0.0
 
     # Drop warmup
     warmup = max(EMA_200, BB_PERIOD, ATR_PERIOD, RSI_PERIOD, MACD_SLOW,

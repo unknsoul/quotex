@@ -60,6 +60,7 @@ SUBS_FILE = os.path.join(LOG_DIR, "subscribers.json")
 _subscribers = {}  # {chat_id: {"symbols": [...], "active": True}}
 _last_predictions = {}  # {symbol: {pred_dict, timestamp}}
 _signal_history = []  # [{symbol, direction, confidence, timestamp, result}]
+_outcome_results = []  # [{symbol, predicted, actual, correct, confidence, time}]
 
 
 # =============================================================================
@@ -181,6 +182,7 @@ def _main_menu_keyboard(chat_id=None):
          InlineKeyboardButton("ℹ️ Model Info", callback_data="model_info")],
         [InlineKeyboardButton("💰 Position Guide", callback_data="position_guide"),
          InlineKeyboardButton("📜 Today's Signals", callback_data="today_signals")],
+        [InlineKeyboardButton("🎯 Results", callback_data="today_results")],
     ])
 
 
@@ -366,12 +368,86 @@ async def _auto_signal_job(app: Application):
                         except Exception as e:
                             log.error("Failed to send to %s: %s", chat_id, e)
 
+            # Schedule outcome check after candle closes (+30s buffer)
+            asyncio.create_task(
+                _check_outcomes(bot, predictions, active_subs)
+            )
+
             # Small delay to avoid double-sending
             await asyncio.sleep(15)
 
         except Exception as e:
             log.exception("Auto-signal job error: %s", e)
             await asyncio.sleep(30)
+
+
+async def _check_outcomes(bot: Bot, predictions: dict, subscribers: dict):
+    """
+    Wait for the current candle to close, then check if predictions were correct.
+    Send result notifications to subscribers.
+    """
+    # Wait for candle to close + 30s buffer for data availability
+    await asyncio.sleep(TELEGRAM_SEND_BEFORE_CLOSE_SEC + 30)
+
+    results_msgs = []
+    for sym, pred in predictions.items():
+        try:
+            data = fetch_multi_timeframe(sym, 10)
+            df = data.get("M5")
+            if df is None or len(df) < 2:
+                continue
+
+            # The last closed candle is the one we predicted
+            last_candle = df.iloc[-2]  # second to last (fully closed)
+            actual_green = last_candle["close"] > last_candle["open"]
+            predicted_up = pred["suggested_direction"] == "UP"
+            correct = (predicted_up == actual_green)
+
+            emoji = "✅" if correct else "❌"
+            conf = pred["final_confidence_percent"]
+
+            _outcome_results.append({
+                "symbol": sym,
+                "predicted": pred["suggested_direction"],
+                "actual": "UP" if actual_green else "DOWN",
+                "correct": correct,
+                "confidence": conf,
+                "time": datetime.now(timezone.utc).isoformat(),
+            })
+
+            # Update prediction history for adaptive confidence
+            update_prediction_history(
+                pred["green_probability_percent"] / 100,
+                correct,
+                confidence=conf,
+            )
+
+            # Rolling win rate
+            recent = _outcome_results[-50:]
+            wins = sum(1 for r in recent if r["correct"])
+            win_rate = wins / len(recent) * 100
+
+            results_msgs.append(
+                f"{emoji} *{sym}*: Predicted {pred['suggested_direction']} "
+                f"→ Actual {'UP' if actual_green else 'DOWN'} "
+                f"({conf:.0f}% conf) | Win rate: {win_rate:.0f}%"
+            )
+        except Exception as e:
+            log.error("Outcome check failed for %s: %s", sym, e)
+
+    if results_msgs:
+        msg = "📋 *Signal Results*\n━━━━━━━━━━━━━━━━━━━━━\n\n" + "\n".join(results_msgs)
+
+        for chat_id, info in subscribers.items():
+            if info.get("active", False):
+                try:
+                    await bot.send_message(
+                        chat_id=int(chat_id),
+                        text=msg,
+                        parse_mode="Markdown",
+                    )
+                except Exception as e:
+                    log.error("Failed to send result to %s: %s", chat_id, e)
 
 
 # =============================================================================
@@ -386,11 +462,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔔 *Auto-Signal Mode:*\n"
         "  Predictions sent automatically\n"
         "  5 seconds before every M5 candle!\n\n"
-        "🧠 *v6 Engine:*\n"
-        "  • 55 structural features\n"
-        "  • Temporal XGBoost ensemble\n"
+        "🧠 *v7 Engine:*\n"
+        "  • 66 features (structural + microstructure)\n"
+        "  • Hybrid ensemble (3 XGB + 2 ExtraTrees)\n"
         "  • Kelly position sizing\n"
-        "  • Adaptive confidence\n\n"
+        "  • Outcome tracking (win/loss results)\n\n"
         "📊 *Live Expectation: ~63%*\n"
         "🎯 *High-Conf (≥80%): ~85%*\n\n"
         "👇 *Tap Start Signals to begin!*"
@@ -643,6 +719,37 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(msg, parse_mode="Markdown",
                                       reply_markup=_back_keyboard(chat_id))
 
+    # ----- Today's Results (Outcome Feedback) -----
+    elif data == "today_results":
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_res = [r for r in _outcome_results
+                     if r["time"].startswith(today)]
+
+        if not today_res:
+            msg = "🎯 *Today's Results*\n\nNo results yet. Outcomes appear ~35s after each candle closes."
+        else:
+            wins = sum(1 for r in today_res if r["correct"])
+            total = len(today_res)
+            win_rate = wins / total * 100
+
+            lines = [
+                f"🎯 *Today's Results*",
+                f"━━━━━━━━━━━━━━━━━━━━━",
+                f"✅ Wins: *{wins}* | ❌ Losses: *{total - wins}*",
+                f"📊 Win Rate: *{win_rate:.1f}%*",
+                f"",
+            ]
+            for r in today_res[-15:]:
+                t = r["time"][11:16]
+                emoji = "✅" if r["correct"] else "❌"
+                lines.append(
+                    f"  {t} {emoji} *{r['symbol']}*: "
+                    f"{r['predicted']}→{r['actual']} ({r['confidence']:.0f}%)"
+                )
+            msg = "\n".join(lines)
+
+        await query.edit_message_text(msg, parse_mode="Markdown",
+                                      reply_markup=_back_keyboard(chat_id))
 
 def _count_today_signals():
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
