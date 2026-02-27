@@ -30,6 +30,7 @@ from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import brier_score_loss, log_loss
 from scipy import stats
 
 from calibration import CalibratedModel, build_seeded_xgb_ensemble
@@ -487,6 +488,81 @@ def print_report(result):
     for reg in REGIMES:
         s = regime_stats[reg]
         print(f"  {reg:<18} {s['t']:>7} {s['c']/s['t']*100 if s['t'] else 0:>7.1f}%")
+
+    # ================================================================
+    # PROBABILITY RELIABILITY METRICS
+    # ================================================================
+    green_ps = np.array([r["green_p"] for r in results])
+    actuals = np.array([r["correct"] for r in results])
+    # For Brier/log loss, use green_p as forecasted P(green)
+    # actual direction: correct means predicted=actual, but we need P(actual=green)
+    # green_p is P(green), actual target is 1=green, 0=red
+    # So: direction = green_p >= 0.5, correct = direction==actual
+    # We need the raw target for Brier, reconstruct from green_p and correct:
+    directions = (green_ps >= 0.5).astype(int)
+    # correct==1 means direction==target, so target = direction if correct else (1-direction)
+    targets = np.where(actuals == 1, directions, 1 - directions)
+
+    brier = brier_score_loss(targets, green_ps)
+    brier_naive = brier_score_loss(targets, np.full_like(green_ps, 0.5))
+    brier_skill = 1 - (brier / brier_naive) if brier_naive > 0 else 0
+
+    try:
+        ll = log_loss(targets, np.clip(green_ps, 1e-10, 1 - 1e-10))
+        ll_naive = log_loss(targets, np.full_like(green_ps, 0.5))
+    except Exception:
+        ll, ll_naive = 0.693, 0.693
+
+    print(f"\n  PROBABILITY RELIABILITY:")
+    print(f"    Brier Score:       {brier:.4f}  (naive 0.50 baseline: {brier_naive:.4f})")
+    print(f"    Brier Skill Score: {brier_skill:.4f}  (>0 = better than naive, 1 = perfect)")
+    print(f"    Log Loss:          {ll:.4f}  (naive baseline: {ll_naive:.4f})")
+
+    # Overall Spearman
+    confs = [r["confidence"] for r in results]
+    corr_all, _ = stats.spearmanr(confs, actuals)
+    corr_all = float(corr_all) if not np.isnan(corr_all) else 0.0
+    status = "\u2705" if corr_all >= 0.2 else ("\u26a0\ufe0f" if corr_all >= 0.1 else "\u274c")
+    print(f"    Spearman(conf, correct): {corr_all:.4f} {status}")
+
+    # ================================================================
+    # CALIBRATION RELIABILITY TABLE (5% bins on green_p)
+    # ================================================================
+    print(f"\n  CALIBRATION RELIABILITY (5% bins on primary probability):")
+    print(f"  {'Bin':<12} {'Count':>6} {'Expected':>9} {'Actual':>8} {'Gap':>6}")
+    print(f"  {'-'*44}")
+    cal_bins = np.arange(0.50, 1.01, 0.05)
+    for i in range(len(cal_bins) - 1):
+        lo, hi = cal_bins[i], cal_bins[i + 1]
+        # Include both green (p >= 0.5) and red (p < 0.5) sides
+        # For green side: green_p in [lo, hi)
+        green_mask = (green_ps >= lo) & (green_ps < hi)
+        # For red side (symmetry): green_p in (1-hi, 1-lo]
+        red_mask = (green_ps > (1 - hi)) & (green_ps <= (1 - lo))
+        mask = green_mask | red_mask
+        if mask.sum() == 0:
+            continue
+        expected = (lo + hi) / 2  # average expected probability
+        actual_acc = actuals[mask].mean()
+        gap = actual_acc - expected
+        label = f"{lo:.2f}-{hi:.2f}"
+        print(f"  {label:<12} {mask.sum():>6} {expected:>8.1%} {actual_acc:>7.1%} {gap:>+5.1%}")
+
+    # ================================================================
+    # ROLLING 100-BAR STABILITY
+    # ================================================================
+    correct_series = pd.Series([r["correct"] for r in results])
+    rolling_acc = correct_series.rolling(100, min_periods=100).mean()
+    rolling_clean = rolling_acc.dropna()
+    if len(rolling_clean) > 0:
+        r_min = rolling_clean.min() * 100
+        r_max = rolling_clean.max() * 100
+        r_mean = rolling_clean.mean() * 100
+        r_std = rolling_clean.std() * 100
+        print(f"\n  ROLLING 100-BAR STABILITY:")
+        print(f"    Range: {r_min:.1f}% — {r_max:.1f}%  (mean={r_mean:.1f}%, std={r_std:.1f}%)")
+        stable = "Stable" if r_std < 5 else ("Moderate" if r_std < 8 else "Unstable")
+        print(f"    Verdict: {stable}")
 
     # ================================================================
     # TRADE FREQUENCY ANALYSIS (Confidence-Gated)
