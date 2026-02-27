@@ -62,18 +62,24 @@ SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "GBPJPY"]
 # Subscriber storage
 SUBS_FILE = os.path.join(LOG_DIR, "subscribers.json")
 SIGNAL_CSV = os.path.join(LOG_DIR, "signal_outcomes.csv")
+PREDICTION_CSV = os.path.join(LOG_DIR, "all_predictions.csv")
 _subscribers = {}  # {chat_id: {"symbols": [...], "active": True, "mode": "all"|"high"}}
 _last_predictions = {}  # {symbol: {pred_dict, timestamp}}
 _signal_history = []  # [{symbol, direction, confidence, timestamp, result}]
 _outcome_results = []  # [{symbol, predicted, actual, correct, confidence, time}]
-_consecutive_losses = {}  # {symbol: int} — consecutive wrong count
-_cooldown_until = {}  # {symbol: datetime} — skip signals until
+_consecutive_losses = {}  # {symbol: int}
+_cooldown_until = {}  # {symbol: datetime}
+_last_regime = {}  # {symbol: regime_name} — for transition detection
+_regime_transition_skip = {}  # {symbol: int} — candles to skip
 
 # Signal quality thresholds
-MIN_CONFIDENCE_FILTER = 55.0   # suppress below this
-HIGH_CONF_THRESHOLD = 70.0     # high-conf alert mode threshold
-COOLDOWN_CANDLES = 3           # skip N candles after 3 consecutive losses
+MIN_CONFIDENCE_FILTER = 55.0
+HIGH_CONF_THRESHOLD = 70.0
+COOLDOWN_CANDLES = 3
 MAX_CONSECUTIVE_LOSSES = 3
+REGIME_SKIP_CANDLES = 2  # skip after regime transition
+# Low-liquidity hours (UTC): skip 22:00 - 02:00
+SKIP_HOURS_UTC = {22, 23, 0, 1}
 
 
 # =============================================================================
@@ -280,35 +286,61 @@ def _format_prediction(pred: dict, is_auto=False) -> str:
 
 
 def _format_combined_signal(predictions: dict, filtered: dict) -> str:
-    """Format all pairs into one compact combined message."""
+    """Industry-grade combined signal message."""
     now_utc = datetime.now(timezone.utc)
     ist = now_utc + timedelta(hours=5, minutes=30)
-    time_str = f"{now_utc.strftime('%H:%M')} UTC / {ist.strftime('%H:%M')} IST"
+    time_str = f"{now_utc.strftime('%H:%M')} UTC | {ist.strftime('%H:%M')} IST"
+
+    # Win streak from recent outcomes
+    recent = _outcome_results[-20:] if _outcome_results else []
+    total_r = len(recent)
+    wins_r = sum(1 for r in recent if r["correct"])
+    wr = f"{wins_r}/{total_r}" if total_r > 0 else "—"
 
     lines = [
-        f"🤖 *AUTO-SIGNAL* — {time_str}",
-        f"━━━━━━━━━━━━━━━━━━━━━",
+        f"🤖 *QUOTEX LORD* — {time_str}",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
     ]
 
     for sym, pred in sorted(predictions.items()):
-        d = "⬆️" if pred["suggested_direction"] == "UP" else "⬇️"
+        d = "🟢" if pred["suggested_direction"] == "UP" else "🔴"
+        arrow = "⬆" if pred["suggested_direction"] == "UP" else "⬇"
         conf = pred["final_confidence_percent"]
         green = pred["green_probability_percent"]
         kelly = pred.get("kelly_fraction_percent", 0.0)
         trade = pred["suggested_trade"]
-        regime = pred.get("market_regime", "?")
-        r_emoji = {"Trending": "📈", "Ranging": "↔️",
-                   "High_Volatility": "🔥", "Low_Volatility": "❄️"}.get(regime, "")
+        regime = pred.get("market_regime", "")
+        r_e = {"↑Trend": "📈", "Trending": "📈", "Ranging": "↔️",
+               "High_Volatility": "🔥", "Low_Volatility": "❄️"}.get(regime, "")
+
+        # Position size from Kelly
+        if kelly > 3:
+            size = "🟢 1.5x"
+        elif kelly > 2:
+            size = "🟡 1.2x"
+        elif kelly > 1:
+            size = "🟠 0.8x"
+        else:
+            size = "⚪ 0.5x"
+
+        # Confidence bar
+        filled = int(conf / 10)
+        bar = "█" * filled + "░" * (10 - filled)
 
         lines.append(
-            f"\n{d} *{sym}* {r_emoji}\n"
-            f"   Prob *{green:.0f}%* | Conf *{conf:.0f}%* | K *{kelly:.1f}%*\n"
-            f"   💡 *{trade}*"
+            f"\n{d} *{sym}* {r_e} {arrow} *{pred['suggested_direction']}*\n"
+            f"  `[{bar}]` *{conf:.0f}%*\n"
+            f"  Prob *{green:.0f}%* │ Kelly *{kelly:.1f}%* │ {size}\n"
+            f"  💡 *{trade}*"
         )
 
+    # Footer
+    lines.append(f"\n━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"🎯 Recent: *{wr}* correct")
+
     if filtered:
-        skipped = ", ".join(f"{s} ({r})" for s, r in filtered.items())
-        lines.append(f"\n⏭️ Skipped: {skipped}")
+        skipped = ", ".join(f"{s}" for s in filtered)
+        lines.append(f"⏭ Skipped: _{skipped}_")
 
     return "\n".join(lines)
 
@@ -358,35 +390,59 @@ async def _auto_signal_job(app: Application):
             for info in active_subs.values():
                 needed_symbols.update(info.get("symbols", [DEFAULT_SYMBOL]))
 
+            # --- Time-of-day filter (global) ---
+            current_hour = datetime.now(timezone.utc).hour
+            if current_hour in SKIP_HOURS_UTC:
+                log.info("SKIPPED: low-liquidity hour %02d:00 UTC", current_hour)
+                await asyncio.sleep(15)
+                continue
+
             predictions = {}
-            filtered_out = {}  # {sym: reason}
+            filtered_out = {}
             for sym in needed_symbols:
                 try:
-                    # Cooldown check
+                    # 1. Cooldown check
                     if sym in _cooldown_until:
                         if datetime.now(timezone.utc) < _cooldown_until[sym]:
                             filtered_out[sym] = "cooldown"
-                            log.info("FILTERED %s: cooldown active", sym)
                             continue
                         else:
                             del _cooldown_until[sym]
 
+                    # 2. Regime transition skip
+                    if _regime_transition_skip.get(sym, 0) > 0:
+                        _regime_transition_skip[sym] -= 1
+                        filtered_out[sym] = f"regime shift ({_regime_transition_skip[sym]+1} left)"
+                        continue
+
                     pred = _run_prediction(sym)
                     conf = pred["final_confidence_percent"]
                     trade = pred["suggested_trade"]
+                    regime = pred.get("market_regime", "Unknown")
 
-                    # Signal quality filter
-                    if conf < MIN_CONFIDENCE_FILTER:
-                        filtered_out[sym] = f"low-conf ({conf:.0f}%)"
-                        log.info("FILTERED %s: conf %.1f%% < %.0f%%", sym, conf, MIN_CONFIDENCE_FILTER)
-                        continue
-                    if trade == "HOLD":
-                        filtered_out[sym] = "HOLD signal"
-                        log.info("FILTERED %s: HOLD signal", sym)
-                        continue
+                    # 3. Regime transition detection
+                    prev_regime = _last_regime.get(sym)
+                    if prev_regime and regime != prev_regime:
+                        _regime_transition_skip[sym] = REGIME_SKIP_CANDLES
+                        filtered_out[sym] = f"regime changed {prev_regime}→{regime}"
+                        log.info("REGIME SHIFT %s: %s -> %s, pausing %d candles",
+                                 sym, prev_regime, regime, REGIME_SKIP_CANDLES)
+                    _last_regime[sym] = regime
+
+                    # Log EVERY prediction to CSV (before filtering)
+                    _log_prediction_csv(sym, pred)
+
+                    # 4. Signal quality filters
                     if pred.get("error"):
                         filtered_out[sym] = pred["error"]
-                        log.info("FILTERED %s: error %s", sym, pred["error"])
+                        continue
+                    if conf < MIN_CONFIDENCE_FILTER:
+                        filtered_out[sym] = f"low-conf ({conf:.0f}%)"
+                        continue
+                    if trade == "HOLD":
+                        filtered_out[sym] = "HOLD"
+                        continue
+                    if sym in filtered_out:  # regime transition
                         continue
 
                     predictions[sym] = pred
@@ -400,12 +456,12 @@ async def _auto_signal_job(app: Application):
                         "confidence": conf,
                         "kelly": pred.get("kelly_fraction_percent", 0),
                         "trade": trade,
+                        "regime": regime,
                         "time": datetime.now(timezone.utc).isoformat(),
-                        "filtered": False,
                     })
                 except Exception as e:
-                    log.error("Auto-signal prediction failed for %s: %s", sym, e)
-                    record_error(f"auto-signal {sym}: {e}")
+                    log.error("Prediction failed %s: %s", sym, e)
+                    record_error(f"{sym}: {e}")
 
             # Send ONE combined message per subscriber (respecting alert mode)
             for chat_id, info in active_subs.items():
@@ -535,6 +591,32 @@ async def _check_outcomes(bot: Bot, predictions: dict, subscribers: dict):
                     log.error("Failed to send result to %s: %s", chat_id, e)
 
 
+
+def _log_prediction_csv(symbol, pred):
+    """Log EVERY prediction to CSV (before filtering). For weekly analysis."""
+    os.makedirs(os.path.dirname(PREDICTION_CSV), exist_ok=True)
+    header_needed = not os.path.exists(PREDICTION_CSV)
+    try:
+        with open(PREDICTION_CSV, "a") as f:
+            if header_needed:
+                f.write("timestamp,symbol,direction,green_prob,confidence,kelly,"
+                        "regime,trade,uncertainty,latency_ms\n")
+            f.write(
+                f"{datetime.now(timezone.utc).isoformat()},"
+                f"{symbol},"
+                f"{pred.get('suggested_direction', '?')},"
+                f"{pred.get('green_probability_percent', 50):.2f},"
+                f"{pred.get('final_confidence_percent', 0):.2f},"
+                f"{pred.get('kelly_fraction_percent', 0):.1f},"
+                f"{pred.get('market_regime', 'Unknown')},"
+                f"{pred.get('suggested_trade', 'HOLD')},"
+                f"{pred.get('uncertainty_percent', 0):.2f},"
+                f"{pred.get('latency_ms', -1)}\n"
+            )
+    except Exception as e:
+        log.error("Prediction CSV write failed: %s", e)
+
+
 def _log_outcome_csv(symbol, pred, actual_green, correct):
     """Append every signal outcome to CSV for offline analysis."""
     os.makedirs(os.path.dirname(SIGNAL_CSV), exist_ok=True)
@@ -567,7 +649,6 @@ async def _daily_report_job(app: Application):
     while True:
         try:
             now = datetime.now(timezone.utc)
-            # Calculate seconds until 21:00 UTC
             target = now.replace(hour=21, minute=0, second=0, microsecond=0)
             if now >= target:
                 target += timedelta(days=1)
@@ -575,7 +656,6 @@ async def _daily_report_job(app: Application):
             log.info("Daily report: next send in %.0f min at 21:00 UTC", wait_secs / 60)
             await asyncio.sleep(wait_secs)
 
-            # Build daily summary
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             today_res = [r for r in _outcome_results if r["time"].startswith(today)]
 
@@ -588,7 +668,6 @@ async def _daily_report_job(app: Application):
             losses = total - wins
             win_rate = wins / total * 100
 
-            # Per-symbol breakdown
             sym_stats = {}
             for r in today_res:
                 s = r["symbol"]
@@ -604,6 +683,7 @@ async def _daily_report_job(app: Application):
             best_rate = sym_stats[best_sym]["w"] / max(sym_stats[best_sym]["w"] + sym_stats[best_sym]["l"], 1) * 100
             worst_rate = sym_stats[worst_sym]["w"] / max(sym_stats[worst_sym]["w"] + sym_stats[worst_sym]["l"], 1) * 100
 
+            ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
             msg = (
                 f"📋 *Daily Report — {today}*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -612,31 +692,104 @@ async def _daily_report_job(app: Application):
                 f"🏆 Best: *{best_sym}* ({best_rate:.0f}%)\n"
                 f"📉 Worst: *{worst_sym}* ({worst_rate:.0f}%)\n\n"
             )
-
-            # Per-symbol detail
             for s, st in sorted(sym_stats.items()):
                 t = st["w"] + st["l"]
                 r = st["w"] / t * 100 if t > 0 else 0
                 emoji = "🟢" if r >= 60 else "🔴"
                 msg += f"  {emoji} {s}: {st['w']}/{t} ({r:.0f}%)\n"
 
-            # Send to all active subscribers
-            for chat_id, info in _subscribers.items():
-                if info.get("active", False):
-                    try:
-                        await bot.send_message(
-                            chat_id=int(chat_id),
-                            text=msg,
-                            parse_mode="Markdown",
-                        )
-                    except Exception as e:
-                        log.error("Daily report failed for %s: %s", chat_id, e)
-
+            await _broadcast_to_subscribers(bot, msg)
             await asyncio.sleep(60)
 
         except Exception as e:
             log.exception("Daily report error: %s", e)
             await asyncio.sleep(300)
+
+
+async def _weekly_report_job(app: Application):
+    """Send weekly accuracy report every Sunday at 21:05 UTC."""
+    bot: Bot = app.bot
+    log.info("Weekly report job started.")
+
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            # Find next Sunday
+            days_until_sunday = (6 - now.weekday()) % 7
+            if days_until_sunday == 0 and now.hour >= 21:
+                days_until_sunday = 7
+            target = (now + timedelta(days=days_until_sunday)).replace(
+                hour=21, minute=5, second=0, microsecond=0
+            )
+            wait_secs = (target - now).total_seconds()
+            log.info("Weekly report: next send in %.1f hours", wait_secs / 3600)
+            await asyncio.sleep(wait_secs)
+
+            # Build 7-day summary from outcome results
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            week_res = [r for r in _outcome_results if r["time"] >= cutoff]
+
+            if len(week_res) < 5:
+                await asyncio.sleep(60)
+                continue
+
+            total = len(week_res)
+            wins = sum(1 for r in week_res if r["correct"])
+            win_rate = wins / total * 100
+
+            # Per-symbol
+            sym_stats = {}
+            for r in week_res:
+                s = r["symbol"]
+                if s not in sym_stats:
+                    sym_stats[s] = {"w": 0, "l": 0}
+                if r["correct"]:
+                    sym_stats[s]["w"] += 1
+                else:
+                    sym_stats[s]["l"] += 1
+
+            # Confidence bins
+            high_conf = [r for r in week_res if r["confidence"] >= 70]
+            low_conf = [r for r in week_res if r["confidence"] < 70]
+            hc_rate = sum(1 for r in high_conf if r["correct"]) / max(len(high_conf), 1) * 100
+            lc_rate = sum(1 for r in low_conf if r["correct"]) / max(len(low_conf), 1) * 100
+
+            week_str = datetime.now(timezone.utc).strftime("%b %d")
+            msg = (
+                f"📊 *Weekly Report — Week of {week_str}*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📈 Total: *{total}* signals\n"
+                f"✅ Wins: *{wins}* | ❌ Losses: *{total - wins}*\n"
+                f"🎯 Win Rate: *{win_rate:.1f}%*\n\n"
+                f"🔥 High Conf (≥70%): *{hc_rate:.0f}%* ({len(high_conf)} signals)\n"
+                f"📉 Low Conf (<70%): *{lc_rate:.0f}%* ({len(low_conf)} signals)\n\n"
+            )
+            for s, st in sorted(sym_stats.items()):
+                t = st["w"] + st["l"]
+                r_pct = st["w"] / t * 100 if t > 0 else 0
+                emoji = "🟢" if r_pct >= 60 else "🟡" if r_pct >= 50 else "🔴"
+                msg += f"  {emoji} *{s}*: {st['w']}/{t} ({r_pct:.0f}%)\n"
+
+            msg += f"\n💡 _Retrain recommended if win rate < 55%_"
+
+            await _broadcast_to_subscribers(bot, msg)
+            await asyncio.sleep(60)
+
+        except Exception as e:
+            log.exception("Weekly report error: %s", e)
+            await asyncio.sleep(300)
+
+
+async def _broadcast_to_subscribers(bot: Bot, msg: str):
+    """Send a message to all active subscribers."""
+    for chat_id, info in _subscribers.items():
+        if info.get("active", False):
+            try:
+                await bot.send_message(
+                    chat_id=int(chat_id), text=msg, parse_mode="Markdown",
+                )
+            except Exception as e:
+                log.error("Broadcast failed for %s: %s", chat_id, e)
 
 
 # =============================================================================
@@ -1025,7 +1178,9 @@ async def post_init(app: Application):
     """Start background jobs after bot initializes."""
     asyncio.create_task(_auto_signal_job(app))
     asyncio.create_task(_daily_report_job(app))
-    log.info("Auto-signal + daily report jobs scheduled.")
+    asyncio.create_task(_weekly_report_job(app))
+    record_startup()
+    log.info("All background jobs scheduled (auto-signal + daily + weekly).")
 
 
 def main():
