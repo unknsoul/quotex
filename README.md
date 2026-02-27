@@ -85,3 +85,16 @@ Response:
 ## License
 
 MIT
+
+
+## Production Ops
+
+```bash
+# Telegram bot (loads models once on startup)
+python telegram_bot.py
+
+# Resolve past predictions with realized candle outcomes
+python update_prediction_outcomes.py --symbol EURUSD
+```
+
+Environment variables can be provided via `.env` (see `.env.example`).

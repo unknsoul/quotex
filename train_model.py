@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import os
+import json
 import logging
 
 import numpy as np
@@ -28,6 +29,7 @@ from calibration import CalibratedModel, build_seeded_xgb_ensemble
 from config import (
     MODEL_DIR, MODEL_PATH, FEATURE_LIST_PATH,
     ENSEMBLE_MODEL_PATH, OOF_PREDICTIONS_PATH,
+    DECISION_THRESHOLDS_PATH,
     DEFAULT_SYMBOL, TIMESERIES_SPLITS,
     XGB_N_ESTIMATORS, XGB_MAX_DEPTH, XGB_LEARNING_RATE,
     XGB_SUBSAMPLE, XGB_COLSAMPLE_BYTREE,
@@ -36,6 +38,7 @@ from config import (
     LOG_LEVEL, LOG_FORMAT,
 )
 from data_collector import load_csv, load_multi_tf
+from regime_detection import detect_regime_series
 from feature_engineering import (
     compute_features, add_target_atr_filtered, add_target, FEATURE_COLUMNS,
 )
@@ -84,6 +87,23 @@ def _generate_oof_predictions(X, y, spw, seeds, n_splits=OOF_INTERNAL_SPLITS):
     return oof_mean, oof_all, oof_mask
 
 
+def _optimize_decision_threshold(y_true, proba, t_min=0.40, t_max=0.60, step=0.01):
+    """Find threshold maximizing directional accuracy on provided rows."""
+    if len(y_true) == 0:
+        return 0.50, 0.0
+
+    best_t, best_acc = 0.50, -1.0
+    thresholds = np.arange(t_min, t_max + 1e-10, step)
+    for t in thresholds:
+        pred = (proba >= t).astype(int)
+        acc = float((pred == y_true).mean())
+        # tie-breaker: prefer closer to 0.5 (more stable)
+        if (acc > best_acc) or (abs(acc - best_acc) < 1e-10 and abs(t - 0.5) < abs(best_t - 0.5)):
+            best_acc = acc
+            best_t = float(t)
+    return best_t, best_acc
+
+
 def train(symbol):
     print(f"\n>> Loading data for {symbol}...")
     mtf = load_multi_tf(symbol)
@@ -99,6 +119,7 @@ def train(symbol):
     df_train = add_target_atr_filtered(df)
     df_train = df_train.dropna(subset=["target"]).reset_index(drop=True)
     df_train["target"] = df_train["target"].astype(int)
+    df_train["regime"] = detect_regime_series(df_train)
 
     X = df_train[FEATURE_COLUMNS]
     y = df_train["target"].values
@@ -136,6 +157,21 @@ def train(symbol):
     oof_all_valid = oof_all[:, oof_mask]  # [n_seeds × valid_count]
     oof_var = oof_all_valid.var(axis=0)
     print(f"   OOF ensemble variance: mean={oof_var.mean():.4f} max={oof_var.max():.4f}")
+
+    # OOF threshold optimization (leakage-safe): global + per-regime
+    global_t, global_acc = _optimize_decision_threshold(oof_actual, oof_p)
+    print(f"   OOF optimized threshold (global): t={global_t:.2f}, acc={global_acc:.4f}")
+
+    oof_global_indices = X_main.index[oof_mask]
+    oof_regimes = df_train.loc[oof_global_indices, "regime"].values
+    regime_thresholds = {}
+    for rg in sorted(set(oof_regimes)):
+        m = (oof_regimes == rg)
+        if int(m.sum()) < 100:
+            continue
+        rt, racc = _optimize_decision_threshold(oof_actual[m], oof_p[m])
+        regime_thresholds[rg] = round(rt, 2)
+        print(f"   OOF optimized threshold ({rg}): t={rt:.2f}, acc={racc:.4f}, n={int(m.sum())}")
 
     # =========================================================================
     # Step 2: Train production ensemble on full train_main, calibrate on cal_slice
@@ -223,6 +259,16 @@ def train(symbol):
     joblib.dump(oof_data, OOF_PREDICTIONS_PATH)
     print(f">> Saved OOF predictions -> {OOF_PREDICTIONS_PATH} ({oof_valid_count} rows)")
     print(f"   OOF data includes per-seed probabilities for variance-based uncertainty")
+
+    thresholds_payload = {
+        "global": round(global_t, 2),
+        "by_regime": regime_thresholds,
+        "source": "OOF_train_main",
+        "samples": int(oof_valid_count),
+    }
+    with open(DECISION_THRESHOLDS_PATH, "w", encoding="utf-8") as f:
+        json.dump(thresholds_payload, f, indent=2)
+    print(f">> Saved learned decision thresholds -> {DECISION_THRESHOLDS_PATH}")
     print(f"\n>> Done. Next: python meta_model.py --symbol {symbol}")
 
 

@@ -22,6 +22,7 @@ import json
 import os
 import logging
 import math
+import time
 from datetime import datetime, timezone, timedelta
 
 import MetaTrader5 as mt5
@@ -34,6 +35,7 @@ from config import (
     DEFAULT_SYMBOL, CANDLES_TO_FETCH,
     MT5_PATH, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER,
     TELEGRAM_BOT_TOKEN, TELEGRAM_SEND_BEFORE_CLOSE_SEC,
+    MAX_INFERENCE_SECONDS,
     LOG_LEVEL, LOG_FORMAT, LOG_DIR,
 )
 from data_collector import fetch_multi_timeframe
@@ -45,6 +47,7 @@ from predict_engine import (
 )
 from risk_filter import check_warnings
 from stability import AccuracyTracker, ConfidenceCorrelationTracker
+from production_state import touch_state, load_state
 
 log = logging.getLogger("telegram_bot")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
@@ -100,6 +103,25 @@ def _connect_mt5():
     return True
 
 
+
+
+def _ensure_mt5_ready() -> bool:
+    """Reconnect MT5 if disconnected."""
+    if mt5.terminal_info() is not None:
+        return True
+    log.warning("MT5 terminal not ready, reconnecting...")
+    return _connect_mt5()
+
+
+def _wait_until_send_time(send_time: datetime):
+    """Wait using server time so /next sends exactly before close."""
+    while True:
+        now = _get_server_time()
+        remaining = (send_time - now).total_seconds()
+        if remaining <= 0:
+            return
+        time.sleep(min(1.0, max(0.05, remaining / 2)))
+
 def _get_server_time():
     tick = mt5.symbol_info_tick(DEFAULT_SYMBOL)
     if tick is None:
@@ -132,27 +154,48 @@ def _get_spread(symbol: str) -> float:
 # =============================================================================
 
 def _run_prediction(symbol: str) -> dict:
-    data = fetch_multi_timeframe(symbol, CANDLES_TO_FETCH)
-    df = data.get("M5")
-    if df is None or len(df) == 0:
-        raise RuntimeError(f"No M5 data for {symbol}")
-    m15, h1 = data.get("M15"), data.get("H1")
+    if not _ensure_mt5_ready():
+        raise RuntimeError("MT5 unavailable.")
 
-    df = compute_features(df, m15_df=m15, h1_df=h1)
+    try:
+        data = fetch_multi_timeframe(symbol, CANDLES_TO_FETCH)
+    except Exception as e:
+        raise RuntimeError(f"MT5 fetch failed for {symbol}: {e}")
+
+    df_raw = data.get("M5")
+    if df_raw is None or len(df_raw) == 0:
+        raise RuntimeError(f"No M5 data for {symbol}")
+
+    # Ensure only closed candles are used from raw feed
+    if not verify_candle_closed(df_raw):
+        df_raw = df_raw.iloc[:-1]
+        if df_raw.empty:
+            raise RuntimeError("No closed M5 candle available.")
+
+    m15, h1 = data.get("M15"), data.get("H1")
+    df = compute_features(df_raw, m15_df=m15, h1_df=h1)
     if df.empty:
         raise RuntimeError("Not enough data for features.")
 
     if not verify_candle_closed(df):
         df = df.iloc[:-1]
         if df.empty:
-            raise RuntimeError("No closed candle available.")
+            raise RuntimeError("No closed feature row available.")
 
     regime = detect_regime(df)
     spread = _get_spread(symbol)
     risk_warnings = check_warnings(df, current_spread=spread)
+
+    t0 = time.perf_counter()
     result = predict(df, regime)
+    infer_latency = time.perf_counter() - t0
+    if infer_latency > MAX_INFERENCE_SECONDS:
+        raise RuntimeError(
+            f"Inference latency {infer_latency:.3f}s exceeds {MAX_INFERENCE_SECONDS:.3f}s"
+        )
 
     now = datetime.now(timezone.utc)
+    result["inference_latency_ms"] = round(infer_latency * 1000, 2)
     log_prediction(symbol, regime, result, risk_warnings=risk_warnings, timestamp=now)
 
     return {
@@ -669,7 +712,7 @@ async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
     if wait_seconds > 0:
-        await asyncio.sleep(wait_seconds)
+        await asyncio.to_thread(_wait_until_send_time, send_time)
 
     try:
         pred = _run_prediction(symbol)
@@ -684,12 +727,16 @@ async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     acc_status = _tracker.status()
     conf_status = _conf_tracker.status()
+    state = load_state()
     await update.message.reply_text(
         f"📊 *Engine Status*\n\n"
-        f"Accuracy: *{acc_status['rolling_accuracy']:.1%}*\n"
-        f"Predictions: *{acc_status['predictions_tracked']}*\n"
-        f"Correlation: *{conf_status['confidence_correlation']:.3f}*\n"
-        f"Retrain: *{acc_status['should_retrain']}*",
+        f"Runtime Accuracy: *{acc_status['rolling_accuracy']:.1%}*\n"
+        f"Runtime Correlation: *{conf_status['confidence_correlation']:.3f}*\n"
+        f"State Accuracy: *{state.get('rolling_accuracy', 0.5):.1%}*\n"
+        f"State Spearman: *{state.get('rolling_spearman', 0.0):.3f}*\n"
+        f"Model: *{state.get('model_version', 'unknown')}*\n"
+        f"Last Retrain: *{state.get('last_retrain_time', 'n/a')}*\n"
+        f"Retrain Trigger: *{acc_status['should_retrain']}*",
         parse_mode="Markdown",
     )
 
@@ -716,6 +763,7 @@ def main():
 
     try:
         load_models()
+        touch_state(model_version="xgb_ensemble_meta_weight")
         log.info("Models pre-loaded.")
     except Exception as e:
         log.warning("Could not pre-load models: %s", e)
