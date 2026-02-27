@@ -187,6 +187,47 @@ def _get_spread(symbol: str) -> float:
     return float(info.spread) if info else 0.0
 
 
+def _is_market_open() -> bool:
+    """Check if forex market is open (not weekend, MT5 has fresh data)."""
+    now = datetime.now(timezone.utc)
+    # Forex closes Friday ~22:00 UTC, opens Sunday ~22:00 UTC
+    if now.weekday() == 5:  # Saturday — always closed
+        return False
+    if now.weekday() == 6 and now.hour < 22:  # Sunday before 22:00
+        return False
+    if now.weekday() == 4 and now.hour >= 22:  # Friday after 22:00
+        return False
+    # Check if MT5 has recent tick
+    tick = mt5.symbol_info_tick(DEFAULT_SYMBOL)
+    if tick is None:
+        return False
+    tick_age = now.timestamp() - tick.time
+    return tick_age < 600  # stale if >10 min
+
+
+def _market_closed_msg() -> str:
+    """Friendly message when market is closed."""
+    now = datetime.now(timezone.utc)
+    ist = now + timedelta(hours=5, minutes=30)
+    # Next Monday 00:05 UTC
+    days_to_mon = (7 - now.weekday()) % 7
+    if days_to_mon == 0:
+        days_to_mon = 7
+    next_open = (now + timedelta(days=days_to_mon)).replace(
+        hour=0, minute=5, second=0, microsecond=0
+    )
+    hours_left = (next_open - now).total_seconds() / 3600
+    return (
+        "🔒 *Market Closed*\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Forex market is closed for the weekend.\n\n"
+        f"📅 Opens: *Monday ~00:05 UTC*\n"
+        f"🇮🇳 IST: *~05:35 Monday*\n"
+        f"⏳ In: *~{hours_left:.0f} hours*\n\n"
+        "💡 _Auto-signals will resume automatically._"
+    )
+
+
 # =============================================================================
 #  Prediction Pipeline
 # =============================================================================
@@ -950,6 +991,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("now_"):
         symbol = data.replace("now_", "")
+        if not _is_market_open():
+            await query.edit_message_text(
+                _market_closed_msg(), parse_mode="Markdown",
+                reply_markup=_back_keyboard(chat_id))
+            return
         await query.edit_message_text(f"⏳ Running *{symbol}*...", parse_mode="Markdown")
         try:
             pred = _run_prediction(symbol)
@@ -971,6 +1017,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("next_"):
         symbol = data.replace("next_", "")
+        if not _is_market_open():
+            await query.edit_message_text(
+                _market_closed_msg(), parse_mode="Markdown",
+                reply_markup=_back_keyboard(chat_id))
+            return
         if not _validate_symbol(symbol):
             await query.edit_message_text(f"❌ `{symbol}` not found.",
                                           reply_markup=_back_keyboard(chat_id))
@@ -1001,6 +1052,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ----- Multi-Symbol -----
     elif data == "multi_symbol":
+        if not _is_market_open():
+            await query.edit_message_text(
+                _market_closed_msg(), parse_mode="Markdown",
+                reply_markup=_back_keyboard(chat_id))
+            return
         await query.edit_message_text("📈 *Scanning all symbols...*", parse_mode="Markdown")
         results = []
         for sym in SYMBOLS:
@@ -1042,6 +1098,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ----- Regime -----
     elif data == "regime":
+        if not _is_market_open():
+            await query.edit_message_text(
+                _market_closed_msg(), parse_mode="Markdown",
+                reply_markup=_back_keyboard(chat_id))
+            return
         try:
             data_dict = fetch_multi_timeframe(DEFAULT_SYMBOL, CANDLES_TO_FETCH)
             df = data_dict.get("M5")
