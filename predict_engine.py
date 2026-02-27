@@ -29,6 +29,7 @@ from scipy import stats
 from config import (
     MODEL_PATH, FEATURE_LIST_PATH, ENSEMBLE_MODEL_PATH,
     META_MODEL_PATH, META_FEATURE_LIST_PATH, WEIGHT_MODEL_PATH,
+    DECISION_THRESHOLDS_PATH,
     MODEL_DIR, LOG_DIR, PREDICTION_LOG_CSV, PREDICTION_LOG_JSON,
     CONFIDENCE_HIGH_MIN, CONFIDENCE_MEDIUM_MIN,
     ATR_PERCENTILE_WINDOW,
@@ -47,6 +48,7 @@ _primary_features = None
 _meta_model = None
 _meta_features = None
 _weight_model = None
+_decision_thresholds = None
 _prediction_history = []
 _direction_history = []
 
@@ -76,20 +78,21 @@ def set_retrain_flag(active):
 def reload_models():
     """Force reload models from disk (called after retrain completes)."""
     global _ensemble, _primary_features, _meta_model
-    global _meta_features, _weight_model
+    global _meta_features, _weight_model, _decision_thresholds
     with _model_lock:
         _ensemble = None
         _primary_features = None
         _meta_model = None
         _meta_features = None
         _weight_model = None
+        _decision_thresholds = None
     load_models()
     log.info("Models reloaded from disk.")
 
 
 def load_models():
     global _ensemble, _primary_features, _meta_model, _meta_calibrator
-    global _meta_features, _weight_model
+    global _meta_features, _weight_model, _decision_thresholds
 
     with _model_lock:
         if _ensemble is None:
@@ -111,6 +114,15 @@ def load_models():
         if _weight_model is None and os.path.exists(WEIGHT_MODEL_PATH):
             _weight_model = joblib.load(WEIGHT_MODEL_PATH)
             log.info("Weight model loaded.")
+
+        if _decision_thresholds is None:
+            if os.path.exists(DECISION_THRESHOLDS_PATH):
+                with open(DECISION_THRESHOLDS_PATH, "r", encoding="utf-8") as f:
+                    _decision_thresholds = json.load(f)
+                log.info("Decision thresholds loaded from %s", DECISION_THRESHOLDS_PATH)
+            else:
+                _decision_thresholds = {"global": 0.5, "by_regime": {}}
+                log.info("Decision thresholds file missing. Using default threshold=0.50")
 
     return _ensemble, _primary_features, _meta_model, _meta_features, _weight_model
 
@@ -189,6 +201,13 @@ def get_confidence_reliability():
     return round(corr, 4), alert
 
 
+
+
+def _get_decision_threshold(regime):
+    thresholds = _decision_thresholds or {"global": 0.5, "by_regime": {}}
+    by_regime = thresholds.get("by_regime", {})
+    return float(by_regime.get(regime, thresholds.get("global", 0.5)))
+
 def predict(df, regime):
     """
     Generate prediction using cached models.
@@ -206,6 +225,7 @@ def predict(df, regime):
     all_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
     green_p = float(all_probs.mean())
     red_p = 1.0 - green_p
+    decision_t = _get_decision_threshold(regime)
     variance = float(all_probs.var())
     max_var = 0.25
     norm_var = min(variance / max_var, 1.0)
@@ -242,7 +262,7 @@ def predict(df, regime):
     red_pct = round(red_p * 100, 2)
     meta_pct = round(meta_rel * 100, 2)
     confidence_pct = round(confidence * 100, 2)
-    direction = "GREEN" if green_p >= 0.5 else "RED"
+    direction = "GREEN" if green_p >= decision_t else "RED"
 
     if confidence_pct >= CONFIDENCE_HIGH_MIN:
         conf_level = "High"
@@ -263,15 +283,18 @@ def predict(df, regime):
 
     # Trade suggestion
     thresholds = get_regime_thresholds(regime)
-    if green_p >= thresholds["primary"] and meta_rel >= thresholds["meta"]:
+    primary_buy_t = max(thresholds["primary"], decision_t)
+    primary_sell_t = min(1 - thresholds["primary"], decision_t)
+
+    if green_p >= primary_buy_t and meta_rel >= thresholds["meta"]:
         trade = "BUY"
-    elif green_p <= (1 - thresholds["primary"]) and meta_rel >= thresholds["meta"]:
+    elif green_p <= primary_sell_t and meta_rel >= thresholds["meta"]:
         trade = "SELL"
     else:
         trade = "HOLD"
 
     # Update direction history for live parity
-    _direction_history.append(1 if green_p >= 0.5 else 0)
+    _direction_history.append(1 if green_p >= decision_t else 0)
     if len(_direction_history) > 500:
         _direction_history.pop(0)
 
@@ -287,8 +310,9 @@ def predict(df, regime):
         "confidence_reliability_score": conf_reliability,
         "kelly_fraction_percent": kelly_pct,
         "suggested_trade": trade,
-        "suggested_direction": "UP" if green_p >= 0.5 else "DOWN",
+        "suggested_direction": "UP" if green_p >= decision_t else "DOWN",
         "market_regime": regime,
+        "decision_threshold": round(decision_t, 2),
     }
 
     log.info("Pred: green=%.1f%% meta=%.1f%% unc=%.1f%% conf=%.1f%% adapt=%.1f%% kelly=%.1f%% -> %s",
@@ -336,8 +360,24 @@ def _adaptive_confidence(raw_confidence):
     return round(adapted, 2)
 
 
-def log_prediction(symbol, regime, prediction, risk_warnings=None, timestamp=None):
+
+
+def ensure_prediction_log_file():
+    """Create predictions.csv with stable headers if missing."""
     os.makedirs(LOG_DIR, exist_ok=True)
+    if os.path.exists(PREDICTION_LOG_CSV):
+        return
+    base_cols = [
+        "timestamp", "symbol", "regime",
+        "green_probability_percent", "red_probability_percent",
+        "final_confidence_percent", "meta_reliability_percent",
+        "uncertainty_percent", "suggested_trade", "suggested_direction",
+        "risk_warnings",
+    ]
+    pd.DataFrame(columns=base_cols).to_csv(PREDICTION_LOG_CSV, index=False)
+
+def log_prediction(symbol, regime, prediction, risk_warnings=None, timestamp=None):
+    ensure_prediction_log_file()
     if timestamp is None:
         timestamp = datetime.now(timezone.utc)
     record = {

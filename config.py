@@ -6,6 +6,10 @@ Leakage-free pipeline: 5 seeded XGBoost + isotonic calibration + OOF meta/weight
 
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # --- Project Paths -----------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -20,9 +24,11 @@ META_MODEL_PATH = os.path.join(MODEL_DIR, "meta_model.pkl")
 META_FEATURE_LIST_PATH = os.path.join(MODEL_DIR, "meta_features.pkl")
 OOF_PREDICTIONS_PATH = os.path.join(MODEL_DIR, "oof_predictions.pkl")
 WEIGHT_MODEL_PATH = os.path.join(MODEL_DIR, "weight_model.pkl")
+DECISION_THRESHOLDS_PATH = os.path.join(MODEL_DIR, "decision_thresholds.json")
 
 PREDICTION_LOG_CSV = os.path.join(LOG_DIR, "predictions.csv")
 PREDICTION_LOG_JSON = os.path.join(LOG_DIR, "predictions.json")
+PRODUCTION_STATE_PATH = os.path.join(LOG_DIR, "production_state.json")
 
 # --- MetaTrader5 -------------------------------------------------------------
 MT5_PATH = os.getenv("MT5_PATH", "")
@@ -143,6 +149,7 @@ LOG_FORMAT = "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
 # --- Telegram Bot ------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_SEND_BEFORE_CLOSE_SEC = 5
+MAX_INFERENCE_SECONDS = float(os.getenv("MAX_INFERENCE_SECONDS", "1.0"))
 
 # --- Auto-Learning -----------------------------------------------------------
 AUTO_RETRAIN_ACCURACY_TRIGGER = 0.52
