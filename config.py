@@ -5,9 +5,11 @@ Leakage-free pipeline: 5 seeded XGBoost + isotonic calibration + OOF meta/weight
 """
 
 import os
+from dotenv import load_dotenv
 
 # --- Project Paths -----------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
@@ -20,6 +22,7 @@ META_MODEL_PATH = os.path.join(MODEL_DIR, "meta_model.pkl")
 META_FEATURE_LIST_PATH = os.path.join(MODEL_DIR, "meta_features.pkl")
 OOF_PREDICTIONS_PATH = os.path.join(MODEL_DIR, "oof_predictions.pkl")
 WEIGHT_MODEL_PATH = os.path.join(MODEL_DIR, "weight_model.pkl")
+DECISION_THRESHOLDS_PATH = os.path.join(MODEL_DIR, "decision_thresholds.json")
 
 PREDICTION_LOG_CSV = os.path.join(LOG_DIR, "predictions.csv")
 PREDICTION_LOG_JSON = os.path.join(LOG_DIR, "predictions.json")
@@ -31,8 +34,8 @@ MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
 MT5_SERVER = os.getenv("MT5_SERVER", "")
 
 # --- Data Settings -----------------------------------------------------------
-DEFAULT_SYMBOL = "EURUSD"
-CANDLES_TO_FETCH = 15000
+DEFAULT_SYMBOL = os.getenv("DEFAULT_SYMBOL", "EURUSD")
+CANDLES_TO_FETCH = int(os.getenv("CANDLES_TO_FETCH", "15000"))
 MTF_TIMEFRAMES = ["M5", "M15", "H1"]
 
 # --- EMA Periods -------------------------------------------------------------
@@ -137,15 +140,20 @@ SESSION_LONDON = (8, 16)
 SESSION_NEW_YORK = (13, 21)
 
 # --- Logging -----------------------------------------------------------------
-LOG_LEVEL = "INFO"
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FORMAT = "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
 
 # --- Telegram Bot ------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_SEND_BEFORE_CLOSE_SEC = 5
+TELEGRAM_SEND_BEFORE_CLOSE_SEC = int(os.getenv("TELEGRAM_SEND_BEFORE_CLOSE_SEC", "5"))
 
 # --- Auto-Learning -----------------------------------------------------------
 AUTO_RETRAIN_ACCURACY_TRIGGER = 0.52
 AUTO_RETRAIN_CORRELATION_TRIGGER = 0.1
 DATA_BUFFER_SIZE = 20000
 MODEL_BACKUP_DIR = os.path.join(BASE_DIR, "models", "backup")
+
+# --- Production Runtime -------------------------------------------------------
+PRODUCTION_STATE_PATH = os.path.join(LOG_DIR, "production_state.json")
+MODEL_VERSION = os.getenv("MODEL_VERSION", "unknown")
+INFERENCE_TIMEOUT_SEC = float(os.getenv("INFERENCE_TIMEOUT_SEC", "1.0"))

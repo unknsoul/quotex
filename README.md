@@ -85,3 +85,17 @@ Response:
 ## License
 
 MIT
+
+
+## Production Runtime Additions
+
+- `.env` support is enabled via `config.py` (see `.env.example`).
+- Telegram `/next <symbol>` schedules a single prediction 5 seconds before the next M5 close.
+- Runtime production state is persisted at `logs/production_state.json`.
+- Prediction logs are appended to `logs/predictions.csv` and `logs/predictions.json`.
+- Correctness backfill script:
+
+```bash
+python update_prediction_correctness.py --symbol EURUSD
+```
+
