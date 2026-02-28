@@ -234,10 +234,10 @@ def train_meta(symbol):
 
     # LEAKAGE CHECK
     if avg["acc"] > 0.75:
-        print(f"\n  ⚠️  WARNING: Meta CV accuracy {avg['acc']:.1%} is suspiciously high.")
+        print(f"\n  [WARN] WARNING: Meta CV accuracy {avg['acc']:.1%} is suspiciously high.")
         print(f"     Honest OOF meta should be 55-65%. Check for leakage!")
     elif avg["acc"] > 0.50:
-        print(f"\n  ✅ Meta accuracy {avg['acc']:.1%} is in expected range (no leakage)")
+        print(f"\n  [OK] Meta accuracy {avg['acc']:.1%} is in expected range (no leakage)")
 
     # =========================================================================
     # Train final meta model with sigmoid calibration (Platt scaling)
@@ -276,9 +276,9 @@ def train_meta(symbol):
     meta_corr = float(meta_corr) if not np.isnan(meta_corr) else 0.0
     print(f"\n  Meta Spearman correlation (proba vs target): {meta_corr:.4f}")
     if meta_corr < 0.2:
-        print(f"  ⚠️  WARNING: Meta correlation {meta_corr:.4f} < 0.2 — meta may be unreliable")
+        print(f"  [WARN] WARNING: Meta correlation {meta_corr:.4f} < 0.2 -- meta may be unreliable")
     else:
-        print(f"  ✅ Meta correlation {meta_corr:.4f} is acceptable")
+        print(f"  [OK] Meta correlation {meta_corr:.4f} is acceptable")
 
     # Save — no separate calibrator needed, CalibratedClassifierCV wraps it
     joblib.dump(final, META_MODEL_PATH)

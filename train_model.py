@@ -28,6 +28,7 @@ from calibration import CalibratedModel, build_seeded_xgb_ensemble
 from config import (
     MODEL_DIR, MODEL_PATH, FEATURE_LIST_PATH,
     ENSEMBLE_MODEL_PATH, OOF_PREDICTIONS_PATH,
+    SELECTED_FEATURES_PATH,
     DEFAULT_SYMBOL, TIMESERIES_SPLITS,
     XGB_N_ESTIMATORS, XGB_MAX_DEPTH, XGB_LEARNING_RATE,
     XGB_SUBSAMPLE, XGB_COLSAMPLE_BYTREE,
@@ -104,7 +105,21 @@ def train(symbol):
     df_train = df_train.dropna(subset=["target"]).reset_index(drop=True)
     df_train["target"] = df_train["target"].astype(int)
 
-    X = df_train[FEATURE_COLUMNS]
+    # Phase 3: Use selected features if available
+    use_features = list(FEATURE_COLUMNS)
+    if os.path.exists(SELECTED_FEATURES_PATH):
+        selected = joblib.load(SELECTED_FEATURES_PATH)
+        # Verify all selected features exist in FEATURE_COLUMNS
+        valid = [f for f in selected if f in FEATURE_COLUMNS]
+        if len(valid) >= 20:  # sanity check: don't use too few features
+            use_features = valid
+            print(f"   Using {len(use_features)} selected features (pruned from {len(FEATURE_COLUMNS)})")
+        else:
+            print(f"   Selected features too few ({len(valid)}), using all {len(FEATURE_COLUMNS)}")
+    else:
+        print(f"   Using all {len(use_features)} features")
+
+    X = df_train[use_features]
     y = df_train["target"].values
     n_green, n_red = int(y.sum()), len(y) - int(y.sum())
     spw = n_red / max(n_green, 1)
@@ -198,7 +213,7 @@ def train(symbol):
         order = np.argsort(imp)[::-1]
         print("\n  Top 10 features:")
         for rank, idx in enumerate(order[:10], 1):
-            name = FEATURE_COLUMNS[idx] if idx < len(FEATURE_COLUMNS) else f"feat_{idx}"
+            name = use_features[idx] if idx < len(use_features) else f"feat_{idx}"
             print(f"    {rank:>2}. {name:<26s} {imp[idx]:.4f}")
     except Exception:
         pass
@@ -209,8 +224,9 @@ def train(symbol):
     os.makedirs(MODEL_DIR, exist_ok=True)
     joblib.dump(ensemble[0], MODEL_PATH)
     joblib.dump(ensemble, ENSEMBLE_MODEL_PATH)
-    joblib.dump(FEATURE_COLUMNS, FEATURE_LIST_PATH)
+    joblib.dump(use_features, FEATURE_LIST_PATH)  # save actual features used
     print(f"\n>> Saved ensemble ({len(ensemble)} models) -> {ENSEMBLE_MODEL_PATH}")
+    print(f"   Features used: {len(use_features)} -> {FEATURE_LIST_PATH}")
 
     # OOF data for meta + weight training
     oof_indices = np.where(oof_mask)[0]
@@ -221,7 +237,7 @@ def train(symbol):
         "actual": oof_actual,
         "indices": oof_indices,
         "feature_importances": imp.tolist() if imp is not None else [],
-        "feature_names": list(FEATURE_COLUMNS),
+        "feature_names": list(use_features),
         "df_train_len": len(X),                       # for integrity check
     }
     joblib.dump(oof_data, OOF_PREDICTIONS_PATH)

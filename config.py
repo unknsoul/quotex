@@ -27,6 +27,8 @@ META_MODEL_PATH = os.path.join(MODEL_DIR, "meta_model.pkl")
 META_FEATURE_LIST_PATH = os.path.join(MODEL_DIR, "meta_features.pkl")
 OOF_PREDICTIONS_PATH = os.path.join(MODEL_DIR, "oof_predictions.pkl")
 WEIGHT_MODEL_PATH = os.path.join(MODEL_DIR, "weight_model.pkl")
+CONFIDENCE_THRESHOLDS_PATH = os.path.join(MODEL_DIR, "confidence_thresholds.pkl")
+SELECTED_FEATURES_PATH = os.path.join(MODEL_DIR, "selected_features.pkl")
 
 PREDICTION_LOG_CSV = os.path.join(LOG_DIR, "predictions.csv")
 PREDICTION_LOG_JSON = os.path.join(LOG_DIR, "predictions.json")
@@ -92,6 +94,21 @@ REGIME_THRESHOLDS = {
 PRIMARY_BASE_THRESHOLD = 0.60
 META_BASE_THRESHOLD = 0.60
 
+# --- Adaptive Regime Filter (Phase 3) ---------------------------------------
+REGIME_FILTER_ENABLED = True
+REGIME_SKIP_ACCURACY_THRESHOLD = 0.55  # skip if rolling accuracy < 55%
+REGIME_COOLDOWN_BARS = 10              # bars to stay in cooldown after accuracy drop
+REGIME_ROLLING_ACCURACY_WINDOW = 20    # rolling window for accuracy check
+SESSION_FILTER_ENABLED = True
+# Session confidence multipliers (learned: London best, Asian worst)
+SESSION_CONFIDENCE_MULT = {
+    "London":   1.0,    # best session
+    "New_York": 0.95,   # good, but slightly worse
+    "Overlap":  1.0,    # London+NY overlap = best liquidity
+    "Asian":    0.85,   # lowest predictability
+    "Off":      0.80,   # off-hours
+}
+
 # --- Confidence Levels (%) --------------------------------------------------
 CONFIDENCE_HIGH_MIN = 75.0
 CONFIDENCE_MEDIUM_MIN = 60.0
@@ -119,6 +136,7 @@ CALIBRATION_SPLIT_RATIO = 0.8  # 80% train_main, 20% calibration
 # --- OOF Settings ------------------------------------------------------------
 OOF_INTERNAL_SPLITS = 3  # For generating OOF predictions within train_main
 PURGE_EMBARGO_BARS = 50  # purge gap between train/test to prevent leakage
+ROLLING_TRAIN_WINDOW = 0  # 0=expanding, >0=rolling window (bars). Try 5000 (~17 days M5)
 
 # --- Meta Model (LightGBM) --------------------------------------------------
 META_N_ESTIMATORS = 200

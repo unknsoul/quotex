@@ -51,7 +51,7 @@ from data_collector import load_csv, load_multi_tf
 from feature_engineering import (
     compute_features, add_target, add_target_atr_filtered, FEATURE_COLUMNS,
 )
-from regime_detection import detect_regime, detect_regime_series, REGIMES
+from regime_detection import detect_regime, detect_regime_series, REGIMES, get_session
 from stability import CosineDriftDetector
 
 log = logging.getLogger("backtest")
@@ -353,10 +353,20 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0)
             meta_history.append(correct)
             dir_history.append(direction)
 
+            # Detect session
+            session = "Off"
+            try:
+                t = df_eval.iloc[i].get("time", None)
+                if t is not None and hasattr(t, 'hour'):
+                    session = get_session(t.hour)
+            except Exception:
+                pass
+
             all_results.append({
                 "bar": i, "green_p": green_p, "meta_rel": meta_rel,
                 "confidence": confidence, "uncertainty": norm_var * 100,
                 "correct": correct, "regime": regime, "cycle": cycle,
+                "session": session,
             })
 
         test_acc = cycle_correct / max(test_end - test_start, 1)
@@ -502,6 +512,21 @@ def print_report(result):
         s = regime_stats[reg]
         print(f"  {reg:<18} {s['t']:>7} {s['c']/s['t']*100 if s['t'] else 0:>7.1f}%")
 
+    # Session breakdown
+    sessions = ["Asian", "London", "Overlap", "New_York", "Off"]
+    session_stats = {s: {"t": 0, "c": 0} for s in sessions}
+    for r in results:
+        s = r.get("session", "Off")
+        if s in session_stats:
+            session_stats[s]["t"] += 1
+            session_stats[s]["c"] += r["correct"]
+    print(f"\n  {'Session':<18} {'Total':>7} {'Acc':>8}")
+    print(f"  {'-'*35}")
+    for sess in sessions:
+        s = session_stats[sess]
+        if s["t"] > 0:
+            print(f"  {sess:<18} {s['t']:>7} {s['c']/s['t']*100:>7.1f}%")
+
     # ================================================================
     # PROBABILITY RELIABILITY METRICS
     # ================================================================
@@ -535,7 +560,7 @@ def print_report(result):
     confs = [r["confidence"] for r in results]
     corr_all, _ = stats.spearmanr(confs, actuals)
     corr_all = float(corr_all) if not np.isnan(corr_all) else 0.0
-    status = "\u2705" if corr_all >= 0.2 else ("\u26a0\ufe0f" if corr_all >= 0.1 else "\u274c")
+    status = "[OK]" if corr_all >= 0.2 else ("[WARN]" if corr_all >= 0.1 else "[BAD]")
     print(f"    Spearman(conf, correct): {corr_all:.4f} {status}")
 
     # ================================================================

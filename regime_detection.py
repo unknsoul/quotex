@@ -79,3 +79,48 @@ def get_volatility_status(df: pd.DataFrame) -> str:
     if atr_now < atr_mean * ATR_LOW_VOL_MULTIPLIER:
         return "Low"
     return "Normal"
+
+
+def regime_stability_score(df: pd.DataFrame) -> float:
+    """
+    Detect regime transition instability by comparing regimes at multiple lookbacks.
+    
+    Returns 0.0 (unstable / transitioning) to 1.0 (stable / all lookbacks agree).
+    When lookbacks disagree, the market is likely switching regimes — accuracy drops.
+    """
+    if len(df) < 200:
+        return 0.5  # not enough data to assess
+
+    lookbacks = [50, 100, 200]
+    regimes = []
+    for lb in lookbacks:
+        start = max(0, len(df) - lb)
+        window = df.iloc[start:]
+        if len(window) >= 50 and "atr_14" in window.columns and "adx" in window.columns:
+            regimes.append(detect_regime(window))
+        else:
+            regimes.append("Ranging")
+
+    # Score: 1.0 if all agree, 0.67 if 2/3 agree, 0.33 if all different
+    agreements = sum(1 for r in regimes if r == regimes[0])
+    if agreements == 3:
+        return 1.0
+    elif agreements == 2 or regimes[1] == regimes[2]:
+        return 0.67
+    else:
+        return 0.33
+
+
+def get_session(hour: int) -> str:
+    """Identify trading session from UTC hour."""
+    from config import SESSION_ASIA, SESSION_LONDON, SESSION_NEW_YORK
+    # Check overlap first (London + NY)
+    if SESSION_LONDON[0] <= hour < SESSION_NEW_YORK[1] and SESSION_NEW_YORK[0] <= hour:
+        return "Overlap"
+    if SESSION_LONDON[0] <= hour < SESSION_LONDON[1]:
+        return "London"
+    if SESSION_NEW_YORK[0] <= hour < SESSION_NEW_YORK[1]:
+        return "New_York"
+    if SESSION_ASIA[0] <= hour < SESSION_ASIA[1]:
+        return "Asian"
+    return "Off"

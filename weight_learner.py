@@ -117,12 +117,30 @@ def train_weights(symbol):
             ds = 1
         dir_streaks.append(ds)
 
+    # Regime duration
+    regime_dur = []
+    dur = 1
+    for i in range(len(regimes)):
+        if i > 0 and regimes.iloc[i] == regimes.iloc[i - 1]:
+            dur += 1
+        else:
+            dur = 1
+        regime_dur.append(dur)
+
+    # Hour encoding
+    if "time" in sub.columns:
+        hours = pd.to_datetime(sub["time"]).dt.hour
+    else:
+        hours = pd.Series(np.zeros(len(sub)), index=sub.index)
+
     meta_rows = pd.DataFrame({
         "primary_green_prob": oof_proba,
         "prob_distance_from_half": np.abs(oof_proba - 0.5),
         "primary_entropy": _binary_entropy(oof_proba),
         "ensemble_variance": oof_var,
+        "ensemble_disagreement": oof_all.max(axis=0) - oof_all.min(axis=0),
         "regime_encoded": regime_enc.values,
+        "regime_duration": regime_dur,
         "atr_value": sub["atr_14"].values if "atr_14" in sub.columns else 0,
         "volatility_zscore": sub["volatility_zscore"].values if "volatility_zscore" in sub.columns else 0,
         "range_position": sub["range_position"].values if "range_position" in sub.columns else 0.5,
@@ -135,6 +153,7 @@ def train_weights(symbol):
             sub["atr_14"].rolling(ATR_PERCENTILE_WINDOW, min_periods=1).rank(pct=True).values
             if "atr_14" in sub.columns else 0.5
         ),
+        "hour_sin": np.sin(2 * np.pi * hours / 24),
     })
     meta_input = meta_rows[meta_feat_cols].fillna(0)
     # CalibratedClassifierCV already applies sigmoid internally
@@ -193,9 +212,9 @@ def train_weights(symbol):
 
     # Verify uncertainty coef is negative (higher uncertainty → lower confidence)
     if coefs["uncertainty"] < 0:
-        print("  ✅ Uncertainty coefficient is negative (correct)")
+        print("  [OK] Uncertainty coefficient is negative (correct)")
     else:
-        print("  ⚠️  Uncertainty coefficient is positive (unexpected)")
+        print("  [WARN] Uncertainty coefficient is positive (unexpected)")
 
     joblib.dump(final, WEIGHT_MODEL_PATH)
     print(f"\n>> Saved weight model -> {WEIGHT_MODEL_PATH}")
