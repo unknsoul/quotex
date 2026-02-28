@@ -1,14 +1,14 @@
 """
-Calibration — CalibratedModel + hybrid ensemble builder.
+Calibration v2 — Diverse hybrid ensemble + isotonic calibration.
 
-Ensemble: 3 XGBoost + 2 ExtraTrees with different random seeds + temporal windows.
+Ensemble: 3 XGBoost (varied depth/LR) + 2 ExtraTrees (different trees).
 Each model is calibrated with isotonic regression on a held-out calibration slice.
-Algorithm diversity (XGB vs ExtraTrees) creates more informative ensemble variance.
+Algorithm + hyperparameter diversity creates truly informative ensemble variance.
 """
 
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
-from sklearn.ensemble import ExtraTreesClassifier
+from sklearn.ensemble import ExtraTreesClassifier, GradientBoostingClassifier
 import xgboost as xgb
 
 
@@ -47,17 +47,15 @@ def build_calibrated_model(base_model, X_val, y_val, name="model"):
 def build_seeded_xgb_ensemble(X_train, y_train, X_cal, y_cal, spw=1.0,
                                xgb_params=None, seeds=None, temporal=True):
     """
-    Build a hybrid 5-model ensemble: 3 XGBoost + 2 ExtraTrees.
+    Build a diverse 5-model ensemble:
+      - XGB deep (depth=6, LR=0.03, 40% window) — captures complex recent patterns
+      - XGB medium (depth=4, LR=0.05, 70% window) — balanced depth + medium history
+      - XGB full (depth=5, LR=0.05, 100% window) — full history baseline
+      - ExtraTrees shallow (depth=8, 40% window) — random splits, recent data
+      - ExtraTrees full (depth=12, 100% window) — random splits, full history
 
-    Different algorithms capture different patterns. Ensemble variance
-    from mixed algorithms is more informative than same-algorithm variance.
-
-    Temporal windowing:
-      - Model 0 (XGB, 40%): recent patterns
-      - Model 1 (XGB, 70%): medium history
-      - Model 2 (XGB, 100%): full history
-      - Model 3 (ET, 40%): recent patterns (different algorithm)
-      - Model 4 (ET, 100%): full history (different algorithm)
+    Algorithm diversity (XGB vs ExtraTrees) + hyperparameter diversity (depth/LR)
+    creates maximally informative ensemble variance for the meta model.
 
     Returns list of CalibratedModel.
     """
@@ -67,35 +65,64 @@ def build_seeded_xgb_ensemble(X_train, y_train, X_cal, y_cal, spw=1.0,
         xgb_params = {}
 
     n_est = xgb_params.get("n_estimators", 400)
-    max_d = xgb_params.get("max_depth", 5)
-    lr = xgb_params.get("learning_rate", 0.05)
     ss = xgb_params.get("subsample", 0.8)
     cs = xgb_params.get("colsample_bytree", 0.8)
 
-    # Temporal window ratios per seed position
-    if temporal and len(X_train) > 1000:
-        window_ratios = [0.4, 0.4, 0.7, 0.7, 1.0]
-    else:
-        window_ratios = [1.0] * len(seeds)
+    # Each model spec: (algorithm, params, temporal_window_ratio)
+    model_specs = [
+        # XGB deep — recent patterns, complex interactions
+        ("xgb", {"max_depth": 6, "learning_rate": 0.03, "n_estimators": 500}, 0.4),
+        # XGB medium — balanced
+        ("xgb", {"max_depth": 4, "learning_rate": 0.05, "n_estimators": 400}, 0.7),
+        # XGB full — full history, standard
+        ("xgb", {"max_depth": 5, "learning_rate": 0.05, "n_estimators": 400}, 1.0),
+        # ExtraTrees — random splits capture different signal
+        ("et", {"max_depth": 8, "n_estimators": 500}, 0.4),
+        # ExtraTrees full — maximum diversity on full history
+        ("et", {"max_depth": 12, "n_estimators": 400}, 1.0),
+    ]
+
+    if not temporal or len(X_train) <= 1000:
+        model_specs = [(a, p, 1.0) for a, p, _ in model_specs]
 
     ensemble = []
-    for idx, seed in enumerate(seeds):
-        ratio = window_ratios[idx] if idx < len(window_ratios) else 1.0
+    for idx, (algo, params, ratio) in enumerate(model_specs):
+        seed = seeds[idx] if idx < len(seeds) else 42 + idx
+
+        # Temporal windowing
         n_rows = len(X_train)
         start = n_rows - int(n_rows * ratio)
-        X_tr_window = X_train.iloc[start:]
-        y_tr_window = y_train[start:]
-
-        model = xgb.XGBClassifier(
-            n_estimators=n_est, max_depth=max_d, learning_rate=lr,
-            subsample=ss, colsample_bytree=cs, scale_pos_weight=spw,
-            objective="binary:logistic", eval_metric="logloss",
-            use_label_encoder=False, random_state=seed, verbosity=0,
-        )
-        model.fit(X_tr_window, y_tr_window, verbose=False)
+        X_tr = X_train.iloc[start:]
+        y_tr = y_train[start:]
         window_pct = int(ratio * 100)
-        cal = build_calibrated_model(model, X_cal, y_cal,
-                                     name=f"XGB_{seed}_{window_pct}pct")
+
+        if algo == "xgb":
+            model = xgb.XGBClassifier(
+                n_estimators=params.get("n_estimators", n_est),
+                max_depth=params["max_depth"],
+                learning_rate=params["learning_rate"],
+                subsample=ss, colsample_bytree=cs,
+                scale_pos_weight=spw,
+                objective="binary:logistic", eval_metric="logloss",
+                use_label_encoder=False, random_state=seed, verbosity=0,
+                min_child_weight=3,  # v8: regularization
+                reg_alpha=0.1,       # v8: L1
+                reg_lambda=1.5,      # v8: L2
+            )
+            model.fit(X_tr, y_tr, verbose=False)
+            name = f"XGB_d{params['max_depth']}_lr{params['learning_rate']}_{window_pct}pct"
+
+        elif algo == "et":
+            model = ExtraTreesClassifier(
+                n_estimators=params.get("n_estimators", 400),
+                max_depth=params.get("max_depth", 10),
+                min_samples_leaf=5,
+                random_state=seed, n_jobs=-1,
+            )
+            model.fit(X_tr, y_tr)
+            name = f"ET_d{params.get('max_depth')}_{window_pct}pct"
+
+        cal = build_calibrated_model(model, X_cal, y_cal, name=name)
         ensemble.append(cal)
 
     return ensemble

@@ -32,6 +32,7 @@ from config import (
     XGB_N_ESTIMATORS, XGB_MAX_DEPTH, XGB_LEARNING_RATE,
     XGB_SUBSAMPLE, XGB_COLSAMPLE_BYTREE,
     CALIBRATION_SPLIT_RATIO, OOF_INTERNAL_SPLITS,
+    PURGE_EMBARGO_BARS,
     ENSEMBLE_SEEDS,
     LOG_LEVEL, LOG_FORMAT,
 )
@@ -54,19 +55,21 @@ def _xgb_params():
 
 def _generate_oof_predictions(X, y, spw, seeds, n_splits=OOF_INTERNAL_SPLITS):
     """
-    Generate Out-of-Fold predictions using TimeSeriesSplit.
+    Generate Out-of-Fold predictions using purged TimeSeriesSplit.
 
-    For each fold, trains 5 seeded XGBoost models on the in-fold data
-    and predicts on the out-fold data. Returns:
-      - oof_mean: mean probability across seeds for each OOF row
-      - oof_all: [n_seeds × n_samples] array of per-seed probabilities
-      - oof_mask: boolean mask of rows that have OOF predictions
+    Purge: removes `PURGE_EMBARGO_BARS` from end of train and start of test
+    to prevent leakage through autocorrelated features.
     """
     n = len(y)
     oof_all = np.full((len(seeds), n), np.nan)
     tscv = TimeSeriesSplit(n_splits=n_splits)
 
     for fold_idx, (tr_idx, te_idx) in enumerate(tscv.split(X)):
+        # Purge: remove embargo bars from end of train
+        embargo = PURGE_EMBARGO_BARS
+        if embargo > 0 and len(tr_idx) > embargo:
+            tr_idx = tr_idx[:-embargo]
+
         for s_idx, seed in enumerate(seeds):
             clf = xgb.XGBClassifier(
                 n_estimators=XGB_N_ESTIMATORS, max_depth=XGB_MAX_DEPTH,
@@ -74,6 +77,7 @@ def _generate_oof_predictions(X, y, spw, seeds, n_splits=OOF_INTERNAL_SPLITS):
                 colsample_bytree=XGB_COLSAMPLE_BYTREE, scale_pos_weight=spw,
                 objective="binary:logistic", eval_metric="logloss",
                 use_label_encoder=False, random_state=seed, verbosity=0,
+                min_child_weight=3, reg_alpha=0.1, reg_lambda=1.5,
             )
             clf.fit(X.iloc[tr_idx], y[tr_idx], verbose=False)
             oof_all[s_idx, te_idx] = clf.predict_proba(X.iloc[te_idx])[:, 1]

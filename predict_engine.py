@@ -59,6 +59,10 @@ ADAPTIVE_WINDOW = 200
 _retrain_in_progress = False
 _model_lock = threading.RLock()
 
+# --- Regime duration tracker for meta feature --------------------------------
+_last_regime_name = None
+_regime_duration_counter = 1
+
 REGIME_ENCODING = {"Trending": 0, "Ranging": 1, "High_Volatility": 2, "Low_Volatility": 3}
 
 
@@ -138,12 +142,12 @@ def verify_candle_closed(df, timeframe_minutes=5):
     return is_closed
 
 
-def _build_meta_row(green_p, df_row, regime_enc, ensemble_variance):
+def _build_meta_row(green_p, df_row, regime_enc, ensemble_variance,
+                    ensemble_disagreement=0.0, regime_duration=1):
     """
     Build meta feature row matching META_FEATURE_COLUMNS exactly.
     
-    LIVE PARITY: same features as training (no spread_ratio,
-    no correctness-derived features, has ensemble_variance).
+    LIVE PARITY: same features as training (v8: 14 meta features).
     """
     global _direction_history
 
@@ -155,18 +159,30 @@ def _build_meta_row(green_p, df_row, regime_enc, ensemble_variance):
         else:
             break
 
+    # Hour-of-day cyclical encoding
+    hour = 0
+    if hasattr(df_row, 'get'):
+        t = df_row.get("time", None)
+        if t is not None and hasattr(t, 'hour'):
+            hour = t.hour
+    import math
+    hour_sin = math.sin(2 * math.pi * hour / 24)
+
     return {
         "primary_green_prob": green_p,
         "prob_distance_from_half": abs(green_p - 0.5),
         "primary_entropy": float(_binary_entropy(green_p)),
         "ensemble_variance": ensemble_variance,
+        "ensemble_disagreement": ensemble_disagreement,
         "regime_encoded": regime_enc,
+        "regime_duration": regime_duration,
         "atr_value": float(df_row.get("atr_14", 0)),
         "volatility_zscore": float(df_row.get("volatility_zscore", 0)),
         "range_position": float(df_row.get("range_position", 0.5)),
         "body_percentile_rank": float(df_row.get("body_size", 0.5)),
         "direction_streak": dstreak,
         "rolling_vol_percentile": float(df_row.get("atr_percentile_rank", 0.5)),
+        "hour_sin": hour_sin,
     }
 
 
@@ -208,11 +224,12 @@ def predict(df, regime):
 
         row = df[feat_cols].iloc[-1].values.reshape(1, -1)
 
-        # Ensemble predictions (5 seeded XGBoost)
+        # Ensemble predictions (diverse: 3 XGB + 2 ExtraTrees)
         all_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
         green_p = float(all_probs.mean())
         red_p = 1.0 - green_p
         variance = float(all_probs.var())
+        disagreement = float(all_probs.max() - all_probs.min())
         max_var = 0.25
         norm_var = min(variance / max_var, 1.0)
         uncertainty_pct = round(norm_var * 100, 2)
@@ -223,9 +240,19 @@ def predict(df, regime):
             log.error("LATENCY ABORT: ensemble took %.2fs (>1s limit)", t_ensemble - t_start)
             return _safe_fallback("Inference too slow")
 
+        # Regime duration tracking
+        global _last_regime_name, _regime_duration_counter
+        if regime == _last_regime_name:
+            _regime_duration_counter += 1
+        else:
+            _regime_duration_counter = 1
+            _last_regime_name = regime
+
         # Meta (sigmoid-calibrated model — calibration is internal)
         regime_enc = REGIME_ENCODING.get(regime, 1)
-        meta_row = _build_meta_row(green_p, df.iloc[-1], regime_enc, variance)
+        meta_row = _build_meta_row(green_p, df.iloc[-1], regime_enc, variance,
+                                   ensemble_disagreement=disagreement,
+                                   regime_duration=_regime_duration_counter)
         meta_input = pd.DataFrame([meta_row])[meta_feat_cols]
         meta_rel = float(meta_model.predict_proba(meta_input.values)[0][1])
 
@@ -238,7 +265,7 @@ def predict(df, regime):
                 "primary_strength": primary_strength,
                 "meta_reliability": meta_rel,
                 "regime_strength": regime_strength,
-                "uncertainty": norm_var,
+                "uncertainty": 1.0 - norm_var,  # inverted: 1=certain, 0=uncertain
             }])
             weighted_score = float(weight_model.predict_proba(w_input)[:, 1][0])
         else:

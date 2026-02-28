@@ -53,13 +53,16 @@ META_FEATURE_COLUMNS = [
     "prob_distance_from_half",
     "primary_entropy",
     "ensemble_variance",
+    "ensemble_disagreement",    # v8: max-min spread across members
     "regime_encoded",
+    "regime_duration",          # v8: bars in current regime
     "atr_value",
     "volatility_zscore",
     "range_position",
     "body_percentile_rank",
     "direction_streak",
     "rolling_vol_percentile",
+    "hour_sin",                 # v8: cyclical time-of-day
 ]
 
 META_CALIBRATOR_PATH = os.path.join(MODEL_DIR, "meta_calibrator.pkl")
@@ -123,17 +126,29 @@ def build_meta_features(df, oof_data):
     sub["prob_distance_from_half"] = np.abs(oof_proba - 0.5)
     sub["primary_entropy"] = _binary_entropy(oof_proba)
 
-    # FIX #4: Add ensemble variance as meta feature
-    oof_var = oof_all.var(axis=0)  # per-row variance across seeds
+    # FIX #4: Ensemble variance + disagreement
+    oof_var = oof_all.var(axis=0)
     sub["ensemble_variance"] = oof_var
+    sub["ensemble_disagreement"] = oof_all.max(axis=0) - oof_all.min(axis=0)
 
     primary_dir = (oof_proba >= 0.5).astype(int)
     correct = (primary_dir == actual).astype(int)
     sub["meta_target"] = correct
 
-    # Regime detection — verified safe: uses only past rows (backward-looking)
+    # Regime detection
     regimes = detect_regime_series(sub)
     sub["regime_encoded"] = regimes.map(REGIME_ENCODING).fillna(1).astype(int)
+
+    # Regime duration: how many bars in current regime
+    regime_dur = []
+    dur = 1
+    for i in range(len(regimes)):
+        if i > 0 and regimes.iloc[i] == regimes.iloc[i - 1]:
+            dur += 1
+        else:
+            dur = 1
+        regime_dur.append(dur)
+    sub["regime_duration"] = regime_dur
 
     sub["atr_value"] = sub["atr_14"] if "atr_14" in sub.columns else 0.0
 
@@ -151,6 +166,13 @@ def build_meta_features(df, oof_data):
         sub["atr_14"].rolling(ATR_PERCENTILE_WINDOW, min_periods=1).rank(pct=True)
         if "atr_14" in sub.columns else 0.5
     )
+
+    # Hour-of-day cyclical encoding
+    if "time" in sub.columns:
+        hours = pd.to_datetime(sub["time"]).dt.hour
+    else:
+        hours = pd.Series(np.zeros(len(sub)), index=sub.index)
+    sub["hour_sin"] = np.sin(2 * np.pi * hours / 24)
 
     return sub
 

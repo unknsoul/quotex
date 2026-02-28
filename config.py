@@ -39,8 +39,9 @@ MT5_SERVER = os.getenv("MT5_SERVER", "")
 
 # --- Data Settings -----------------------------------------------------------
 DEFAULT_SYMBOL = "EURUSD"
-CANDLES_TO_FETCH = 15000
+CANDLES_TO_FETCH = 50000  # v8: expanded from 15K for better generalization
 MTF_TIMEFRAMES = ["M5", "M15", "H1"]
+TRAINING_SYMBOLS = ["EURUSD"]  # multi-symbol joint training pool
 
 # --- EMA Periods -------------------------------------------------------------
 EMA_20 = 20
@@ -117,6 +118,7 @@ CALIBRATION_SPLIT_RATIO = 0.8  # 80% train_main, 20% calibration
 
 # --- OOF Settings ------------------------------------------------------------
 OOF_INTERNAL_SPLITS = 3  # For generating OOF predictions within train_main
+PURGE_EMBARGO_BARS = 50  # purge gap between train/test to prevent leakage
 
 # --- Meta Model (LightGBM) --------------------------------------------------
 META_N_ESTIMATORS = 200

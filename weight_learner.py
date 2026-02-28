@@ -145,11 +145,13 @@ def train_weights(symbol):
     regime_strength = sub["adx_normalized"].values if "adx_normalized" in sub.columns else np.zeros(len(sub))
 
     # Build weight training data
+    # NOTE: uncertainty = 1 - variance_norm → high value = MORE certain
+    # This ensures positive coefficient means "high certainty → more likely correct"
     X_weight = pd.DataFrame({
         "primary_strength": primary_strength,
         "meta_reliability": meta_proba,
         "regime_strength": regime_strength,
-        "uncertainty": oof_var_norm,
+        "uncertainty": 1.0 - oof_var_norm,  # inverted: 1=certain, 0=uncertain
     })
     y_weight = correct
 
