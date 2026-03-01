@@ -22,6 +22,7 @@ import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning, message="Mean of empty slice")
 
 import numpy as np
 import pandas as pd
@@ -45,11 +46,14 @@ from config import (
     DRIFT_COSINE_THRESHOLD, TARGET_ATR_THRESHOLD,
     CALIBRATION_SPLIT_RATIO, OOF_INTERNAL_SPLITS,
     CONFIDENCE_CORRELATION_WINDOW, CONFIDENCE_CORRELATION_ALERT,
+    TRIPLE_BARRIER_ENABLED,
+    SLIPPAGE_SPREAD_COST, SLIPPAGE_TICKS,
     LOG_LEVEL, LOG_FORMAT,
 )
 from data_collector import load_csv, load_multi_tf
 from feature_engineering import (
-    compute_features, add_target, add_target_atr_filtered, FEATURE_COLUMNS,
+    compute_features, add_target, add_target_smoothed,
+    add_target_atr_filtered, add_target_triple_barrier, FEATURE_COLUMNS,
 )
 from regime_detection import detect_regime, detect_regime_series, REGIMES, get_session
 from stability import CosineDriftDetector
@@ -129,21 +133,84 @@ def _build_meta_row(green_p, regime, row, dir_history, ensemble_variance=0.0):
 # =============================================================================
 
 def _generate_oof_predictions(X_tr, y_tr, spw, seeds, n_splits=OOF_INTERNAL_SPLITS):
-    """Generate OOF predictions with 5 seeds × n_splits folds."""
+    """Generate OOF predictions using diverse ensemble (matching inference).
+
+    Uses same model specs as build_seeded_xgb_ensemble:
+      XGB×3, ExtraTrees×2, LightGBM×1, CatBoost×1
+    This ensures OOF distributions match the actual ensemble used at inference.
+    """
+    import lightgbm as _lgb
+    from catboost import CatBoostClassifier as _Cat
+    from sklearn.ensemble import ExtraTreesClassifier as _ET
+
     n = len(y_tr)
     oof_all = np.full((len(seeds), n), np.nan)
     tscv = TimeSeriesSplit(n_splits=n_splits)
 
+    # Mirror the model specs from calibration.py
+    model_specs = [
+        ("xgb", {"max_depth": 6, "learning_rate": 0.03, "n_estimators": 500}),
+        ("xgb", {"max_depth": 4, "learning_rate": 0.05, "n_estimators": 400}),
+        ("xgb", {"max_depth": 5, "learning_rate": 0.05, "n_estimators": 400}),
+        ("et",  {"max_depth": 8, "n_estimators": 500}),
+        ("et",  {"max_depth": 12, "n_estimators": 400}),
+        ("lgbm", {"num_leaves": 31, "max_depth": 6, "learning_rate": 0.05,
+                  "n_estimators": 400}),
+        ("cat", {"depth": 6, "learning_rate": 0.03, "iterations": 400}),
+    ]
+
+    ss = XGB_SUBSAMPLE
+    cs = XGB_COLSAMPLE_BYTREE
+
     for fold_idx, (tr_idx, te_idx) in enumerate(tscv.split(X_tr)):
-        for s_idx, seed in enumerate(seeds):
-            clf = xgb.XGBClassifier(
-                n_estimators=XGB_N_ESTIMATORS, max_depth=XGB_MAX_DEPTH,
-                learning_rate=XGB_LEARNING_RATE, subsample=XGB_SUBSAMPLE,
-                colsample_bytree=XGB_COLSAMPLE_BYTREE, scale_pos_weight=spw,
-                objective="binary:logistic", eval_metric="logloss",
-                use_label_encoder=False, random_state=seed, verbosity=0,
-            )
-            clf.fit(X_tr.iloc[tr_idx], y_tr[tr_idx], verbose=False)
+        for s_idx, (algo, params) in enumerate(model_specs):
+            if s_idx >= len(seeds):
+                break
+            seed = seeds[s_idx]
+
+            if algo == "xgb":
+                clf = xgb.XGBClassifier(
+                    n_estimators=params.get("n_estimators", 400),
+                    max_depth=params["max_depth"],
+                    learning_rate=params["learning_rate"],
+                    subsample=ss, colsample_bytree=cs,
+                    scale_pos_weight=spw,
+                    objective="binary:logistic", eval_metric="logloss",
+                    use_label_encoder=False, random_state=seed, verbosity=0,
+                    min_child_weight=3, reg_alpha=0.1, reg_lambda=1.5,
+                )
+                clf.fit(X_tr.iloc[tr_idx], y_tr[tr_idx], verbose=False)
+            elif algo == "et":
+                clf = _ET(
+                    n_estimators=params.get("n_estimators", 400),
+                    max_depth=params.get("max_depth", 10),
+                    min_samples_leaf=5,
+                    random_state=seed, n_jobs=-1,
+                )
+                clf.fit(X_tr.iloc[tr_idx], y_tr[tr_idx])
+            elif algo == "lgbm":
+                clf = _lgb.LGBMClassifier(
+                    num_leaves=params["num_leaves"],
+                    max_depth=params["max_depth"],
+                    learning_rate=params["learning_rate"],
+                    n_estimators=params.get("n_estimators", 400),
+                    subsample=ss, colsample_bytree=cs,
+                    scale_pos_weight=spw,
+                    random_state=seed, verbose=-1,
+                    min_child_samples=10, reg_alpha=0.1, reg_lambda=1.5,
+                )
+                clf.fit(X_tr.iloc[tr_idx], y_tr[tr_idx])
+            elif algo == "cat":
+                clf = _Cat(
+                    depth=params["depth"],
+                    learning_rate=params["learning_rate"],
+                    iterations=params.get("iterations", 400),
+                    auto_class_weights="Balanced",
+                    random_seed=seed, verbose=0,
+                    l2_leaf_reg=3.0,
+                )
+                clf.fit(X_tr.iloc[tr_idx], y_tr[tr_idx])
+
             oof_all[s_idx, te_idx] = clf.predict_proba(X_tr.iloc[te_idx])[:, 1]
 
     oof_mask = ~np.isnan(oof_all[0])
@@ -164,9 +231,7 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0)
 
     df = compute_features(df, m15_df=m15, h1_df=h1)
 
-    # ATR-filtered target for training
-    df_filtered = add_target_atr_filtered(df)
-    # Simple target for test evaluation (all rows)
+    # Simple target for both train and test evaluation (all rows)
     df_eval = add_target(df)
     df_eval = df_eval.dropna(subset=["target"]).reset_index(drop=True)
     df_eval["target"] = df_eval["target"].astype(int)
@@ -177,15 +242,14 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0)
     train_end = int(n * train_ratio)
     chunk = int(n * chunk_ratio)
 
-    df_filtered = df_filtered.dropna(subset=["target"]).reset_index(drop=True)
-    df_filtered["target"] = df_filtered["target"].astype(int)
 
     mode_str = f"Rolling({rolling_window})" if rolling_window > 0 else "Expanding"
     print(f"\n>> Walk-Forward ({mode_str}, Leakage-Free) for {symbol}")
     print(f"   Bars: {n}, Train: {train_end}, Chunk: {chunk}")
     if rolling_window > 0:
         print(f"   Rolling window: {rolling_window} bars (~{rolling_window * 5 / 60 / 24:.0f} days)")
-    print(f"   ATR threshold: {TARGET_ATR_THRESHOLD}, Ensemble: {len(ENSEMBLE_SEEDS)} seeded XGB")
+    print(f"   Ensemble: {len(ENSEMBLE_SEEDS)} models (normalized features)")
+    print(f"   Slippage: spread={SLIPPAGE_SPREAD_COST:.5f}, ticks={SLIPPAGE_TICKS}")
     print(f"   Cal split: {CALIBRATION_SPLIT_RATIO:.0%}/{1-CALIBRATION_SPLIT_RATIO:.0%}, OOF splits: {OOF_INTERNAL_SPLITS}")
 
     all_results = []
@@ -204,16 +268,14 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0)
         test_start = train_end
         test_end = min(train_end + chunk, n)
 
-        # Filter train data — rolling or expanding window
+        # Training data — all rows within expanding/rolling window (no ATR filter)
         if rolling_window > 0:
-            # Rolling: use only last N bars before test start
             roll_start = max(0, train_end - rolling_window)
-            train_mask = (df_filtered.index >= roll_start) & (df_filtered.index < train_end)
+            X_tr_filtered = df_eval.loc[roll_start:train_end-1, FEATURE_COLUMNS]
+            y_tr_filtered = y_all[roll_start:train_end]
         else:
-            # Expanding: use all bars from 0 to train_end
-            train_mask = df_filtered.index < train_end
-        X_tr_filtered = df_filtered.loc[train_mask, FEATURE_COLUMNS]
-        y_tr_filtered = df_filtered.loc[train_mask, "target"].values
+            X_tr_filtered = df_eval.loc[:train_end-1, FEATURE_COLUMNS]
+            y_tr_filtered = y_all[:train_end]
 
         spw = np.sum(y_tr_filtered == 0) / max(np.sum(y_tr_filtered == 1), 1)
 
@@ -222,7 +284,7 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0)
             print(f"\n  Cycle {cycle}: train[{roll_start}:{train_end}] test[{test_start}:{test_end}]")
         else:
             print(f"\n  Cycle {cycle}: train[0:{train_end}] test[{test_start}:{test_end}]")
-        print(f"    ATR-filtered train: {len(X_tr_filtered)} / {train_end}")
+        print(f"    Train size: {len(X_tr_filtered)}")
 
         # =================================================================
         # Step 1: Split into train_main + cal_slice (LEAKAGE-FREE)
@@ -349,6 +411,10 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0)
             correct = 1 if direction == actual else 0
             cycle_correct += correct
             cum_pnl += (1 if correct else -1)
+            # Phase 4: slippage-adjusted P&L
+            slippage_cost = SLIPPAGE_SPREAD_COST + (SLIPPAGE_TICKS * 0.00001)
+            if correct:
+                cum_pnl_adj = cum_pnl - slippage_cost * (i - test_start + 1)
             equity.append(cum_pnl)
             meta_history.append(correct)
             dir_history.append(direction)

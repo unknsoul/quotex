@@ -75,7 +75,13 @@ VOLATILITY_ZSCORE_WINDOW = 50
 ATR_PERCENTILE_WINDOW = 100
 
 # --- v5 Target Threshold -----------------------------------------------------
-TARGET_ATR_THRESHOLD = 0.3  # only train on moves > 0.3 × ATR
+TARGET_ATR_THRESHOLD = 0.3  # only train on moves > 0.3 * ATR
+
+# --- Triple Barrier Method (Phase 4) ----------------------------------------
+TRIPLE_BARRIER_ENABLED = False     # disabled: needs matching test evaluation
+TRIPLE_BARRIER_TP = 1.0           # take-profit = TP * ATR (symmetric)
+TRIPLE_BARRIER_SL = 1.0           # stop-loss = SL * ATR (symmetric)
+TRIPLE_BARRIER_MAX_BARS = 6       # max bars before time barrier (30 min at M5)
 
 # --- Regime Detection --------------------------------------------------------
 ADX_TRENDING_THRESHOLD = 25
@@ -109,6 +115,14 @@ SESSION_CONFIDENCE_MULT = {
     "Off":      0.80,   # off-hours
 }
 
+# --- Ensemble Variance Hard Filter (Phase 4) --------------------------------
+ENSEMBLE_VAR_SKIP_THRESHOLD = 0.02  # skip if ensemble variance > this
+ENSEMBLE_VAR_FILTER_ENABLED = True
+
+# --- Slippage Modeling (Phase 4) --------------------------------------------
+SLIPPAGE_SPREAD_COST = 0.00035    # 3.5 pips EURUSD spread cost
+SLIPPAGE_TICKS = 1                 # 1-tick random slippage
+
 # --- Confidence Levels (%) --------------------------------------------------
 CONFIDENCE_HIGH_MIN = 75.0
 CONFIDENCE_MEDIUM_MIN = 60.0
@@ -119,7 +133,7 @@ SPREAD_PERCENTILE = 90
 ATR_SPIKE_MULTIPLIER = 3.0
 
 # --- Ensemble (5 seeded XGBoost) --------------------------------------------
-ENSEMBLE_SEEDS = [42, 123, 456, 789, 1024]
+ENSEMBLE_SEEDS = [42, 123, 456, 789, 1024, 2048, 4096]
 ENSEMBLE_SIZE = len(ENSEMBLE_SEEDS)
 
 # --- XGBoost Primary Hyperparams --------------------------------------------

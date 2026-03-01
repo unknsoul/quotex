@@ -210,6 +210,9 @@ def compute_htf_features(m5_df, m15_df=None, h1_df=None):
 
         h1_merge = h1[["time", "h1_trend_direction", "h1_ema_alignment", "h1_atr"]].copy()
         h1_merge = h1_merge.sort_values("time")
+        # Phase 4 FIX: shift H1 time forward by 1 hour to prevent leakage
+        # This ensures we only use COMPLETED H1 bars (not the one still forming)
+        h1_merge["time"] = h1_merge["time"] + pd.Timedelta(hours=1)
         df = df.sort_values("time")
         df = pd.merge_asof(df, h1_merge, on="time", direction="backward")
     else:
@@ -227,6 +230,8 @@ def compute_htf_features(m5_df, m15_df=None, h1_df=None):
 
         m15_merge = m15[["time", "m15_momentum"]].copy()
         m15_merge = m15_merge.sort_values("time")
+        # Phase 4 FIX: shift M15 time forward by 15 min to prevent leakage
+        m15_merge["time"] = m15_merge["time"] + pd.Timedelta(minutes=15)
         df = pd.merge_asof(df, m15_merge, on="time", direction="backward")
     else:
         df["m15_momentum"] = 0.0
@@ -246,12 +251,15 @@ def compute_features(df, m15_df=None, h1_df=None):
     df = df.copy()
     o, h, l, c = df["open"], df["high"], df["low"], df["close"]
 
-    # Trend
-    df["ema_20"] = _ema(c, EMA_20)
-    df["ema_50"] = _ema(c, EMA_50)
-    df["ema_200"] = _ema(c, EMA_200)
-    df["ema_slope"] = (df["ema_50"] - df["ema_50"].shift(EMA_SLOPE_WINDOW)) / (
-        df["ema_50"].shift(EMA_SLOPE_WINDOW) + 1e-10)
+    # Trend — NORMALIZED to distance from close (scale-invariant)
+    ema20 = _ema(c, EMA_20)
+    ema50 = _ema(c, EMA_50)
+    ema200 = _ema(c, EMA_200)
+    df["ema_20"] = (c - ema20) / (c + 1e-10)     # distance from EMA20 as %
+    df["ema_50"] = (c - ema50) / (c + 1e-10)     # distance from EMA50 as %
+    df["ema_200"] = (c - ema200) / (c + 1e-10)   # distance from EMA200 as %
+    df["ema_slope"] = (ema50 - ema50.shift(EMA_SLOPE_WINDOW)) / (
+        ema50.shift(EMA_SLOPE_WINDOW) + 1e-10)
     df["adx"] = _adx(h, l, c, ADX_PERIOD)
 
     # Momentum
@@ -263,12 +271,13 @@ def compute_features(df, m15_df=None, h1_df=None):
     df["stoch_d"] = sd
 
     # Volatility
-    df["atr_14"] = _atr(h, l, c, ATR_PERIOD)
+    atr_raw = _atr(h, l, c, ATR_PERIOD)
+    df["atr_14"] = atr_raw / (c + 1e-10)  # ATR as % of price (scale-invariant)
     bb_mid = c.rolling(BB_PERIOD).mean()
     bb_std = c.rolling(BB_PERIOD).std()
     df["bb_width"] = ((bb_mid + BB_STD * bb_std) - (bb_mid - BB_STD * bb_std)) / (bb_mid + 1e-10)
-    df["rolling_std_20"] = c.rolling(ROLLING_STD_PERIOD).std()
-    df["volatility_zscore"] = _volatility_zscore(df["atr_14"], VOLATILITY_ZSCORE_WINDOW)
+    df["rolling_std_20"] = c.rolling(ROLLING_STD_PERIOD).std() / (c + 1e-10)  # as % of price
+    df["volatility_zscore"] = _volatility_zscore(atr_raw, VOLATILITY_ZSCORE_WINDOW)
 
     # Candle structure
     candle_range = h - l + 1e-10
@@ -298,7 +307,7 @@ def compute_features(df, m15_df=None, h1_df=None):
     # v4: Continuous regime features (soft, no abrupt switches)
     df["adx_normalized"] = df["adx"] / 100.0
     df["ema_slope_magnitude"] = df["ema_slope"].abs()
-    df["atr_percentile_rank"] = _atr_percentile_rank(df["atr_14"], ATR_PERCENTILE_WINDOW)
+    df["atr_percentile_rank"] = _atr_percentile_rank(atr_raw, ATR_PERCENTILE_WINDOW)
 
     # ---- v5: Structural features ----
     returns = c.pct_change()
@@ -327,7 +336,7 @@ def compute_features(df, m15_df=None, h1_df=None):
 
     # Regime transition momentum
     df["delta_adx_5"] = df["adx"] - df["adx"].shift(5)
-    df["delta_atr_5"] = df["atr_14"] - df["atr_14"].shift(5)
+    df["delta_atr_5"] = atr_raw.pct_change(5)  # ATR change as %
 
     # Multi-horizon confirmation
     df["return_2bar_momentum"] = returns.rolling(2, min_periods=1).sum()
@@ -455,10 +464,54 @@ def add_target(df):
     return df
 
 
+def add_target_smoothed(df, lookahead=3):
+    """
+    Multi-bar smoothed target — majority direction over next `lookahead` bars.
+    
+    Instead of noisy single-bar close-to-close, uses the overall trend
+    over the next 3 bars. This dramatically reduces M5 noise while
+    preserving genuine directional signal.
+    
+    Label = 1 if majority of next `lookahead` bars are green
+    Label = 0 if majority are red
+    Tie = based on cumulative return sign
+    """
+    df = df.copy()
+    close = df["close"]
+    
+    # Count green bars in next `lookahead` bars
+    green_counts = pd.Series(0.0, index=df.index)
+    for k in range(1, lookahead + 1):
+        green_counts += (close.shift(-k) > close.shift(-k + 1)).astype(float)
+    
+    # Majority vote
+    majority = lookahead / 2.0
+    target = pd.Series(np.nan, index=df.index)
+    target[green_counts > majority] = 1.0
+    target[green_counts < majority] = 0.0
+    
+    # Tie-breaking: use cumulative return over lookahead
+    tie_mask = green_counts == majority
+    cum_return = close.shift(-lookahead) - close
+    target[tie_mask & (cum_return > 0)] = 1.0
+    target[tie_mask & (cum_return <= 0)] = 0.0
+    
+    # Last `lookahead` bars are NaN
+    target.iloc[-lookahead:] = np.nan
+    
+    df["target"] = target
+    valid = target.notna().sum()
+    ones = (target == 1.0).sum()
+    zeros = (target == 0.0).sum()
+    log.info("Smoothed target (lookahead=%d): %d valid (%d green, %d red, %.1f%% green)",
+             lookahead, valid, ones, zeros, ones / valid * 100 if valid else 0)
+    return df
+
+
 def add_target_atr_filtered(df, threshold=None):
     """
     ATR-threshold target (v5): only significant moves count.
-    Moves within ±threshold×ATR are marked NaN (dropped from training).
+    Moves within +/-threshold*ATR are marked NaN (dropped from training).
     """
     from config import TARGET_ATR_THRESHOLD
     if threshold is None:
@@ -479,5 +532,69 @@ def add_target_atr_filtered(df, threshold=None):
     total = len(df) - 1  # exclude last
     log.info("ATR-filtered target: %d/%d rows (%.1f%% kept, threshold=%.2f)",
              valid, total, valid / total * 100 if total else 0, threshold)
+    return df
+
+
+def add_target_triple_barrier(df, tp_mult=None, sl_mult=None, max_bars=None):
+    """
+    Triple Barrier Method (Phase 4) — industry-standard labeling.
+    
+    For each bar, check which barrier is hit first:
+      - Take-profit: high[t+k] >= close[t] + tp_mult * ATR  -> label = 1
+      - Stop-loss:   low[t+k]  <= close[t] - sl_mult * ATR  -> label = 0
+      - Time barrier: k > max_bars -> label = NaN (ambiguous, dropped)
+    
+    This produces MUCH cleaner labels than close-to-close comparison.
+    Used at DE Shaw, Citadel, Two Sigma.
+    """
+    from config import TRIPLE_BARRIER_TP, TRIPLE_BARRIER_SL, TRIPLE_BARRIER_MAX_BARS
+    if tp_mult is None:
+        tp_mult = TRIPLE_BARRIER_TP
+    if sl_mult is None:
+        sl_mult = TRIPLE_BARRIER_SL
+    if max_bars is None:
+        max_bars = TRIPLE_BARRIER_MAX_BARS
+
+    df = df.copy()
+    close = df["close"].values
+    high = df["high"].values
+    low = df["low"].values
+    atr = df["atr_14"].values
+    n = len(df)
+
+    targets = np.full(n, np.nan)
+
+    for i in range(n - max_bars):
+        entry = close[i]
+        barrier_atr = atr[i]
+        if np.isnan(barrier_atr) or barrier_atr <= 0:
+            continue
+
+        tp_level = entry + tp_mult * barrier_atr
+        sl_level = entry - sl_mult * barrier_atr
+
+        for k in range(1, max_bars + 1):
+            j = i + k
+            if j >= n:
+                break
+            # Check TP hit (bullish)
+            if high[j] >= tp_level:
+                targets[i] = 1.0
+                break
+            # Check SL hit (bearish)
+            if low[j] <= sl_level:
+                targets[i] = 0.0
+                break
+            # Neither hit — if last bar in window, mark NaN (ambiguous)
+
+    df["target"] = targets
+    valid = np.sum(~np.isnan(targets))
+    total = n - max_bars
+    tp_count = int(np.nansum(targets))
+    sl_count = valid - tp_count
+    log.info("Triple Barrier target: %d/%d rows (%.1f%% labeled, TP=%d, SL=%d, "
+             "tp=%.1fxATR, sl=%.1fxATR, max_bars=%d)",
+             valid, total, valid / total * 100 if total else 0,
+             tp_count, sl_count, tp_mult, sl_mult, max_bars)
     return df
 

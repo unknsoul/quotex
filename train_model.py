@@ -35,11 +35,13 @@ from config import (
     CALIBRATION_SPLIT_RATIO, OOF_INTERNAL_SPLITS,
     PURGE_EMBARGO_BARS,
     ENSEMBLE_SEEDS,
+    TRIPLE_BARRIER_ENABLED,
     LOG_LEVEL, LOG_FORMAT,
 )
 from data_collector import load_csv, load_multi_tf
 from feature_engineering import (
-    compute_features, add_target_atr_filtered, add_target, FEATURE_COLUMNS,
+    compute_features, add_target_atr_filtered, add_target,
+    add_target_triple_barrier, FEATURE_COLUMNS,
 )
 
 log = logging.getLogger("train_model")
@@ -100,8 +102,12 @@ def train(symbol):
     print(f">> Computing {len(FEATURE_COLUMNS)} features...")
     df = compute_features(df, m15_df=m15, h1_df=h1)
 
-    # ATR-filtered target for training
-    df_train = add_target_atr_filtered(df)
+    # Phase 4: Triple Barrier labeling or ATR-filtered target
+    if TRIPLE_BARRIER_ENABLED:
+        print(">> Using TRIPLE BARRIER labeling (Phase 4)")
+        df_train = add_target_triple_barrier(df)
+    else:
+        df_train = add_target_atr_filtered(df)
     df_train = df_train.dropna(subset=["target"]).reset_index(drop=True)
     df_train["target"] = df_train["target"].astype(int)
 

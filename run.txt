@@ -9,3 +9,6 @@ python auto_learner.py --symbol EURUSD --lite
 
 # START BOT:
 python telegram_bot.py
+
+
+@file:@beautifulMention and last make this all implementation in this doc and make it final version of it and debug and check working

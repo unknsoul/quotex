@@ -1,15 +1,17 @@
 """
-Calibration v2 — Diverse hybrid ensemble + isotonic calibration.
+Calibration v3 — Diverse hybrid ensemble + isotonic calibration.
 
-Ensemble: 3 XGBoost (varied depth/LR) + 2 ExtraTrees (different trees).
+Ensemble: 3 XGBoost + 2 ExtraTrees + 1 LightGBM + 1 CatBoost = 7 models.
 Each model is calibrated with isotonic regression on a held-out calibration slice.
-Algorithm + hyperparameter diversity creates truly informative ensemble variance.
+4-algorithm diversity creates maximally informative ensemble variance.
 """
 
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
 from sklearn.ensemble import ExtraTreesClassifier, GradientBoostingClassifier
 import xgboost as xgb
+import lightgbm as lgb
+from catboost import CatBoostClassifier
 
 
 class CalibratedModel:
@@ -47,20 +49,22 @@ def build_calibrated_model(base_model, X_val, y_val, name="model"):
 def build_seeded_xgb_ensemble(X_train, y_train, X_cal, y_cal, spw=1.0,
                                xgb_params=None, seeds=None, temporal=True):
     """
-    Build a diverse 5-model ensemble:
-      - XGB deep (depth=6, LR=0.03, 40% window) — captures complex recent patterns
-      - XGB medium (depth=4, LR=0.05, 70% window) — balanced depth + medium history
-      - XGB full (depth=5, LR=0.05, 100% window) — full history baseline
-      - ExtraTrees shallow (depth=8, 40% window) — random splits, recent data
-      - ExtraTrees full (depth=12, 100% window) — random splits, full history
+    Build a diverse 7-model ensemble (Phase 4):
+      - XGB deep (depth=6, LR=0.03, 40% window)
+      - XGB medium (depth=4, LR=0.05, 70% window)
+      - XGB full (depth=5, LR=0.05, 100% window)
+      - ExtraTrees shallow (depth=8, 40% window)
+      - ExtraTrees full (depth=12, 100% window)
+      - LightGBM (num_leaves=31, depth=6, 70% window)
+      - CatBoost (depth=6, lr=0.03, 100% window)
 
-    Algorithm diversity (XGB vs ExtraTrees) + hyperparameter diversity (depth/LR)
-    creates maximally informative ensemble variance for the meta model.
+    4-algorithm diversity (XGB/ET/LGBM/CatBoost) creates maximally
+    informative ensemble variance for the meta model.
 
     Returns list of CalibratedModel.
     """
     if seeds is None:
-        seeds = [42, 123, 456, 789, 1024]
+        seeds = [42, 123, 456, 789, 1024, 2048, 4096]
     if xgb_params is None:
         xgb_params = {}
 
@@ -70,16 +74,21 @@ def build_seeded_xgb_ensemble(X_train, y_train, X_cal, y_cal, spw=1.0,
 
     # Each model spec: (algorithm, params, temporal_window_ratio)
     model_specs = [
-        # XGB deep — recent patterns, complex interactions
+        # XGB deep -- recent patterns, complex interactions
         ("xgb", {"max_depth": 6, "learning_rate": 0.03, "n_estimators": 500}, 0.4),
-        # XGB medium — balanced
+        # XGB medium -- balanced
         ("xgb", {"max_depth": 4, "learning_rate": 0.05, "n_estimators": 400}, 0.7),
-        # XGB full — full history, standard
+        # XGB full -- full history, standard
         ("xgb", {"max_depth": 5, "learning_rate": 0.05, "n_estimators": 400}, 1.0),
-        # ExtraTrees — random splits capture different signal
+        # ExtraTrees -- random splits capture different signal
         ("et", {"max_depth": 8, "n_estimators": 500}, 0.4),
-        # ExtraTrees full — maximum diversity on full history
+        # ExtraTrees full -- maximum diversity on full history
         ("et", {"max_depth": 12, "n_estimators": 400}, 1.0),
+        # LightGBM -- leaf-wise growth, different split strategy from XGB
+        ("lgbm", {"num_leaves": 31, "max_depth": 6, "learning_rate": 0.05,
+                  "n_estimators": 400}, 0.7),
+        # CatBoost -- ordered boosting, reduces overfitting
+        ("cat", {"depth": 6, "learning_rate": 0.03, "iterations": 400}, 1.0),
     ]
 
     if not temporal or len(X_train) <= 1000:
@@ -105,9 +114,7 @@ def build_seeded_xgb_ensemble(X_train, y_train, X_cal, y_cal, spw=1.0,
                 scale_pos_weight=spw,
                 objective="binary:logistic", eval_metric="logloss",
                 use_label_encoder=False, random_state=seed, verbosity=0,
-                min_child_weight=3,  # v8: regularization
-                reg_alpha=0.1,       # v8: L1
-                reg_lambda=1.5,      # v8: L2
+                min_child_weight=3, reg_alpha=0.1, reg_lambda=1.5,
             )
             model.fit(X_tr, y_tr, verbose=False)
             name = f"XGB_d{params['max_depth']}_lr{params['learning_rate']}_{window_pct}pct"
@@ -122,7 +129,34 @@ def build_seeded_xgb_ensemble(X_train, y_train, X_cal, y_cal, spw=1.0,
             model.fit(X_tr, y_tr)
             name = f"ET_d{params.get('max_depth')}_{window_pct}pct"
 
+        elif algo == "lgbm":
+            model = lgb.LGBMClassifier(
+                num_leaves=params["num_leaves"],
+                max_depth=params["max_depth"],
+                learning_rate=params["learning_rate"],
+                n_estimators=params.get("n_estimators", 400),
+                subsample=ss, colsample_bytree=cs,
+                scale_pos_weight=spw,
+                random_state=seed, verbose=-1,
+                min_child_samples=10, reg_alpha=0.1, reg_lambda=1.5,
+            )
+            model.fit(X_tr, y_tr)
+            name = f"LGBM_d{params['max_depth']}_nl{params['num_leaves']}_{window_pct}pct"
+
+        elif algo == "cat":
+            model = CatBoostClassifier(
+                depth=params["depth"],
+                learning_rate=params["learning_rate"],
+                iterations=params.get("iterations", 400),
+                auto_class_weights="Balanced",
+                random_seed=seed, verbose=0,
+                l2_leaf_reg=3.0,
+            )
+            model.fit(X_tr, y_tr)
+            name = f"CAT_d{params['depth']}_lr{params['learning_rate']}_{window_pct}pct"
+
         cal = build_calibrated_model(model, X_cal, y_cal, name=name)
         ensemble.append(cal)
 
     return ensemble
+

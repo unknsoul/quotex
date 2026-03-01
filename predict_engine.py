@@ -38,6 +38,7 @@ from config import (
     REGIME_FILTER_ENABLED, REGIME_SKIP_ACCURACY_THRESHOLD,
     REGIME_COOLDOWN_BARS, REGIME_ROLLING_ACCURACY_WINDOW,
     SESSION_FILTER_ENABLED, SESSION_CONFIDENCE_MULT,
+    ENSEMBLE_VAR_SKIP_THRESHOLD, ENSEMBLE_VAR_FILTER_ENABLED,
     LOG_LEVEL, LOG_FORMAT,
 )
 from regime_detection import get_regime_thresholds, regime_stability_score, get_session
@@ -222,15 +223,20 @@ def get_confidence_reliability():
     return round(corr, 4), alert
 
 
-def _should_skip(regime, confidence_pct, df):
+def _should_skip(regime, confidence_pct, df, ensemble_variance=0.0):
     """
-    Phase 3: Adaptive regime filter — decides whether to skip this trade.
+    Phase 3+4: Adaptive regime filter -- decides whether to skip this trade.
     Returns (should_skip: bool, reason: str).
     """
     global _cooldown_remaining, _skip_count
 
     if not REGIME_FILTER_ENABLED:
         return False, ""
+
+    # 0. Phase 4: Ensemble variance hard filter (highest precision filter)
+    if ENSEMBLE_VAR_FILTER_ENABLED and ensemble_variance > ENSEMBLE_VAR_SKIP_THRESHOLD:
+        _skip_count += 1
+        return True, f"High ensemble disagreement (var={ensemble_variance:.4f} > {ENSEMBLE_VAR_SKIP_THRESHOLD})"
 
     # 1. Cooldown check: if we're in cooldown, skip
     if _cooldown_remaining > 0:
@@ -290,7 +296,7 @@ def predict(df, regime):
 
         row = df[feat_cols].iloc[-1].values.reshape(1, -1)
 
-        # Ensemble predictions (diverse: 3 XGB + 2 ExtraTrees)
+        # Ensemble predictions (diverse: 3 XGB + 2 ET + 1 LGBM + 1 CatBoost)
         all_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
         green_p = float(all_probs.mean())
         red_p = 1.0 - green_p
@@ -389,8 +395,9 @@ def predict(df, regime):
         kelly_quarter = max(0, kelly_full * 0.25)
         kelly_pct = round(kelly_quarter * 100, 1)
 
-        # Phase 3: Adaptive regime filter — check if we should skip
-        should_skip, skip_reason = _should_skip(regime, confidence_pct, df)
+        # Phase 3+4: Adaptive regime filter -- check if we should skip
+        should_skip, skip_reason = _should_skip(regime, confidence_pct, df,
+                                                  ensemble_variance=variance)
 
         # Trade suggestion (with skip override)
         if should_skip:
@@ -423,6 +430,8 @@ def predict(df, regime):
             "confidence_level": conf_level,
             "confidence_reliability_score": conf_reliability,
             "kelly_fraction_percent": kelly_pct,
+            "suggested_size_percent": kelly_pct,  # Phase 4: alias for clarity
+            "ensemble_variance": round(variance, 6),  # Phase 4: exposed for monitoring
             "suggested_trade": trade,
             "suggested_direction": "UP" if green_p >= 0.5 else "DOWN",
             "market_regime": regime,
