@@ -34,16 +34,19 @@ from config import (
     DEFAULT_SYMBOL, CANDLES_TO_FETCH,
     MT5_PATH, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER,
     TELEGRAM_BOT_TOKEN, TELEGRAM_SEND_BEFORE_CLOSE_SEC,
-    LOG_LEVEL, LOG_FORMAT, LOG_DIR,
+    LOG_LEVEL, LOG_FORMAT, LOG_DIR, ADMIN_CHAT_ID,
 )
 from data_collector import fetch_multi_timeframe
 from feature_engineering import compute_features, FEATURE_COLUMNS
 from regime_detection import detect_regime
 from predict_engine import (
     predict, load_models, log_prediction,
-    verify_candle_closed, update_prediction_history,
+    verify_candle_closed, update_prediction_history, update_online_learner,
 )
 from risk_filter import check_warnings
+from circuit_breaker import CircuitBreaker
+from pair_selector import score_pair
+import threading
 from stability import AccuracyTracker, ConfidenceCorrelationTracker
 from production_state import (
     record_startup, record_prediction, record_error,
@@ -78,6 +81,18 @@ HIGH_CONF_THRESHOLD = 40.0     # lowered to match V3 calibrated output range
 COOLDOWN_CANDLES = 3
 MAX_CONSECUTIVE_LOSSES = 3
 REGIME_SKIP_CANDLES = 2  # skip after regime transition
+
+# Circuit breaker instance
+_cb = CircuitBreaker(max_losses=5, max_drawdown_pct=8.0, cooldown_min=60)
+_cb_just_reset = False   # one-time 'trading resumed' message flag
+
+# Pair selector and drift monitor state
+_candle_count = 0
+DRIFT_CHECK_INTERVAL = 100
+
+_pair_scores = {}
+_pair_score_counter = 0
+PAIR_SCORE_REFRESH = 500
 
 
 # =============================================================================
@@ -502,6 +517,59 @@ async def _auto_signal_job(app: Application):
             for info in active_subs.values():
                 needed_symbols.update(info.get("symbols", [DEFAULT_SYMBOL]))
 
+            # -----------------------------------------------------------------
+            # NEW COMPONENT: CIRCUIT BREAKER (GAP 2)
+            # -----------------------------------------------------------------
+            global _cb_just_reset
+            if not _cb.can_trade():
+                status = _cb.get_status()
+                halt_msg = (
+                    f'🛑 *CIRCUIT BREAKER ACTIVE*\n'
+                    f'Reason: _{status["reason"]}_\n'
+                    f'Consecutive losses: *{status["consecutive_losses"]}*\n'
+                    f'Cooldown: 60 min. Signals resume automatically.'
+                )
+                await _broadcast_to_subscribers(bot, halt_msg)
+                await asyncio.sleep(300)
+                continue
+
+            # -----------------------------------------------------------------
+            # NEW COMPONENT: DRIFT DETECTOR / AUTO-RETRAIN (GAP 4)
+            # -----------------------------------------------------------------
+            global _candle_count
+            _candle_count += 1
+            if _candle_count % DRIFT_CHECK_INTERVAL == 0:
+                tradeable_symbols = list(active_subs.values())[0].get("symbols", [DEFAULT_SYMBOL])
+                asyncio.create_task(_run_drift_check(bot, list(tradeable_symbols)))
+
+            # -----------------------------------------------------------------
+            # NEW COMPONENT: DYNAMIC PAIR SELECTOR (GAP 5)
+            # -----------------------------------------------------------------
+            needed_symbols = set()
+            for info in active_subs.values():
+                needed_symbols.update(info.get("symbols", [DEFAULT_SYMBOL]))
+
+            global _pair_score_counter, _pair_scores
+            _pair_score_counter += 1
+            if _pair_score_counter >= PAIR_SCORE_REFRESH or not _pair_scores:
+                _pair_score_counter = 0
+                for sym in list(needed_symbols):
+                    try:
+                        data = fetch_multi_timeframe(sym, 500)
+                        df   = compute_features(data.get('M5'))
+                        res  = score_pair(df, symbol=sym)
+                        _pair_scores[sym] = res['total']
+                        log.info('Pair score %s: %d/30', sym, res['total'])
+                    except Exception:
+                        _pair_scores[sym] = 25  # assume tradeable if scoring fails
+
+            # Filter: skip symbols with score < 18/30
+            tradeable = {s for s in needed_symbols if _pair_scores.get(s, 25) >= 18}
+            skipped   = needed_symbols - tradeable
+            if skipped:
+                log.info('Pair selector skipped %s (low score)', skipped)
+            needed_symbols = tradeable
+
             # Weekend check (Sat/Sun)
             now_utc = datetime.now(timezone.utc)
             if now_utc.weekday() >= 5:  # Saturday=5, Sunday=6
@@ -561,6 +629,7 @@ async def _auto_signal_job(app: Application):
                     _last_predictions[sym] = {
                         "pred": pred,
                         "time": datetime.now(timezone.utc).isoformat(),
+                        "meta_row": pred.get("_meta_row"),
                     }
                     _signal_history.append({
                         "symbol": sym,
@@ -576,6 +645,8 @@ async def _auto_signal_job(app: Application):
                     record_error(f"{sym}: {e}")
 
             # Send ONE combined message per subscriber (respecting alert mode)
+            # Track which symbols were actually sent per subscriber
+            sent_symbols_per_sub = {}  # {chat_id: set(symbols)}
             for chat_id, info in active_subs.items():
                 symbols = info.get("symbols", [DEFAULT_SYMBOL])
                 mode = info.get("mode", "all")
@@ -592,6 +663,8 @@ async def _auto_signal_job(app: Application):
                 if not sub_preds:
                     continue
 
+                sent_symbols_per_sub[chat_id] = set(sub_preds.keys())
+
                 msg = _format_combined_signal(sub_preds, filtered_out)
                 try:
                     await bot.send_message(
@@ -607,7 +680,7 @@ async def _auto_signal_job(app: Application):
 
             # Schedule outcome check after candle closes (+30s buffer)
             asyncio.create_task(
-                _check_outcomes(bot, predictions, active_subs)
+                _check_outcomes(bot, predictions, active_subs, sent_symbols_per_sub)
             )
 
             # Small delay to avoid double-sending
@@ -618,15 +691,17 @@ async def _auto_signal_job(app: Application):
             await asyncio.sleep(30)
 
 
-async def _check_outcomes(bot: Bot, predictions: dict, subscribers: dict):
+async def _check_outcomes(bot: Bot, predictions: dict, subscribers: dict,
+                         sent_symbols_per_sub: dict = None):
     """
     Wait for the current candle to close, then check if predictions were correct.
-    Send result notifications to subscribers.
+    Send result notifications ONLY for symbols each subscriber actually received.
     """
     # Wait for candle to close + 30s buffer for data availability
     await asyncio.sleep(TELEGRAM_SEND_BEFORE_CLOSE_SEC + 30)
 
-    results_msgs = []
+    # Build all outcome data first
+    all_outcomes = {}  # {sym: {emoji, msg_line, correct, conf, pred}}
     for sym, pred in predictions.items():
         try:
             data = fetch_multi_timeframe(sym, 10)
@@ -640,7 +715,27 @@ async def _check_outcomes(bot: Bot, predictions: dict, subscribers: dict):
             predicted_up = pred["suggested_direction"] == "UP"
             correct = (predicted_up == actual_green)
 
-            emoji = "✅" if correct else "❌"
+            # Online Learner update
+            meta_row = _last_predictions.get(sym, {}).get("meta_row")
+            if meta_row is not None:
+                update_online_learner(meta_row, correct)
+
+            # Circuit Breaker update
+            global _cb_just_reset
+            was_halted = _cb.is_halted
+            cb_halted, cb_reason = _cb.check(was_win=correct)
+            if cb_halted and not was_halted:
+                cb_msg = (
+                    f'\xf0\x9f\x9b\x91 *CIRCUIT BREAKER TRIGGERED* \u2014 {sym}\n'
+                    f'Reason: _{cb_reason}_\n'
+                    f'All signals halted 60 min. Resumes automatically.'
+                )
+                await _broadcast_to_subscribers(bot, cb_msg)
+                await _send_admin_alert(bot, cb_msg)
+            elif was_halted and not _cb.is_halted:
+                _cb_just_reset = True
+
+            emoji = "\u2705" if correct else "\u274c"
             conf = pred["final_confidence_percent"]
 
             _outcome_results.append({
@@ -680,27 +775,45 @@ async def _check_outcomes(bot: Bot, predictions: dict, subscribers: dict):
             wins = sum(1 for r in recent if r["correct"])
             win_rate = wins / len(recent) * 100
 
-            results_msgs.append(
-                f"{emoji} *{sym}*: Predicted {pred['suggested_direction']} "
-                f"→ Actual {'UP' if actual_green else 'DOWN'} "
-                f"({conf:.0f}% conf) | Win rate: {win_rate:.0f}%"
-            )
+            all_outcomes[sym] = {
+                "line": (
+                    f"{emoji} *{sym}*: Predicted {pred['suggested_direction']} "
+                    f"\u2192 Actual {'UP' if actual_green else 'DOWN'} "
+                    f"({conf:.0f}% conf) | Win rate: {win_rate:.0f}%"
+                ),
+            }
         except Exception as e:
             log.error("Outcome check failed for %s: %s", sym, e)
 
-    if results_msgs:
-        msg = "📋 *Signal Results*\n━━━━━━━━━━━━━━━━━━━━━\n\n" + "\n".join(results_msgs)
+    if not all_outcomes:
+        return
 
-        for chat_id, info in subscribers.items():
-            if info.get("active", False):
-                try:
-                    await bot.send_message(
-                        chat_id=int(chat_id),
-                        text=msg,
-                        parse_mode="Markdown",
-                    )
-                except Exception as e:
-                    log.error("Failed to send result to %s: %s", chat_id, e)
+    # Send MATCHED results to each subscriber (only their sent symbols)
+    for chat_id, info in subscribers.items():
+        if not info.get("active", False):
+            continue
+
+        # Determine which symbols this subscriber actually received
+        if sent_symbols_per_sub and chat_id in sent_symbols_per_sub:
+            sub_syms = sent_symbols_per_sub[chat_id]
+        else:
+            # Fallback: send all outcomes
+            sub_syms = set(all_outcomes.keys())
+
+        # Build result lines only for symbols this subscriber got signals for
+        sub_lines = [all_outcomes[s]["line"] for s in sub_syms if s in all_outcomes]
+        if not sub_lines:
+            continue
+
+        msg = "\U0001f4cb *Signal Results*\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n" + "\n".join(sub_lines)
+        try:
+            await bot.send_message(
+                chat_id=int(chat_id),
+                text=msg,
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            log.error("Failed to send result to %s: %s", chat_id, e)
 
 
 
@@ -1315,6 +1428,79 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def _send_admin_alert(bot: Bot, msg: str):
+    '''Send alert to ADMIN_CHAT_ID only (not all subscribers).'''
+    from config import ADMIN_CHAT_ID
+    if not ADMIN_CHAT_ID:
+        return
+    try:
+        await bot.send_message(
+            chat_id=int(ADMIN_CHAT_ID),
+            text=f'🔔 *ADMIN ALERT*\n{msg}',
+            parse_mode='Markdown')
+    except Exception as e:
+        log.error('Admin alert failed: %s', e)
+
+async def _broadcast_to_subscribers(bot: Bot, text: str):
+    '''Send message to all active subscribers.'''
+    for str_cid, info in _subscribers.items():
+        if info.get("active", False):
+            try:
+                await bot.send_message(
+                    chat_id=int(str_cid),
+                    text=text,
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                log.error("Broadcast failed to %s: %s", str_cid, e)
+
+async def _run_drift_check(bot: Bot, symbols):
+    try:
+        sym  = symbols[0] if symbols else DEFAULT_SYMBOL
+        data = fetch_multi_timeframe(sym, 1000)
+        df   = compute_features(data.get('M5'))
+        from auto_learner import check_drift_triggers
+        triggers = check_drift_triggers(sym, recent_df=df, feature_names=FEATURE_COLUMNS)
+        if triggers:
+            msg = f'⚠️ Drift detected: {triggers}\nLite retrain starting...'
+            await _send_admin_alert(bot, msg)
+            from auto_learner import retrain_lite
+            import threading
+            threading.Thread(target=retrain_lite, args=(sym,), kwargs={"validate": True}, daemon=True).start()
+    except Exception as e:
+        log.warning('Drift check coroutine failed: %s', e)
+
+async def _weekly_retrain_job(app: Application):
+    '''Lite retrain every Sunday 21:15 UTC. Notifies admin. Never blocks.'''
+    bot = app.bot
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            days_left = (6 - now.weekday()) % 7
+            if days_left == 0 and (now.hour > 21 or (now.hour == 21 and now.minute >= 15)):
+                days_left = 7
+            target = (now + timedelta(days=days_left)).replace(
+                hour=21, minute=15, second=0, microsecond=0)
+            await asyncio.sleep((target - now).total_seconds())
+
+            await _send_admin_alert(bot, f'🔄 Weekly lite retrain starting for {DEFAULT_SYMBOL}...')
+
+            result = {}
+            def _run():
+                from auto_learner import retrain_lite
+                result['ok'] = retrain_lite(DEFAULT_SYMBOL, validate=True)
+            import threading
+            t = threading.Thread(target=_run, daemon=True)
+            t.start(); t.join(timeout=600)
+
+            ok = result.get('ok', False)
+            await _send_admin_alert(bot, f"{'✅' if ok else '❌'} Weekly retrain {'complete' if ok else 'FAILED'}.")
+            await asyncio.sleep(60)
+        except Exception as e:
+            log.exception('Weekly retrain job error: %s', e)
+            await asyncio.sleep(3600)
+
+
 # =============================================================================
 #  Main
 # =============================================================================
@@ -1324,14 +1510,21 @@ async def post_init(app: Application):
     asyncio.create_task(_auto_signal_job(app))
     asyncio.create_task(_daily_report_job(app))
     asyncio.create_task(_weekly_report_job(app))
+    asyncio.create_task(_weekly_retrain_job(app))
     record_startup()
-    log.info("All background jobs scheduled (auto-signal + daily + weekly).")
-
+    log.info("All background jobs scheduled (auto-signal + daily + weekly + retrain).")
 
 def main():
     if not TELEGRAM_BOT_TOKEN:
-        print("ERROR: Set TELEGRAM_BOT_TOKEN environment variable.")
+        print('[X] STARTUP FAILED: TELEGRAM_BOT_TOKEN is not set.')
+        print('Copy .env.example to .env and fill your values.')
         return
+
+    # Warn (but don't block) if MT5 credentials are missing
+    if not MT5_LOGIN or int(MT5_LOGIN) == 0:
+        log.warning('MT5_LOGIN is 0 or missing -- MT5 will try default terminal.')
+    if not MT5_SERVER:
+        log.warning('MT5_SERVER is empty -- MT5 will try default terminal.')
 
     if not _connect_mt5():
         print("WARNING: MT5 not connected.")

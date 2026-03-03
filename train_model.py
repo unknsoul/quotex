@@ -234,6 +234,13 @@ def train(symbol):
     print(f"\n>> Saved ensemble ({len(ensemble)} models) -> {ENSEMBLE_MODEL_PATH}")
     print(f"   Features used: {len(use_features)} -> {FEATURE_LIST_PATH}")
 
+    try:
+        from feature_fingerprint import save_fingerprint
+        save_fingerprint(df_train, use_features)
+        print(f">> Feature fingerprint saved -> models/fingerprint.json")
+    except Exception as e:
+        print(f">> Warning: fingerprint save failed: {e}")
+
     # OOF data for meta + weight training
     oof_indices = np.where(oof_mask)[0]
     oof_data = {

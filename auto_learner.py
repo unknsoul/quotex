@@ -42,6 +42,8 @@ from config import (
     DRIFT_COSINE_THRESHOLD,
     LOG_LEVEL, LOG_FORMAT,
 )
+from drift_detector import check_drift_from_files
+from covariate_shift_monitor import check_covariate_shift
 
 log = logging.getLogger("auto_learner")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
@@ -53,6 +55,37 @@ _retrain_lock = threading.Lock()
 # =============================================================================
 #  Monitoring
 # =============================================================================
+
+def check_drift_triggers(symbol, recent_df=None, feature_names=None):
+    '''Run PSI + KS-test drift checks. Returns list of trigger strings.'''
+    triggers = []
+
+    # Check 1: Feature distribution drift vs OOF baseline
+    try:
+        result = check_drift_from_files(
+            train_path=OOF_PREDICTIONS_PATH,
+            recent_df=recent_df, feature_names=feature_names)
+        if result.get('overall_drift'):
+            triggers.append(f"feature_drift: {result['n_drifted']} features")
+    except Exception as e:
+        log.warning('Drift check failed: %s', e)
+
+    # Check 2: Covariate shift (PSI per feature vs training baseline)
+    if recent_df is not None and feature_names is not None:
+        try:
+            from data_collector import load_csv
+            baseline = load_csv(symbol, 'M5')
+            if baseline is not None and len(baseline) > 1000:
+                shift = check_covariate_shift(
+                    baseline_df=baseline.tail(2000),
+                    current_df=recent_df.tail(500),
+                    feature_cols=[f for f in feature_names if f in baseline.columns])
+                if shift.get('retrain_needed'):
+                    triggers.append(f"covariate_shift: {shift['n_warnings']} features PSI>0.20")
+        except Exception as e:
+            log.warning('Covariate shift check failed: %s', e)
+
+    return triggers
 
 def load_prediction_log():
     """Load prediction history from CSV log."""

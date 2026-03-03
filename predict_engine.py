@@ -27,6 +27,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from feature_fingerprint import check_fingerprint
+
 from config import (
     MODEL_PATH, FEATURE_LIST_PATH, ENSEMBLE_MODEL_PATH,
     META_MODEL_PATH, META_FEATURE_LIST_PATH, WEIGHT_MODEL_PATH,
@@ -43,6 +45,7 @@ from config import (
 )
 from regime_detection import get_regime_thresholds, regime_stability_score, get_session
 from calibration import CalibratedModel  # needed for joblib.load
+from online_learner import OnlineLearner
 
 log = logging.getLogger("predict_engine")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
@@ -56,6 +59,7 @@ _weight_model = None
 _confidence_thresholds = None  # Phase 3: learned per-regime thresholds
 _prediction_history = []
 _direction_history = []
+_online_learner = OnlineLearner(n_features=14, learning_rate=0.005)
 
 # Adaptive confidence: rolling calibration window
 _adaptive_history = []  # list of (confidence, correct) tuples
@@ -119,6 +123,18 @@ def load_models():
             else:
                 raise FileNotFoundError("No model found.")
             _primary_features = joblib.load(FEATURE_LIST_PATH)
+
+            # Feature fingerprint parity check
+            try:
+                fp = check_fingerprint(None, _primary_features)
+                if fp.get('status') == 'drift':
+                    mismatches = fp.get('mismatches', [])
+                    log.warning('FEATURE MISMATCH: %d features drifted — model may be stale. %s',
+                                len(mismatches), mismatches[:5])
+                else:
+                    log.info('Feature fingerprint OK (%d features).', fp.get('n_checked', 0))
+            except Exception as e:
+                log.warning('Fingerprint check skipped: %s', e)
 
         if _meta_model is None:
             _meta_model = joblib.load(META_MODEL_PATH)
@@ -328,6 +344,15 @@ def predict(df, regime):
         meta_input = pd.DataFrame([meta_row])[meta_feat_cols]
         meta_rel = float(meta_model.predict_proba(meta_input.values)[0][1])
 
+        # Blend online learner prediction after 30+ updates (ramps to 20%)
+        if _online_learner.n_updates >= 30:
+            try:
+                ol_pred     = _online_learner.predict(meta_row)
+                blend       = min(0.20, _online_learner.n_updates / 500)
+                meta_rel    = (1 - blend) * meta_rel + blend * float(ol_pred)
+            except Exception as e:
+                log.debug('Online blend skipped: %s', e)
+
         # Confidence with uncertainty adjustment
         primary_strength = abs(green_p - 0.5) * 2
         regime_strength = float(df.iloc[-1].get("adx_normalized", 0.25))
@@ -434,6 +459,8 @@ def predict(df, regime):
             "ensemble_variance": round(variance, 6),  # Phase 4: exposed for monitoring
             "suggested_trade": trade,
             "suggested_direction": "UP" if green_p >= 0.5 else "DOWN",
+            "error": None,
+            "_meta_row": meta_row,
             "market_regime": regime,
             "regime_stability": round(stability_score, 2),
             "session": session,
@@ -535,3 +562,14 @@ def log_prediction(symbol, regime, prediction, risk_warnings=None, timestamp=Non
     row_df.to_csv(PREDICTION_LOG_CSV, mode="a", header=header, index=False)
     with open(PREDICTION_LOG_JSON, "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
+
+def update_online_learner(meta_row: dict, was_correct: bool):
+    '''Called from telegram_bot._check_outcomes() after each outcome.'''
+    try:
+        label = 1 if was_correct else 0
+        _online_learner.update(meta_row, label)
+        if _online_learner.n_updates % 20 == 0:
+            log.info('Online learner: %d updates (accuracy: %.2f%%)',
+                     _online_learner.n_updates, _online_learner.accuracy * 100)
+    except Exception as e:
+        log.warning('Online learner update failed: %s', e)
