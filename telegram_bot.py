@@ -46,6 +46,8 @@ from predict_engine import (
 from risk_filter import check_warnings
 from circuit_breaker import CircuitBreaker
 from pair_selector import score_pair
+from confluence_filter import check_confluence
+from signal_ranker import rank_and_select, compute_signal_score
 import threading
 from stability import AccuracyTracker, ConfidenceCorrelationTracker
 from production_state import (
@@ -91,6 +93,19 @@ BLOCKED_SYMBOLS = {"AUDUSD"}  # 43.8% win rate over 16 signals
 
 # Ensemble disagreement threshold — skip when models disagree too much
 MAX_ENSEMBLE_VARIANCE = 0.035  # skip if variance > this (models arguing)
+MIN_UNANIMITY = 0.857          # Strategy 2: require 6/7 models to agree (85.7%)
+
+# Strategy 3: Trading session windows (UTC hours that are profitable)
+# 14:00 UTC = 76.7% WR, 16:00 = 60%. Block 15:00 (47.5%) and 19:00 (40%)
+PROFITABLE_HOURS_UTC = {7, 8, 9, 10, 11, 12, 13, 14, 16, 17}  # allowed hours
+BLOCKED_HOURS_UTC = {15, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4, 5, 6}  # blocked
+
+# Strategy 4: Max signals per cycle
+MAX_SIGNALS_PER_CYCLE = 2     # only send top 2 ranked signals
+MIN_SIGNAL_SCORE = 50.0       # minimum composite score to qualify
+
+# Strategy 5: Consecutive candle confirmation
+_prev_directions = {}  # {symbol: last_predicted_direction}
 
 # Circuit breaker instance (tightened: 3 losses instead of 5)
 _cb = CircuitBreaker(max_losses=3, max_drawdown_pct=6.0, cooldown_min=30)
@@ -651,11 +666,59 @@ async def _auto_signal_job(app: Application):
                         filtered_out[sym] = f"ensemble disagree (var={ens_var:.4f})"
                         continue
 
-                    # 8. Skip SELL/BUY only when meta reliability is too low
+                    # 8. Skip when meta reliability is too low
                     meta_rel = pred.get("meta_reliability_percent", 50)
                     if meta_rel < 40 and conf < 48:
                         filtered_out[sym] = f"low meta ({meta_rel:.0f}%)"
                         continue
+
+                    # =========================================================
+                    # STRATEGY 2: Ensemble Unanimity (require 6/7+ agreement)
+                    # =========================================================
+                    unanimity = pred.get("ensemble_unanimity", 0.5)
+                    if unanimity < MIN_UNANIMITY:
+                        agree = pred.get('ensemble_agree_count', '?')
+                        total = pred.get('ensemble_total', '?')
+                        filtered_out[sym] = f"split vote ({agree}/{total})"
+                        continue
+
+                    # =========================================================
+                    # STRATEGY 3: Session Hour Window
+                    # =========================================================
+                    current_hour = now_utc.hour
+                    if current_hour in BLOCKED_HOURS_UTC:
+                        filtered_out[sym] = f"off-hours ({current_hour}:00 UTC)"
+                        continue
+
+                    # =========================================================
+                    # STRATEGY 5: Consecutive Candle Confirmation
+                    # =========================================================
+                    current_dir = pred["suggested_direction"]
+                    prev_dir = _prev_directions.get(sym)
+                    _prev_directions[sym] = current_dir  # always update
+                    if prev_dir is not None and prev_dir != current_dir:
+                        filtered_out[sym] = f"direction flip ({prev_dir}->{current_dir})"
+                        continue
+
+                    # =========================================================
+                    # STRATEGY 1: Multi-TF Confluence
+                    # =========================================================
+                    try:
+                        data_mtf = fetch_multi_timeframe(sym, 50)
+                        confl = check_confluence(
+                            m5_df=data_mtf.get('M5'),
+                            m15_df=data_mtf.get('M15'),
+                            h1_df=data_mtf.get('H1'),
+                            predicted_direction=current_dir,
+                            min_score=2,
+                        )
+                        pred["confluence_score"] = confl["confluence_score"]
+                        if not confl["confluence_pass"]:
+                            filtered_out[sym] = confl["reason"]
+                            continue
+                    except Exception as e:
+                        log.debug("Confluence check error %s: %s", sym, e)
+                        pred["confluence_score"] = 3  # benefit of doubt
 
                     predictions[sym] = pred
                     _last_predictions[sym] = {
@@ -675,6 +738,16 @@ async def _auto_signal_job(app: Application):
                 except Exception as e:
                     log.error("Prediction failed %s: %s", sym, e)
                     record_error(f"{sym}: {e}")
+
+            # =================================================================
+            # STRATEGY 4: Rank and select only top N signals
+            # =================================================================
+            if predictions:
+                predictions = rank_and_select(
+                    predictions,
+                    max_signals=MAX_SIGNALS_PER_CYCLE,
+                    min_score=MIN_SIGNAL_SCORE,
+                )
 
             # Send ONE combined message per subscriber (respecting alert mode)
             # Track which symbols were actually sent per subscriber

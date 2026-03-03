@@ -322,6 +322,14 @@ def predict(df, regime):
         norm_var = min(variance / max_var, 1.0)
         uncertainty_pct = round(norm_var * 100, 2)
 
+        # Ensemble unanimity: how many models agree on direction?
+        n_models = len(all_probs)
+        if green_p >= 0.5:
+            agree_count = int((all_probs >= 0.5).sum())
+        else:
+            agree_count = int((all_probs < 0.5).sum())
+        unanimity = agree_count / n_models  # 0.0 to 1.0
+
         # Latency check after ensemble inference
         t_ensemble = time.perf_counter()
         if (t_ensemble - t_start) > 3.0:
@@ -457,6 +465,9 @@ def predict(df, regime):
             "kelly_fraction_percent": kelly_pct,
             "suggested_size_percent": kelly_pct,  # Phase 4: alias for clarity
             "ensemble_variance": round(variance, 6),  # Phase 4: exposed for monitoring
+            "ensemble_unanimity": round(unanimity, 3),  # Strategy 2: fraction of models agreeing
+            "ensemble_agree_count": agree_count,         # e.g. 6/7
+            "ensemble_total": n_models,
             "suggested_trade": trade,
             "suggested_direction": "UP" if green_p >= 0.5 else "DOWN",
             "error": None,
