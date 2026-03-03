@@ -92,13 +92,13 @@ ATR_ROLLING_WINDOW = 100
 
 # --- Regime Thresholds (trade suggestions) -----------------------------------
 REGIME_THRESHOLDS = {
-    "Trending":        {"primary": 0.62, "meta": 0.58},
-    "Ranging":         {"primary": 0.58, "meta": 0.62},
-    "High_Volatility": {"primary": 0.70, "meta": 0.65},
-    "Low_Volatility":  {"primary": 0.75, "meta": 0.75},
+    "Trending":        {"primary": 0.52, "meta": 0.45},
+    "Ranging":         {"primary": 0.53, "meta": 0.48},
+    "High_Volatility": {"primary": 0.55, "meta": 0.50},
+    "Low_Volatility":  {"primary": 0.54, "meta": 0.48},
 }
-PRIMARY_BASE_THRESHOLD = 0.60
-META_BASE_THRESHOLD = 0.60
+PRIMARY_BASE_THRESHOLD = 0.52
+META_BASE_THRESHOLD = 0.45
 
 # --- Adaptive Regime Filter (Phase 3) ---------------------------------------
 REGIME_FILTER_ENABLED = True

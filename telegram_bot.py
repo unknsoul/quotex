@@ -73,8 +73,8 @@ _last_regime = {}  # {symbol: regime_name} — for transition detection
 _regime_transition_skip = {}  # {symbol: int} — candles to skip
 
 # Signal quality thresholds
-MIN_CONFIDENCE_FILTER = 55.0
-HIGH_CONF_THRESHOLD = 70.0
+MIN_CONFIDENCE_FILTER = 35.0   # lowered to match V3 calibrated output range
+HIGH_CONF_THRESHOLD = 60.0
 COOLDOWN_CANDLES = 3
 MAX_CONSECUTIVE_LOSSES = 3
 REGIME_SKIP_CANDLES = 2  # skip after regime transition
@@ -551,8 +551,8 @@ async def _auto_signal_job(app: Application):
                     if conf < MIN_CONFIDENCE_FILTER:
                         filtered_out[sym] = f"low-conf ({conf:.0f}%)"
                         continue
-                    if trade == "HOLD":
-                        filtered_out[sym] = "HOLD"
+                    if trade == "HOLD" and conf < 30:
+                        filtered_out[sym] = "very-low-conf HOLD"
                         continue
                     if sym in filtered_out:  # regime transition
                         continue
