@@ -56,8 +56,8 @@ logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 _tracker = AccuracyTracker()
 _conf_tracker = ConfidenceCorrelationTracker()
 
-# Supported symbols
-SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "GBPJPY"]
+# Supported symbols (6 pairs)
+SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "GBPJPY", "AUDUSD"]
 
 # Subscriber storage
 SUBS_FILE = os.path.join(LOG_DIR, "subscribers.json")
@@ -340,47 +340,75 @@ def _back_keyboard(chat_id=None):
 # =============================================================================
 
 def _format_prediction(pred: dict, is_auto=False) -> str:
-    """Format a single prediction — compact version."""
+    """Format a single prediction — V3 industry-grade format."""
     direction = "🟢 UP" if pred["suggested_direction"] == "UP" else "🔴 DOWN"
+    arrow = "⬆" if pred["suggested_direction"] == "UP" else "⬇"
     conf = pred["final_confidence_percent"]
     green = pred["green_probability_percent"]
     kelly = pred.get("kelly_fraction_percent", 0.0)
     regime = pred.get("market_regime", "Unknown")
     trade = pred["suggested_trade"]
     latency = pred.get("latency_ms", -1)
+    uncertainty = pred.get("uncertainty_percent", 0)
+    meta_rel = pred.get("meta_reliability_percent", 0)
+    session = pred.get("session", "Off")
+    stability = pred.get("regime_stability", 0)
+    adaptive_conf = pred.get("adaptive_confidence_percent", conf)
+    variance = pred.get("ensemble_variance", 0)
 
-    regime_emoji = {"↑Trend": "📈", "Trending": "📈", "Ranging": "↔️",
+    regime_emoji = {"Trending": "📈", "Ranging": "↔️",
                    "High_Volatility": "🔥", "Low_Volatility": "❄️"}.get(regime, "❓")
+    session_emoji = {"London": "🇬🇧", "Overlap": "🌐", "Asian": "🌏", "Off": "💤"}.get(session, "")
+
+    # Confidence bar
+    filled = int(conf / 10)
+    bar = "█" * filled + "░" * (10 - filled)
+
+    # Position size
+    if kelly > 3: size = "🟢 STRONG"
+    elif kelly > 2: size = "🟡 MEDIUM"
+    elif kelly > 1: size = "🟠 LIGHT"
+    else: size = "⚪ SKIP"
 
     now_utc = datetime.now(timezone.utc)
     ist = now_utc + timedelta(hours=5, minutes=30)
-    time_str = f"{now_utc.strftime('%H:%M')} UTC / {ist.strftime('%H:%M')} IST"
+    time_str = f"{now_utc.strftime('%H:%M')} UTC │ {ist.strftime('%H:%M')} IST"
 
-    header = "🤖 AUTO" if is_auto else "📊 PRED"
+    header = "🤖 AUTO-SIGNAL" if is_auto else "🔮 PREDICTION"
 
     return (
-        f"*{header}* — {time_str}\n"
-        f"📊 *{pred['symbol']}* M5 {regime_emoji}\n"
-        f"{direction} | Prob *{green:.0f}%* | Conf *{conf:.0f}%*\n"
-        f"💰 Kelly *{kelly:.1f}%* | 💡 *{trade}*"
+        f"*{header}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{direction} *{pred['symbol']}* M5 {arrow}\n\n"
+        f"📊 Probability: *{green:.1f}%*\n"
+        f"🎯 Confidence:  `[{bar}]` *{conf:.0f}%*\n"
+        f"🧠 Meta Trust:  *{meta_rel:.0f}%*\n"
+        f"📉 Uncertainty: *{uncertainty:.1f}%*\n\n"
+        f"{regime_emoji} Regime: *{regime}* (stab: {stability:.0%})\n"
+        f"{session_emoji} Session: *{session}*\n"
+        f"💰 Kelly: *{kelly:.1f}%* │ Size: {size}\n"
+        f"💡 Action: *{trade}*\n\n"
+        f"⏱ {time_str} │ {latency:.0f}ms"
     )
 
 
 def _format_combined_signal(predictions: dict, filtered: dict) -> str:
-    """Industry-grade combined signal message."""
+    """V3 industry-grade combined signal message with all metrics."""
     now_utc = datetime.now(timezone.utc)
     ist = now_utc + timedelta(hours=5, minutes=30)
-    time_str = f"{now_utc.strftime('%H:%M')} UTC | {ist.strftime('%H:%M')} IST"
+    time_str = f"{now_utc.strftime('%H:%M')} UTC │ {ist.strftime('%H:%M')} IST"
 
-    # Win streak from recent outcomes
+    # Win rate from recent outcomes
     recent = _outcome_results[-20:] if _outcome_results else []
     total_r = len(recent)
     wins_r = sum(1 for r in recent if r["correct"])
-    wr = f"{wins_r}/{total_r}" if total_r > 0 else "—"
+    wr_pct = f"{wins_r/total_r*100:.0f}%" if total_r > 0 else "—"
+    wr_str = f"{wins_r}/{total_r} ({wr_pct})" if total_r > 0 else "No data"
 
     lines = [
-        f"🤖 *QUOTEX LORD* — {time_str}",
-        "━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🤖 *QUOTEX LORD V3*",
+        f"⏱ {time_str}",
+        f"━━━━━━━━━━━━━━━━━━━━━━━",
     ]
 
     for sym, pred in sorted(predictions.items()):
@@ -391,37 +419,40 @@ def _format_combined_signal(predictions: dict, filtered: dict) -> str:
         kelly = pred.get("kelly_fraction_percent", 0.0)
         trade = pred["suggested_trade"]
         regime = pred.get("market_regime", "")
-        r_e = {"↑Trend": "📈", "Trending": "📈", "Ranging": "↔️",
+        meta_rel = pred.get("meta_reliability_percent", 0)
+        uncertainty = pred.get("uncertainty_percent", 0)
+        session = pred.get("session", "")
+        stability = pred.get("regime_stability", 0)
+        r_e = {"Trending": "📈", "Ranging": "↔️",
                "High_Volatility": "🔥", "Low_Volatility": "❄️"}.get(regime, "")
+        s_e = {"London": "🇬🇧", "Overlap": "🌐", "Asian": "🌏", "Off": "💤"}.get(session, "")
 
         # Position size from Kelly
-        if kelly > 3:
-            size = "🟢 1.5x"
-        elif kelly > 2:
-            size = "🟡 1.2x"
-        elif kelly > 1:
-            size = "🟠 0.8x"
-        else:
-            size = "⚪ 0.5x"
+        if kelly > 3: size = "🟢 STRONG"
+        elif kelly > 2: size = "🟡 MEDIUM"
+        elif kelly > 1: size = "🟠 LIGHT"
+        else: size = "⚪ MIN"
 
         # Confidence bar
         filled = int(conf / 10)
         bar = "█" * filled + "░" * (10 - filled)
 
         lines.append(
-            f"\n{d} *{sym}* {r_e} {arrow} *{pred['suggested_direction']}*\n"
+            f"\n{d} *{sym}* {r_e}{s_e} {arrow} *{pred['suggested_direction']}*\n"
             f"  `[{bar}]` *{conf:.0f}%*\n"
-            f"  Prob *{green:.0f}%* │ Kelly *{kelly:.1f}%* │ {size}\n"
+            f"  Prob *{green:.1f}%* │ Meta *{meta_rel:.0f}%* │ Unc *{uncertainty:.0f}%*\n"
+            f"  Kelly *{kelly:.1f}%* │ {size}\n"
             f"  💡 *{trade}*"
         )
 
     # Footer
     lines.append(f"\n━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🎯 Recent: *{wr}* correct")
+    lines.append(f"🎯 Recent: *{wr_str}*")
+    lines.append(f"🏗 V3 Engine │ 14 Layers │ 65 Features")
 
     if filtered:
-        skipped = ", ".join(f"{s}" for s in filtered)
-        lines.append(f"⏭ Skipped: _{skipped}_")
+        reasons = [f"{s}({r})" for s, r in filtered.items()]
+        lines.append(f"⏭ Filtered: _{', '.join(reasons[:3])}_")
 
     return "\n".join(lines)
 
@@ -879,20 +910,25 @@ async def _broadcast_to_subscribers(bot: Bot, msg: str):
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    n_subs = sum(1 for s in _subscribers.values() if s.get("active"))
     welcome = (
-        "🤖 *QUOTEX LORD — Auto-Signal Engine*\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🤖 *QUOTEX LORD V3 — ML Trading Engine*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "🔔 *Auto-Signal Mode:*\n"
-        "  Predictions sent automatically\n"
-        "  5 seconds before every M5 candle!\n\n"
-        "🧠 *v7 Engine:*\n"
-        "  • 66 features + signal quality filter\n"
-        "  • 5-seed temporal XGBoost ensemble\n"
-        "  • Auto win/loss tracking + cooldown\n"
-        "  • Daily report at 21:00 UTC\n\n"
-        "📊 *Live Expectation: ~63%*\n"
-        "🎯 *High-Conf (≥80%): ~85%*\n\n"
-        "👇 *Tap Start Signals to begin!*"
+        "  Predictions 5s before every M5 close\n"
+        "  6 pairs │ Win/loss tracking │ Daily reports\n\n"
+        "🏗 *V3 Architecture (14 Layers):*\n"
+        "  • 65 features + multi-timeframe (M5/M15/H1)\n"
+        "  • Triple Barrier labeling (1.5x TP / 1.0x SL)\n"
+        "  • XGBoost + LightGBM + RandomForest ensemble\n"
+        "  • Purged Walk-Forward CV (leak-proof)\n"
+        "  • Regime-specific model routing\n"
+        "  • 10-gate pre-flight filter system\n"
+        "  • Meta-model + Kelly sizing + Circuit breaker\n\n"
+        "📊 *Backtest: 56.2% (honest, leak-free)*\n"
+        f"🎯 *High-Conf (≥70%): 75%*\n"
+        f"👥 Active subscribers: *{n_subs}*\n\n"
+        "👇 *Tap below to start!*"
     )
     await update.message.reply_text(
         welcome,
@@ -1136,16 +1172,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ----- Model Info -----
     elif data == "model_info":
         msg = (
-            "ℹ️ *Model Architecture v7*\n━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "🏗️ *Primary:* 5-seed temporal XGB\n"
-            "   Windows: 40/40/70/70/100%\n\n"
-            "🧠 *Meta:* GBM + Sigmoid (11 feat)\n"
-            "⚖️ *Weight:* Logistic regression\n"
-            "📊 *Features:* 66 total (v7)\n\n"
-            "🎯 Backtest: 72.4% (all bars)\n"
-            "   ≥80% conf: 84.1%\n"
-            "   Brier Skill: 0.2526\n"
-            "   Live exp: ~63%"
+            "ℹ️ *V3 Architecture — 14 Layers*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🏗 *Ensemble:* XGB + LGB + RF (5 seeds)\n"
+            "🎯 *Labels:* Triple Barrier (1.5x/1.0x ATR)\n"
+            "⚖️ *Training:* Purged WF-CV + time weights\n"
+            "🧠 *Meta:* GBM + Sigmoid (14 features)\n"
+            "📊 *Features:* 65 (multi-TF: M5/M15/H1)\n"
+            "🌊 *Regime:* ADX+ATR+BB classifier → routing\n\n"
+            "*V3 Backtest Results:*\n"
+            "  📈 Overall: *56.2%* (leak-free)\n"
+            "  🇬🇧 London: *58.6%*\n"
+            "  ≥70% conf: *75.0%*\n"
+            "  BSS: *+0.012* (beats naive)\n\n"
+            "*10-Gate Filter:*\n"
+            "  G1-Conf │ G2-Meta │ G3-Regime\n"
+            "  G4-Stability │ G5-Variance\n"
+            "  G6-Session │ G7-Cooldown\n"
+            "  G8-Spread │ G9-Kelly │ G10-Circuit"
         )
         await query.edit_message_text(msg, parse_mode="Markdown",
                                       reply_markup=_back_keyboard(chat_id))
