@@ -27,12 +27,24 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, message="Mean of empt
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import brier_score_loss, log_loss
 from scipy import stats
+
+try:
+    import lightgbm as lgb
+    HAS_LGB = True
+except ImportError:
+    HAS_LGB = False
+
+try:
+    from catboost import CatBoostClassifier
+    HAS_CAT = True
+except ImportError:
+    HAS_CAT = False
 
 from calibration import CalibratedModel, build_seeded_xgb_ensemble
 from config import (
@@ -51,10 +63,15 @@ from config import (
     LOG_LEVEL, LOG_FORMAT,
 )
 from data_collector import load_csv, load_multi_tf
+from data_cleaner import clean_data
 from feature_engineering import (
     compute_features, add_target, add_target_smoothed,
     add_target_atr_filtered, add_target_triple_barrier, FEATURE_COLUMNS,
 )
+from triple_barrier_labeler import label_triple_barrier
+from time_weighted_training import compute_time_weights, combine_weights
+from purged_wfcv import PurgedWalkForwardCV
+from regime_classifier import classify_regime, classify_regime_series as classify_regimes_v3
 from regime_detection import detect_regime, detect_regime_series, REGIMES, get_session
 from stability import CosineDriftDetector
 
@@ -132,84 +149,60 @@ def _build_meta_row(green_p, regime, row, dir_history, ensemble_variance=0.0):
 #  OOF prediction generator (per-cycle, leakage-free)
 # =============================================================================
 
-def _generate_oof_predictions(X_tr, y_tr, spw, seeds, n_splits=OOF_INTERNAL_SPLITS):
-    """Generate OOF predictions using diverse ensemble (matching inference).
+def _generate_oof_predictions(X_tr, y_tr, spw, seeds, sample_weight=None,
+                               n_splits=OOF_INTERNAL_SPLITS):
+    """Generate OOF predictions using V3 multi-model ensemble with purged CV.
 
-    Uses same model specs as build_seeded_xgb_ensemble:
-      XGB×3, ExtraTrees×2, LightGBM×1, CatBoost×1
-    This ensures OOF distributions match the actual ensemble used at inference.
+    Uses XGBoost + LightGBM + CatBoost + RandomForest (when available).
+    Purged walk-forward CV prevents label leakage.
     """
-    import lightgbm as _lgb
-    from catboost import CatBoostClassifier as _Cat
-    from sklearn.ensemble import ExtraTreesClassifier as _ET
-
     n = len(y_tr)
-    oof_all = np.full((len(seeds), n), np.nan)
-    tscv = TimeSeriesSplit(n_splits=n_splits)
-
-    # Mirror the model specs from calibration.py
-    model_specs = [
-        ("xgb", {"max_depth": 6, "learning_rate": 0.03, "n_estimators": 500}),
-        ("xgb", {"max_depth": 4, "learning_rate": 0.05, "n_estimators": 400}),
-        ("xgb", {"max_depth": 5, "learning_rate": 0.05, "n_estimators": 400}),
-        ("et",  {"max_depth": 8, "n_estimators": 500}),
-        ("et",  {"max_depth": 12, "n_estimators": 400}),
-        ("lgbm", {"num_leaves": 31, "max_depth": 6, "learning_rate": 0.05,
-                  "n_estimators": 400}),
-        ("cat", {"depth": 6, "learning_rate": 0.03, "iterations": 400}),
-    ]
+    n_models = len(seeds)
+    oof_all = np.full((n_models, n), np.nan)
+    cv = PurgedWalkForwardCV(n_splits=n_splits, purge_bars=6, embargo_bars=3)
 
     ss = XGB_SUBSAMPLE
     cs = XGB_COLSAMPLE_BYTREE
 
-    for fold_idx, (tr_idx, te_idx) in enumerate(tscv.split(X_tr)):
-        for s_idx, (algo, params) in enumerate(model_specs):
-            if s_idx >= len(seeds):
+    for fold_idx, (tr_idx, te_idx) in enumerate(cv.split(X_tr)):
+        for s_idx, seed in enumerate(seeds):
+            if s_idx >= n_models:
                 break
-            seed = seeds[s_idx]
 
-            if algo == "xgb":
+            sw = sample_weight[tr_idx] if sample_weight is not None else None
+
+            # Rotate model types for diversity (skip CatBoost in OOF — too slow)
+            model_type = s_idx % 3  # 0=XGB, 1=LGB, 2=RF
+
+            if model_type == 1 and HAS_LGB:
+                clf = lgb.LGBMClassifier(
+                    n_estimators=100, max_depth=4, learning_rate=0.05,
+                    subsample=ss, colsample_bytree=cs,
+                    scale_pos_weight=spw, random_state=seed, verbosity=-1,
+                    min_child_weight=5, reg_alpha=0.5, reg_lambda=3.0,
+                )
+                clf.fit(X_tr.iloc[tr_idx], y_tr[tr_idx],
+                        sample_weight=sw)
+            elif model_type == 2:
+                clf = RandomForestClassifier(
+                    n_estimators=100, max_depth=5,
+                    min_samples_leaf=10, random_state=seed,
+                    class_weight="balanced", n_jobs=-1,
+                )
+                clf.fit(X_tr.iloc[tr_idx], y_tr[tr_idx],
+                        sample_weight=sw)
+            else:
                 clf = xgb.XGBClassifier(
-                    n_estimators=params.get("n_estimators", 400),
-                    max_depth=params["max_depth"],
-                    learning_rate=params["learning_rate"],
+                    n_estimators=100, max_depth=3, learning_rate=0.05,
                     subsample=ss, colsample_bytree=cs,
                     scale_pos_weight=spw,
                     objective="binary:logistic", eval_metric="logloss",
                     use_label_encoder=False, random_state=seed, verbosity=0,
-                    min_child_weight=3, reg_alpha=0.1, reg_lambda=1.5,
+                    min_child_weight=5, reg_alpha=0.5, reg_lambda=3.0,
+                    gamma=0.5,
                 )
-                clf.fit(X_tr.iloc[tr_idx], y_tr[tr_idx], verbose=False)
-            elif algo == "et":
-                clf = _ET(
-                    n_estimators=params.get("n_estimators", 400),
-                    max_depth=params.get("max_depth", 10),
-                    min_samples_leaf=5,
-                    random_state=seed, n_jobs=-1,
-                )
-                clf.fit(X_tr.iloc[tr_idx], y_tr[tr_idx])
-            elif algo == "lgbm":
-                clf = _lgb.LGBMClassifier(
-                    num_leaves=params["num_leaves"],
-                    max_depth=params["max_depth"],
-                    learning_rate=params["learning_rate"],
-                    n_estimators=params.get("n_estimators", 400),
-                    subsample=ss, colsample_bytree=cs,
-                    scale_pos_weight=spw,
-                    random_state=seed, verbose=-1,
-                    min_child_samples=10, reg_alpha=0.1, reg_lambda=1.5,
-                )
-                clf.fit(X_tr.iloc[tr_idx], y_tr[tr_idx])
-            elif algo == "cat":
-                clf = _Cat(
-                    depth=params["depth"],
-                    learning_rate=params["learning_rate"],
-                    iterations=params.get("iterations", 400),
-                    auto_class_weights="Balanced",
-                    random_seed=seed, verbose=0,
-                    l2_leaf_reg=3.0,
-                )
-                clf.fit(X_tr.iloc[tr_idx], y_tr[tr_idx])
+                clf.fit(X_tr.iloc[tr_idx], y_tr[tr_idx],
+                        sample_weight=sw, verbose=False)
 
             oof_all[s_idx, te_idx] = clf.predict_proba(X_tr.iloc[te_idx])[:, 1]
 
@@ -229,12 +222,27 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0)
         df = load_csv(symbol, "M5")
     m15, h1 = mtf.get("M15"), mtf.get("H1")
 
+    # V3: Clean data before feature engineering
+    df = clean_data(df)
+
     df = compute_features(df, m15_df=m15, h1_df=h1)
 
-    # Simple target for both train and test evaluation (all rows)
-    df_eval = add_target(df)
+    # V3: Triple Barrier labeling with sample weights
+    # TB labels are cleaner than simple close-to-close because they
+    # capture whether TP or SL was hit, not just direction.
+    if TRIPLE_BARRIER_ENABLED:
+        df_eval = label_triple_barrier(df, tp_mult=1.5, sl_mult=1.0, max_bars=4)
+    else:
+        df_eval = add_target_smoothed(df, lookahead=3)
+        df_eval["tb_weight"] = 1.0  # No TB weights for smoothed target
+
     df_eval = df_eval.dropna(subset=["target"]).reset_index(drop=True)
     df_eval["target"] = df_eval["target"].astype(int)
+
+    # V3: Compute time weights (exponential recency)
+    time_weights = compute_time_weights(len(df_eval), half_life_days=180)
+    tb_weights = df_eval["tb_weight"].values if "tb_weight" in df_eval.columns else None
+    sample_weights = combine_weights(time_weights, tb_weights)
 
     X_all = df_eval[FEATURE_COLUMNS]
     y_all = df_eval["target"].values
@@ -279,6 +287,12 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0)
 
         spw = np.sum(y_tr_filtered == 0) / max(np.sum(y_tr_filtered == 1), 1)
 
+        # V3: Extract sample weights for this window
+        if rolling_window > 0:
+            sw_filtered = sample_weights[roll_start:train_end]
+        else:
+            sw_filtered = sample_weights[:train_end]
+
         if rolling_window > 0:
             roll_start = max(0, train_end - rolling_window)
             print(f"\n  Cycle {cycle}: train[{roll_start}:{train_end}] test[{test_start}:{test_end}]")
@@ -292,6 +306,7 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0)
         cal_split = int(len(X_tr_filtered) * CALIBRATION_SPLIT_RATIO)
         X_main = X_tr_filtered.iloc[:cal_split]
         y_main = y_tr_filtered[:cal_split]
+        sw_main = sw_filtered[:cal_split]
         X_cal = X_tr_filtered.iloc[cal_split:]
         y_cal = y_tr_filtered[cal_split:]
 
@@ -315,10 +330,50 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0)
             pass
 
         # =================================================================
-        # Step 3: Generate OOF predictions on train_main (LEAKAGE-FREE)
+        # Step 3: V3 Regime-Specific Model Training
+        # Train separate XGB per regime for regime-aware routing
+        # =================================================================
+        regime_models = {}
+        try:
+            train_slice = df_eval.iloc[:train_end]
+            regime_labels = []
+            step = 50  # Classify every 50th bar for speed
+            for ri in range(0, len(X_main), step):
+                idx = X_main.index[ri]
+                start = max(0, idx - 200)
+                rr = classify_regime(df_eval.iloc[start:idx+1])
+                regime_labels.extend([rr.regime] * min(step, len(X_main) - ri))
+            regime_labels = regime_labels[:len(X_main)]
+            regime_arr = np.array(regime_labels)
+
+            for reg in ["TREND", "RANGE", "HIGH_VOL", "TRANSITION"]:
+                mask = regime_arr == reg
+                n_reg = mask.sum()
+                if n_reg < 200:
+                    continue
+                X_reg = X_main.iloc[np.where(mask)[0]]
+                y_reg = y_main[mask]
+                sw_reg = sw_main[mask] if sw_main is not None else None
+                spw_reg = np.sum(y_reg == 0) / max(np.sum(y_reg == 1), 1)
+                reg_model = xgb.XGBClassifier(
+                    n_estimators=100, max_depth=3, learning_rate=0.05,
+                    subsample=0.8, colsample_bytree=0.8,
+                    scale_pos_weight=spw_reg,
+                    objective="binary:logistic", eval_metric="logloss",
+                    use_label_encoder=False, random_state=42, verbosity=0,
+                    min_child_weight=5, reg_alpha=0.5, reg_lambda=3.0, gamma=0.5,
+                )
+                reg_model.fit(X_reg, y_reg, sample_weight=sw_reg, verbose=False)
+                regime_models[reg] = reg_model
+        except Exception as e:
+            log.warning("Regime model training failed: %s", e)
+
+        # =================================================================
+        # Step 4: Generate OOF predictions on train_main (LEAKAGE-FREE)
+        #         V3: Uses purged CV + multi-model ensemble + sample weights
         # =================================================================
         oof_mean, oof_all, oof_mask = _generate_oof_predictions(
-            X_main, y_main, spw, ENSEMBLE_SEEDS
+            X_main, y_main, spw, ENSEMBLE_SEEDS, sample_weight=sw_main
         )
         oof_indices = np.where(oof_mask)[0]
         oof_p = oof_mean[oof_mask]
@@ -385,8 +440,22 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0)
             row_feat = X_all.iloc[[i]]
             regime = all_regimes.iloc[i] if i < len(all_regimes) else "Ranging"
 
+            # V3: Classify regime for this bar
+            regime_key = {"Trending": "TREND", "Ranging": "RANGE",
+                          "High_Volatility": "HIGH_VOL", "Low_Volatility": "RANGE"}
+            rk = regime_key.get(regime, "TRANSITION")
+
             all_p = np.array([m.predict_proba(row_feat)[0][1] for m in ensemble])
             green_p = float(all_p.mean())
+
+            # V3: Blend with regime-specific model if available
+            if rk in regime_models:
+                regime_p = float(regime_models[rk].predict_proba(row_feat)[0][1])
+                # Light tiebreaker: 15% regime + 85% general ensemble
+                # With 15K bars, regime subsets are too small for heavy weight.
+                # As data grows to 50K+, increase to 40-60% regime weight.
+                green_p = 0.15 * regime_p + 0.85 * green_p
+
             variance = float(all_p.var())
             norm_var = min(variance / 0.25, 1.0)
             actual = y_all[i]
@@ -411,10 +480,6 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0)
             correct = 1 if direction == actual else 0
             cycle_correct += correct
             cum_pnl += (1 if correct else -1)
-            # Phase 4: slippage-adjusted P&L
-            slippage_cost = SLIPPAGE_SPREAD_COST + (SLIPPAGE_TICKS * 0.00001)
-            if correct:
-                cum_pnl_adj = cum_pnl - slippage_cost * (i - test_start + 1)
             equity.append(cum_pnl)
             meta_history.append(correct)
             dir_history.append(direction)

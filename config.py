@@ -77,11 +77,11 @@ ATR_PERCENTILE_WINDOW = 100
 # --- v5 Target Threshold -----------------------------------------------------
 TARGET_ATR_THRESHOLD = 0.3  # only train on moves > 0.3 * ATR
 
-# --- Triple Barrier Method (Phase 4) ----------------------------------------
-TRIPLE_BARRIER_ENABLED = False     # disabled: needs matching test evaluation
-TRIPLE_BARRIER_TP = 1.0           # take-profit = TP * ATR (symmetric)
-TRIPLE_BARRIER_SL = 1.0           # stop-loss = SL * ATR (symmetric)
-TRIPLE_BARRIER_MAX_BARS = 6       # max bars before time barrier (30 min at M5)
+# --- Triple Barrier Method (V3) ---------------------------------------------
+TRIPLE_BARRIER_ENABLED = True     # V3: TB labels with sample weights
+TRIPLE_BARRIER_TP = 1.5           # take-profit = 1.5 × ATR (asymmetric)
+TRIPLE_BARRIER_SL = 1.0           # stop-loss = 1.0 × ATR
+TRIPLE_BARRIER_MAX_BARS = 4       # max bars before time barrier (20 min at M5)
 
 # --- Regime Detection --------------------------------------------------------
 ADX_TRENDING_THRESHOLD = 25
@@ -133,7 +133,7 @@ SPREAD_PERCENTILE = 90
 ATR_SPIKE_MULTIPLIER = 3.0
 
 # --- Ensemble (5 seeded XGBoost) --------------------------------------------
-ENSEMBLE_SEEDS = [42, 123, 456, 789, 1024, 2048, 4096]
+ENSEMBLE_SEEDS = [42, 123, 456, 789, 1024]
 ENSEMBLE_SIZE = len(ENSEMBLE_SEEDS)
 
 # --- XGBoost Primary Hyperparams --------------------------------------------

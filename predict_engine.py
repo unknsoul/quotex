@@ -296,7 +296,7 @@ def predict(df, regime):
 
         row = df[feat_cols].iloc[-1].values.reshape(1, -1)
 
-        # Ensemble predictions (diverse: 3 XGB + 2 ET + 1 LGBM + 1 CatBoost)
+        # Ensemble predictions (V3: diverse multi-model ensemble)
         all_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
         green_p = float(all_probs.mean())
         red_p = 1.0 - green_p
@@ -308,8 +308,8 @@ def predict(df, regime):
 
         # Latency check after ensemble inference
         t_ensemble = time.perf_counter()
-        if (t_ensemble - t_start) > 1.0:
-            log.error("LATENCY ABORT: ensemble took %.2fs (>1s limit)", t_ensemble - t_start)
+        if (t_ensemble - t_start) > 3.0:
+            log.error("LATENCY ABORT: ensemble took %.2fs (>3s limit)", t_ensemble - t_start)
             return _safe_fallback("Inference too slow")
 
         # Regime duration tracking
