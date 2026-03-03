@@ -75,15 +75,25 @@ _cooldown_until = {}  # {symbol: datetime}
 _last_regime = {}  # {symbol: regime_name} — for transition detection
 _regime_transition_skip = {}  # {symbol: int} — candles to skip
 
-# Signal quality thresholds
-MIN_CONFIDENCE_FILTER = 35.0   # lowered to match V3 calibrated output range
-HIGH_CONF_THRESHOLD = 40.0     # lowered to match V3 calibrated output range
+# Signal quality thresholds (DATA-DRIVEN: tuned from 130 signal history)
+# Confidence <42% has 45.8% win rate (losing!) vs >=42% has 70.7%
+MIN_CONFIDENCE_FILTER = 42.0   # raised from 35 — kills the losing 38-42% tier
+HIGH_CONF_THRESHOLD = 45.0     # for "high" mode subscribers
 COOLDOWN_CANDLES = 3
-MAX_CONSECUTIVE_LOSSES = 3
+MAX_CONSECUTIVE_LOSSES = 2     # tightened from 3 — faster cooldown per symbol
 REGIME_SKIP_CANDLES = 2  # skip after regime transition
 
-# Circuit breaker instance
-_cb = CircuitBreaker(max_losses=5, max_drawdown_pct=8.0, cooldown_min=60)
+# Regimes to block entirely (win rate < 50% in historical data)
+BLOCKED_REGIMES = {"High_Volatility"}  # 47.8% win rate = losing
+
+# Symbols to block (consistently underperforming)
+BLOCKED_SYMBOLS = {"AUDUSD"}  # 43.8% win rate over 16 signals
+
+# Ensemble disagreement threshold — skip when models disagree too much
+MAX_ENSEMBLE_VARIANCE = 0.035  # skip if variance > this (models arguing)
+
+# Circuit breaker instance (tightened: 3 losses instead of 5)
+_cb = CircuitBreaker(max_losses=3, max_drawdown_pct=6.0, cooldown_min=30)
 _cb_just_reset = False   # one-time 'trading resumed' message flag
 
 # Pair selector and drift monitor state
@@ -619,10 +629,32 @@ async def _auto_signal_job(app: Application):
                     if conf < MIN_CONFIDENCE_FILTER:
                         filtered_out[sym] = f"low-conf ({conf:.0f}%)"
                         continue
-                    if trade == "HOLD" and conf < 30:
-                        filtered_out[sym] = "very-low-conf HOLD"
+                    if trade == "HOLD" and conf < 42:
+                        filtered_out[sym] = "HOLD signal"
                         continue
                     if sym in filtered_out:  # regime transition
+                        continue
+
+                    # 5. Block losing regimes
+                    if regime in BLOCKED_REGIMES:
+                        filtered_out[sym] = f"blocked regime ({regime})"
+                        continue
+
+                    # 6. Block underperforming symbols
+                    if sym in BLOCKED_SYMBOLS:
+                        filtered_out[sym] = f"blocked symbol"
+                        continue
+
+                    # 7. Ensemble disagreement filter
+                    ens_var = pred.get("ensemble_variance", 0)
+                    if ens_var > MAX_ENSEMBLE_VARIANCE:
+                        filtered_out[sym] = f"ensemble disagree (var={ens_var:.4f})"
+                        continue
+
+                    # 8. Skip SELL/BUY only when meta reliability is too low
+                    meta_rel = pred.get("meta_reliability_percent", 50)
+                    if meta_rel < 40 and conf < 48:
+                        filtered_out[sym] = f"low meta ({meta_rel:.0f}%)"
                         continue
 
                     predictions[sym] = pred
