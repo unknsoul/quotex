@@ -16,9 +16,9 @@ log = logging.getLogger("production_state")
 STATE_FILE = os.path.join(LOG_DIR, "production_state.json")
 
 _DEFAULT_STATE = {
-    "model_version": "v7.0",
-    "model_architecture": "5-seed temporal XGB + sigmoid meta + logistic weight",
-    "feature_count": 66,
+    "model_version": "V3.0",
+    "model_architecture": "XGB+LGB+RF ensemble + purged CV + regime routing",
+    "feature_count": 65,
     "last_retrain_time": None,
     "last_retrain_type": None,       # "full" or "lite"
     "total_predictions": 0,

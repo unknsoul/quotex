@@ -189,8 +189,17 @@ def _session(hour):
 def compute_htf_features(m5_df, m15_df=None, h1_df=None):
     df = m5_df.copy()
 
+    # Normalize time column to consistent datetime64[ns, UTC] for merge_asof
+    def _normalize_time(frame):
+        if "time" in frame.columns:
+            frame["time"] = pd.to_datetime(frame["time"], utc=True)
+        return frame
+
+    df = _normalize_time(df)
+
     if h1_df is not None and len(h1_df) > 0:
         h1 = h1_df.copy()
+        h1 = _normalize_time(h1)
         h1_c = h1["close"]
         h1["h1_ema20"] = _ema(h1_c, EMA_20)
         h1["h1_ema50"] = _ema(h1_c, EMA_50)
@@ -222,6 +231,7 @@ def compute_htf_features(m5_df, m15_df=None, h1_df=None):
 
     if m15_df is not None and len(m15_df) > 0:
         m15 = m15_df.copy()
+        m15 = _normalize_time(m15)
         m15_c = m15["close"]
         m15_rsi = _rsi(m15_c, RSI_PERIOD)
         m15_macd = _ema(m15_c, MACD_FAST) - _ema(m15_c, MACD_SLOW)
