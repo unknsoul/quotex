@@ -184,7 +184,7 @@ LOG_FORMAT = "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
 
 # --- Telegram Bot ------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_SEND_BEFORE_CLOSE_SEC = 5
+TELEGRAM_SEND_BEFORE_CLOSE_SEC = 15  # start processing 15s early, signal arrives ~5s before close
 
 # --- Auto-Learning -----------------------------------------------------------
 AUTO_RETRAIN_ACCURACY_TRIGGER = 0.52

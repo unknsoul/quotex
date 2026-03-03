@@ -611,11 +611,28 @@ async def _auto_signal_job(app: Application):
                 await asyncio.sleep(1800)
                 continue
 
+            # =========================================================
+            # FAST PRE-CHECK: Session Hour (skip entire cycle if off-hours)
+            # =========================================================
+            current_hour = now_utc.hour
+            if current_hour in BLOCKED_HOURS_UTC:
+                log.info("Off-hours (%d:00 UTC), skipping cycle.", current_hour)
+                continue
+
             predictions = {}
             filtered_out = {}
+            _prefetched_data = {}  # cache MT5 data per symbol
+
             for sym in needed_symbols:
                 try:
-                    # 1. Cooldown check
+                    # FAST CHECKS FIRST (no data fetch needed)
+
+                    # Quick: blocked symbol?
+                    if sym in BLOCKED_SYMBOLS:
+                        filtered_out[sym] = "blocked symbol"
+                        continue
+
+                    # Quick: cooldown check
                     if sym in _cooldown_until:
                         if datetime.now(timezone.utc) < _cooldown_until[sym]:
                             filtered_out[sym] = "cooldown"
@@ -623,12 +640,15 @@ async def _auto_signal_job(app: Application):
                         else:
                             del _cooldown_until[sym]
 
-                    # 2. Regime transition skip
+                    # Quick: regime transition skip
                     if _regime_transition_skip.get(sym, 0) > 0:
                         _regime_transition_skip[sym] -= 1
                         filtered_out[sym] = f"regime shift ({_regime_transition_skip[sym]+1} left)"
                         continue
 
+                    # NOW fetch data (once) and run prediction
+                    data = fetch_multi_timeframe(sym, 200)
+                    _prefetched_data[sym] = data  # cache for confluence reuse
                     pred = _run_prediction(sym)
                     conf = pred["final_confidence_percent"]
                     trade = pred["suggested_trade"]
@@ -665,11 +685,6 @@ async def _auto_signal_job(app: Application):
                         filtered_out[sym] = f"blocked regime ({regime})"
                         continue
 
-                    # 6. Block underperforming symbols
-                    if sym in BLOCKED_SYMBOLS:
-                        filtered_out[sym] = f"blocked symbol"
-                        continue
-
                     # 7. Ensemble disagreement filter
                     ens_var = pred.get("ensemble_variance", 0)
                     if ens_var > MAX_ENSEMBLE_VARIANCE:
@@ -693,14 +708,6 @@ async def _auto_signal_job(app: Application):
                         continue
 
                     # =========================================================
-                    # STRATEGY 3: Session Hour Window
-                    # =========================================================
-                    current_hour = now_utc.hour
-                    if current_hour in BLOCKED_HOURS_UTC:
-                        filtered_out[sym] = f"off-hours ({current_hour}:00 UTC)"
-                        continue
-
-                    # =========================================================
                     # STRATEGY 5: Consecutive Candle Confirmation
                     # =========================================================
                     current_dir = pred["suggested_direction"]
@@ -711,10 +718,10 @@ async def _auto_signal_job(app: Application):
                         continue
 
                     # =========================================================
-                    # STRATEGY 1: Multi-TF Confluence
+                    # STRATEGY 1: Multi-TF Confluence (reuse cached data)
                     # =========================================================
                     try:
-                        data_mtf = fetch_multi_timeframe(sym, 50)
+                        data_mtf = _prefetched_data.get(sym, data)
                         confl = check_confluence(
                             m5_df=data_mtf.get('M5'),
                             m15_df=data_mtf.get('M15'),
