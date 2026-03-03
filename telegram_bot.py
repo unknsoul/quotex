@@ -74,7 +74,7 @@ _regime_transition_skip = {}  # {symbol: int} — candles to skip
 
 # Signal quality thresholds
 MIN_CONFIDENCE_FILTER = 35.0   # lowered to match V3 calibrated output range
-HIGH_CONF_THRESHOLD = 60.0
+HIGH_CONF_THRESHOLD = 40.0     # lowered to match V3 calibrated output range
 COOLDOWN_CANDLES = 3
 MAX_CONSECUTIVE_LOSSES = 3
 REGIME_SKIP_CANDLES = 2  # skip after regime transition
