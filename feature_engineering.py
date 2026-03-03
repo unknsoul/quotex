@@ -189,10 +189,12 @@ def _session(hour):
 def compute_htf_features(m5_df, m15_df=None, h1_df=None):
     df = m5_df.copy()
 
-    # Normalize time column to consistent datetime64[ns, UTC] for merge_asof
+    # Force time columns to datetime64[ns, UTC] for merge_asof compatibility.
+    # MT5 returns datetime64[s, UTC], but pd.Timedelta ops produce [us, UTC].
+    # merge_asof requires exact dtype match, so we standardize to [ns, UTC].
     def _normalize_time(frame):
         if "time" in frame.columns:
-            frame["time"] = pd.to_datetime(frame["time"], utc=True)
+            frame["time"] = pd.to_datetime(frame["time"], utc=True).astype("datetime64[ns, UTC]")
         return frame
 
     df = _normalize_time(df)
@@ -222,6 +224,8 @@ def compute_htf_features(m5_df, m15_df=None, h1_df=None):
         # Phase 4 FIX: shift H1 time forward by 1 hour to prevent leakage
         # This ensures we only use COMPLETED H1 bars (not the one still forming)
         h1_merge["time"] = h1_merge["time"] + pd.Timedelta(hours=1)
+        h1_merge = _normalize_time(h1_merge)  # re-normalize after Timedelta op
+        df = _normalize_time(df)  # ensure df time is also [ns, UTC]
         df = df.sort_values("time")
         df = pd.merge_asof(df, h1_merge, on="time", direction="backward")
     else:
@@ -242,6 +246,8 @@ def compute_htf_features(m5_df, m15_df=None, h1_df=None):
         m15_merge = m15_merge.sort_values("time")
         # Phase 4 FIX: shift M15 time forward by 15 min to prevent leakage
         m15_merge["time"] = m15_merge["time"] + pd.Timedelta(minutes=15)
+        m15_merge = _normalize_time(m15_merge)  # re-normalize after Timedelta op
+        df = _normalize_time(df)  # ensure df time is also [ns, UTC]
         df = pd.merge_asof(df, m15_merge, on="time", direction="backward")
     else:
         df["m15_momentum"] = 0.0
