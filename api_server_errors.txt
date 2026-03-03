@@ -1,0 +1,27 @@
+INFO:     Started server process [9288]
+INFO:     Waiting for application startup.
+[2026-03-03 06:06:41,781] INFO api_server: MT5 connected.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+[2026-03-03 06:07:01,863] INFO data_collector: Fetched 50000 M5 candles for EURUSD
+[2026-03-03 06:07:01,865] INFO data_collector: Fetched 16666 M15 candles for EURUSD
+[2026-03-03 06:07:01,870] INFO data_collector: Fetched 16666 H1 candles for EURUSD
+[2026-03-03 06:07:02,038] INFO feature_engineering: Computed 65 features on 49790 rows.
+[2026-03-03 06:07:02,040] WARNING risk_filter: Risk warnings: ['High spread: 4.0 > P90=1.0']
+[2026-03-03 06:07:02,273] INFO predict_engine: Ensemble loaded (7 models).
+[2026-03-03 06:07:02,291] INFO predict_engine: Meta model loaded (sigmoid-calibrated, 14 features).
+[2026-03-03 06:07:02,293] INFO predict_engine: Weight model loaded.
+[2026-03-03 06:07:02,293] INFO predict_engine: Learned confidence thresholds loaded (4 regimes).
+C:\Users\hardi\Downloads\quotex\venv\Lib\site-packages\sklearn\utils\validation.py:2691: UserWarning: X does not have valid feature names, but ExtraTreesClassifier was fitted with feature names
+  warnings.warn(
+C:\Users\hardi\Downloads\quotex\venv\Lib\site-packages\sklearn\utils\validation.py:2691: UserWarning: X does not have valid feature names, but ExtraTreesClassifier was fitted with feature names
+  warnings.warn(
+C:\Users\hardi\Downloads\quotex\venv\Lib\site-packages\sklearn\utils\validation.py:2691: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+C:\Users\hardi\Downloads\quotex\venv\Lib\site-packages\sklearn\utils\validation.py:2691: UserWarning: X does not have valid feature names, but GradientBoostingClassifier was fitted with feature names
+  warnings.warn(
+C:\Users\hardi\Downloads\quotex\venv\Lib\site-packages\sklearn\utils\validation.py:2691: UserWarning: X does not have valid feature names, but GradientBoostingClassifier was fitted with feature names
+  warnings.warn(
+C:\Users\hardi\Downloads\quotex\venv\Lib\site-packages\sklearn\utils\validation.py:2691: UserWarning: X does not have valid feature names, but GradientBoostingClassifier was fitted with feature names
+  warnings.warn(
+[2026-03-03 06:07:03,815] INFO predict_engine: Pred: green=61.7% conf=31.6% session=London regime_stab=0.67 trade=SKIP latency=1772ms

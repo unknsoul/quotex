@@ -48,6 +48,11 @@ from circuit_breaker import CircuitBreaker
 from pair_selector import score_pair
 from confluence_filter import check_confluence
 from signal_ranker import rank_and_select, compute_signal_score
+from correlation_filter import check_correlation
+from candle_patterns import pattern_confirms
+from news_filter import check_news_filter
+from adaptive_threshold import AdaptiveThreshold
+from stacking_model import StackingGatekeeper
 import threading
 from stability import AccuracyTracker, ConfidenceCorrelationTracker
 from production_state import (
@@ -57,6 +62,10 @@ from production_state import (
 
 log = logging.getLogger("telegram_bot")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
+
+# Initialize adaptive threshold and stacking gatekeeper
+_adaptive_thresh = AdaptiveThreshold()
+_stacker = StackingGatekeeper()
 
 _tracker = AccuracyTracker()
 _conf_tracker = ConfidenceCorrelationTracker()
@@ -637,11 +646,12 @@ async def _auto_signal_job(app: Application):
                     # Log EVERY prediction to CSV (before filtering)
                     _log_prediction_csv(sym, pred)
 
-                    # 4. Signal quality filters
+                    # 4. Signal quality filters (using adaptive threshold)
+                    active_min_conf = _adaptive_thresh.current
                     if pred.get("error"):
                         filtered_out[sym] = pred["error"]
                         continue
-                    if conf < MIN_CONFIDENCE_FILTER:
+                    if conf < active_min_conf:
                         filtered_out[sym] = f"low-conf ({conf:.0f}%)"
                         continue
                     if trade == "HOLD" and conf < 42:
@@ -720,6 +730,28 @@ async def _auto_signal_job(app: Application):
                         log.debug("Confluence check error %s: %s", sym, e)
                         pred["confluence_score"] = 3  # benefit of doubt
 
+                    # =========================================================
+                    # UPGRADE 2: Candle Pattern Confirmation
+                    # =========================================================
+                    try:
+                        cp = pattern_confirms(data.get('M5'), current_dir)
+                        if not cp["confirmed"] and cp["patterns"]:
+                            filtered_out[sym] = cp["reason"]
+                            continue
+                    except Exception as e:
+                        log.debug("Candle pattern check error %s: %s", sym, e)
+
+                    # =========================================================
+                    # UPGRADE 4: News Calendar Filter
+                    # =========================================================
+                    try:
+                        nf = check_news_filter(sym, now_utc)
+                        if nf["blocked"]:
+                            filtered_out[sym] = nf["reason"]
+                            continue
+                    except Exception as e:
+                        log.debug("News filter error %s: %s", sym, e)
+
                     predictions[sym] = pred
                     _last_predictions[sym] = {
                         "pred": pred,
@@ -738,6 +770,35 @@ async def _auto_signal_job(app: Application):
                 except Exception as e:
                     log.error("Prediction failed %s: %s", sym, e)
                     record_error(f"{sym}: {e}")
+
+            # =================================================================
+            # UPGRADE 1: Cross-Pair Correlation Filter
+            # =================================================================
+            if len(predictions) > 1:
+                corr_filtered = {}
+                for sym, pred in predictions.items():
+                    direction = pred["suggested_direction"]
+                    cr = check_correlation(sym, direction, predictions)
+                    if cr["corr_pass"]:
+                        corr_filtered[sym] = pred
+                    else:
+                        filtered_out[sym] = cr["reason"]
+                        log.info("Correlation filter: %s skipped — %s", sym, cr["reason"])
+                predictions = corr_filtered
+
+            # =================================================================
+            # UPGRADE 6: Stacking Gatekeeper
+            # =================================================================
+            if predictions:
+                stacker_filtered = {}
+                for sym, pred in predictions.items():
+                    gate = _stacker.should_send(pred, threshold=0.55)
+                    if gate["send"]:
+                        stacker_filtered[sym] = pred
+                    else:
+                        filtered_out[sym] = gate["reason"]
+                        log.info("Stacker gate: %s blocked — %s", sym, gate["reason"])
+                predictions = stacker_filtered
 
             # =================================================================
             # STRATEGY 4: Rank and select only top N signals
@@ -824,6 +885,12 @@ async def _check_outcomes(bot: Bot, predictions: dict, subscribers: dict,
             meta_row = _last_predictions.get(sym, {}).get("meta_row")
             if meta_row is not None:
                 update_online_learner(meta_row, correct)
+
+            # Upgrade 3: Adaptive Threshold — record outcome
+            _adaptive_thresh.record_outcome(correct)
+
+            # Upgrade 6: Stacker Gatekeeper — learn from this outcome
+            _stacker.update(pred, correct)
 
             # Circuit Breaker update
             global _cb_just_reset
