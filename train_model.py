@@ -32,6 +32,7 @@ from config import (
     DEFAULT_SYMBOL, TIMESERIES_SPLITS,
     XGB_N_ESTIMATORS, XGB_MAX_DEPTH, XGB_LEARNING_RATE,
     XGB_SUBSAMPLE, XGB_COLSAMPLE_BYTREE,
+    XGB_MIN_CHILD_WEIGHT, XGB_GAMMA, XGB_REG_ALPHA, XGB_REG_LAMBDA,
     CALIBRATION_SPLIT_RATIO, OOF_INTERNAL_SPLITS,
     PURGE_EMBARGO_BARS,
     ENSEMBLE_SEEDS,
@@ -53,6 +54,8 @@ def _xgb_params():
         "n_estimators": XGB_N_ESTIMATORS, "max_depth": XGB_MAX_DEPTH,
         "learning_rate": XGB_LEARNING_RATE, "subsample": XGB_SUBSAMPLE,
         "colsample_bytree": XGB_COLSAMPLE_BYTREE,
+        "min_child_weight": XGB_MIN_CHILD_WEIGHT, "gamma": XGB_GAMMA,
+        "reg_alpha": XGB_REG_ALPHA, "reg_lambda": XGB_REG_LAMBDA,
     }
 
 

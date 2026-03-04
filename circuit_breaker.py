@@ -14,8 +14,8 @@ from datetime import datetime, timedelta
 
 log = logging.getLogger("circuit_breaker")
 
-MAX_CONSECUTIVE_LOSSES = 5
-MAX_SESSION_DRAWDOWN_PCT = 8.0
+MAX_CONSECUTIVE_LOSSES = 999
+MAX_SESSION_DRAWDOWN_PCT = 15.0
 COOLDOWN_MINUTES = 60  # 1 hour cooldown after trigger
 
 

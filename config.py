@@ -141,12 +141,16 @@ ATR_SPIKE_MULTIPLIER = 3.0
 ENSEMBLE_SEEDS = [42, 123, 456, 789, 1024]
 ENSEMBLE_SIZE = len(ENSEMBLE_SEEDS)
 
-# --- XGBoost Primary Hyperparams --------------------------------------------
-XGB_N_ESTIMATORS = 400
-XGB_MAX_DEPTH = 3  # Phase 5: Dropped from 5. Shallow trees prevent overfitting 1-candle noise
-XGB_LEARNING_RATE = 0.05
-XGB_SUBSAMPLE = 0.8
-XGB_COLSAMPLE_BYTREE = 0.8
+# --- XGBoost Primary Hyperparams (Optuna Phase 9) ---------------------------
+XGB_N_ESTIMATORS = 318
+XGB_MAX_DEPTH = 4  
+XGB_LEARNING_RATE = 0.005022
+XGB_SUBSAMPLE = 0.747
+XGB_COLSAMPLE_BYTREE = 0.734
+XGB_MIN_CHILD_WEIGHT = 12
+XGB_GAMMA = 2.822
+XGB_REG_ALPHA = 0.266
+XGB_REG_LAMBDA = 0.0036
 TIMESERIES_SPLITS = 5
 
 # --- Calibration Split -------------------------------------------------------
