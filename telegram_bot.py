@@ -443,7 +443,7 @@ def _format_prediction(pred: dict, is_auto=False) -> str:
 
 
 def _format_combined_signal(predictions: dict, filtered: dict) -> str:
-    """Professional industry-grade signal message."""
+    """Simple plain-text signal message — guaranteed to display on Telegram."""
     now_utc = datetime.now(timezone.utc)
     ist = now_utc + timedelta(hours=5, minutes=30)
 
@@ -452,80 +452,35 @@ def _format_combined_signal(predictions: dict, filtered: dict) -> str:
     next_close_min = ((minute // 5) + 1) * 5
     close_str = f"{now_utc.hour:02d}:{next_close_min:02d}"
 
-    # Win rate from recent outcomes
-    recent = _outcome_results[-30:] if _outcome_results else []
-    total_r = len(recent)
-    wins_r = sum(1 for r in recent if r["correct"])
-    wr_pct = f"{wins_r/total_r*100:.0f}%" if total_r > 0 else "--"
-
-    # Session name
-    h = now_utc.hour
-    if 7 <= h < 15:
-        session_name = "LONDON"
-    elif 12 <= h < 21:
-        session_name = "NEW YORK"
-    elif 0 <= h < 9:
-        session_name = "ASIAN"
-    else:
-        session_name = "OFF-MARKET"
-
     lines = [
-        "\u26a1\u26a1\u26a1 *LIVE SIGNAL* \u26a1\u26a1\u26a1",
+        "\u26a1\u26a1\u26a1 LIVE SIGNAL \u26a1\u26a1\u26a1",
         "",
-        "\U0001f451 *QUOTEX LORD PRO*",
-        f"\u23f0 *{now_utc.strftime('%H:%M:%S')} UTC* | Close: {close_str}",
-        f"\U0001f30d Session: *{session_name}*",
+        "\U0001f451 QUOTEX LORD PRO",
+        f"\u23f0 {now_utc.strftime('%H:%M:%S')} UTC | {ist.strftime('%H:%M')} IST",
+        f"\U0001f4ca Candle closes: {close_str} UTC",
         "\u2501" * 24,
     ]
 
     for sym, pred in sorted(predictions.items()):
         direction = pred["suggested_direction"]
-        d_emoji = "\U0001f7e2" if direction == "UP" else "\U0001f534"
-        arrow = "\u2b06" if direction == "UP" else "\u2b07"
+        arrow = "\U0001f7e2 UP" if direction == "UP" else "\U0001f534 DOWN"
         conf = pred["final_confidence_percent"]
-        meta_rel = pred.get("meta_reliability_percent", 0)
-        kelly = pred.get("kelly_fraction_percent", 0.0)
         trade = pred["suggested_trade"]
-        regime = pred.get("market_regime", "")
-        score = pred.get("signal_score", 0)
-        unanimity = pred.get("ensemble_unanimity", 0)
-        agree = pred.get("ensemble_agree_count", 0)
+        agree = pred.get("ensemble_agree_count", "?")
         total_m = pred.get("ensemble_total", 7)
+        score = pred.get("signal_score", 0)
 
-        # Confidence strength
-        if conf >= 55:
-            strength = "\U0001f525 STRONG"
-        elif conf >= 45:
-            strength = "\u26a1 GOOD"
-        else:
-            strength = "\U0001f4a1 MODERATE"
+        lines.append("")
+        lines.append(f"{arrow}  {sym}")
+        lines.append(f"   Confidence: {conf:.0f}%")
+        lines.append(f"   Models: {agree}/{total_m} agree")
+        lines.append(f"   Action: {trade}")
+        lines.append(f"   Score: {score}/100")
 
-        # Regime icon
-        r_icon = {"Trending": "\U0001f4c8", "Ranging": "\u21d4",
-                  "High_Volatility": "\U0001f525", "Low_Volatility": "\u2744"}.get(regime, "")
-
-        # Confidence bar (10 segments)
-        filled = int(conf / 10)
-        bar = "\u2588" * filled + "\u2591" * (10 - filled)
-
-        lines.append(
-            f"{d_emoji} *{sym}*  {arrow} *{direction}*\n"
-            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-            f"\U0001f3af Confidence: `[{bar}]` *{conf:.0f}%*\n"
-            f"{strength} | {r_icon} {regime}\n"
-            f"\U0001f916 Models: *{agree}/{total_m}* agree | Meta: *{meta_rel:.0f}%*\n"
-            f"\U0001f4b0 Action: *{trade}* | Kelly: *{kelly:.1f}%*\n"
-            f"\U0001f396 Score: *{score}/100*\n"
-        )
-
-    # Stats footer
-    lines.append("\u2550" * 26)
-    if total_r > 0:
-        lines.append(f"\U0001f4ca Win Rate: *{wr_pct}* ({wins_r}/{total_r})")
-    lines.append(
-        f"\U0001f6e1 12-Layer Filter | 7 Models | 66 Features"
-    )
-    lines.append(f"\u23f1 Expires: *{close_str} UTC*")
+    lines.append("")
+    lines.append("\u2501" * 24)
+    lines.append("\U0001f6e1 12-Layer Filter | 7 Models")
+    lines.append(f"\u23f1 Expires: {close_str} UTC")
 
     return "\n".join(lines)
 
@@ -851,10 +806,11 @@ async def _auto_signal_job(app: Application):
 
                 msg = _format_combined_signal(sub_preds, filtered_out)
                 try:
+                    log.info("SENDING SIGNAL to chat %s: %d symbols [%s]",
+                             chat_id, len(sub_preds), ', '.join(sub_preds.keys()))
                     await bot.send_message(
                         chat_id=int(chat_id),
                         text=msg,
-                        parse_mode="Markdown",
                     )
                 except Exception as e:
                     log.error("Failed to send to %s: %s", chat_id, e)
