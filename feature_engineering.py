@@ -89,6 +89,8 @@ FEATURE_COLUMNS = [
     "dist_to_resistance", "dist_to_support", 
     "bullish_divergence", "bearish_divergence",
     "tick_vol_accel_1", "tick_vol_accel_2", "dollar_strength_proxy",
+    # Phase 8 (Deep Microstructure M1)
+    "trade_intensity", "cumulative_delta", "m1_absorption",
 ]
 
 
@@ -269,7 +271,7 @@ def compute_htf_features(m5_df, m15_df=None, h1_df=None):
 #  Main API
 # =============================================================================
 
-def compute_features(df, m15_df=None, h1_df=None):
+def compute_features(df, m15_df=None, h1_df=None, m1_df=None):
     df = df.copy()
     o, h, l, c = df["open"], df["high"], df["low"], df["close"]
 
@@ -485,6 +487,47 @@ def compute_features(df, m15_df=None, h1_df=None):
     # Since we don't have multi-symbol streams natively here, we use EUR/USD 
     # inverted trend as a proxy for raw Dollar strength
     df["dollar_strength_proxy"] = -df["ema_slope"].fillna(0)
+
+    # --- Phase 8 (Deep Microstructure M1) ---
+    if m1_df is not None and not m1_df.empty and "tick_volume" in m1_df.columns:
+        m1 = m1_df.copy()
+        if "time" in m1.columns:
+            m1["time"] = pd.to_datetime(m1["time"], utc=True).astype("datetime64[ns, UTC]")
+            df["time"] = pd.to_datetime(df["time"], utc=True).astype("datetime64[ns, UTC]")
+            
+            # Simple tick direction proxy: Close > Open = Buy volume, Close < Open = Sell volume
+            m1_c, m1_o = m1["close"], m1["open"]
+            tv = m1["tick_volume"].astype(float)
+            m1_buy_vol = tv * (m1_c > m1_o).astype(float)
+            m1_sell_vol = tv * (m1_c < m1_o).astype(float)
+            
+            m1["delta"] = m1_buy_vol - m1_sell_vol
+            m1["intensity"] = tv
+            
+            # Absorption: High volume but tiny body compared to the full range
+            m1_body = (m1_c - m1_o).abs()
+            m1_range = (m1["high"] - m1["low"]).replace(0, 1e-10)
+            m1["absorption"] = tv / (m1_body / m1_range + 1e-10)
+            
+            # Roll them up to 5-minute blocks
+            m1["cumulative_delta"] = m1["delta"].rolling(5, min_periods=1).sum()
+            m1["trade_intensity"] = m1["intensity"].rolling(5, min_periods=1).sum()
+            m1["m1_absorption"] = m1["absorption"].rolling(5, min_periods=1).mean()
+            
+            m1_merge = m1[["time", "cumulative_delta", "trade_intensity", "m1_absorption"]].copy()
+            m1_merge = m1_merge.sort_values("time")
+            
+            df = df.sort_values("time")
+            df = pd.merge_asof(df, m1_merge, on="time", direction="backward")
+        else:
+            df["cumulative_delta"] = 0.0
+            df["trade_intensity"] = 0.0
+            df["m1_absorption"] = 0.0
+    else:
+        df["cumulative_delta"] = 0.0
+        df["trade_intensity"] = 0.0
+        df["m1_absorption"] = 0.0
+
 
     # ---- v7: Accuracy upgrades ----
 

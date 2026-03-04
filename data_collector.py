@@ -29,6 +29,7 @@ logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 
 # Timeframe map
 TF_MAP = {
+    "M1":  mt5.TIMEFRAME_M1,
     "M5":  mt5.TIMEFRAME_M5,
     "M15": mt5.TIMEFRAME_M15,
     "H1":  mt5.TIMEFRAME_H1,
@@ -90,8 +91,13 @@ def fetch_multi_timeframe(symbol: str,
     """Fetch M5, M15, H1 candles. Returns {tf_name: DataFrame}."""
     result = {}
     for tf_name in TF_MAP:
-        # Higher timeframes need fewer bars
-        tf_count = count if tf_name == "M5" else count // 3
+        # Higher timeframes need fewer bars, M1 needs more
+        if tf_name == "M1":
+            tf_count = count * 5
+        elif tf_name == "M5":
+            tf_count = count
+        else:
+            tf_count = count // 3
         try:
             result[tf_name] = fetch_candles(symbol, tf_name, tf_count)
         except RuntimeError as e:

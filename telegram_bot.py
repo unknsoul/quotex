@@ -42,7 +42,12 @@ from regime_detection import detect_regime
 from predict_engine import (
     predict, load_models, log_prediction,
     verify_candle_closed, update_prediction_history, update_online_learner,
+    set_retrain_flag, reload_models
 )
+from stacking_model import StackingGatekeeper
+from adaptive_threshold import AdaptiveThreshold
+from gemini_filter import verify_signal
+from news_sentiment import fetch_live_news
 from risk_filter import check_warnings
 from circuit_breaker import CircuitBreaker
 from pair_selector import score_pair
@@ -51,9 +56,6 @@ from signal_ranker import rank_and_select, compute_signal_score
 from correlation_filter import check_correlation
 from candle_patterns import pattern_confirms
 from news_filter import check_news_filter
-from adaptive_threshold import AdaptiveThreshold
-from stacking_model import StackingGatekeeper
-from gemini_filter import verify_signal
 import threading
 from stability import AccuracyTracker, ConfidenceCorrelationTracker
 from production_state import (
@@ -288,8 +290,9 @@ def _run_prediction(symbol: str) -> dict:
     if df is None or len(df) == 0:
         raise RuntimeError(f"No M5 data for {symbol}")
     m15, h1 = data.get("M15"), data.get("H1")
+    m1 = data.get("M1")
 
-    df = compute_features(df, m15_df=m15, h1_df=h1)
+    df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
     if df.empty:
         raise RuntimeError("Not enough data for features.")
 
@@ -396,8 +399,9 @@ def _format_prediction(pred: dict, is_auto=False) -> str:
     conf = pred["final_confidence_percent"]
     green = pred["green_probability_percent"]
     kelly = pred.get("kelly_fraction_percent", 0.0)
-    regime = pred.get("market_regime", "Unknown")
-    trade = pred["suggested_trade"]
+    regime_raw = pred.get("market_regime", "Unknown")
+    regime_clean = regime_raw.replace("_", " ")
+    trade = str(pred["suggested_trade"]).replace("_", " ")
     latency = pred.get("latency_ms", -1)
     uncertainty = pred.get("uncertainty_percent", 0)
     meta_rel = pred.get("meta_reliability_percent", 0)
@@ -407,7 +411,7 @@ def _format_prediction(pred: dict, is_auto=False) -> str:
     variance = pred.get("ensemble_variance", 0)
 
     regime_emoji = {"Trending": "📈", "Ranging": "↔️",
-                   "High_Volatility": "🔥", "Low_Volatility": "❄️"}.get(regime, "❓")
+                   "High_Volatility": "🔥", "Low_Volatility": "❄️"}.get(regime_raw, "❓")
     session_emoji = {"London": "🇬🇧", "Overlap": "🌐", "Asian": "🌏", "Off": "💤"}.get(session, "")
 
     # Confidence bar
@@ -435,7 +439,7 @@ def _format_prediction(pred: dict, is_auto=False) -> str:
         f"🧠 Meta Trust:  *{meta_rel:.0f}%*\n"
         f"📉 Uncertainty: *{uncertainty:.1f}%*\n\n"
         f"⏳ Expiry: *5 MINUTES (1 CANDLE)*\n"
-        f"{regime_emoji} Regime: *{regime}* (stab: {stability:.0%})\n"
+        f"{regime_emoji} Regime: *{regime_clean}* (stab: {stability:.0%})\n"
         f"{session_emoji} Session: *{session}*\n"
         f"💰 Kelly: *{kelly:.1f}%* │ Size: {size}\n"
         f"💡 Action: *{trade}*\n\n"
@@ -468,14 +472,15 @@ def _format_combined_signal(predictions: dict, filtered: dict) -> str:
         conf = pred["final_confidence_percent"]
         green = pred["green_probability_percent"]
         kelly = pred.get("kelly_fraction_percent", 0.0)
-        trade = pred["suggested_trade"]
-        regime = pred.get("market_regime", "")
+        trade = str(pred["suggested_trade"]).replace("_", " ")
+        regime_raw = pred.get("market_regime", "")
+        regime_clean = regime_raw.replace("_", " ")
         meta_rel = pred.get("meta_reliability_percent", 0)
         uncertainty = pred.get("uncertainty_percent", 0)
         session = pred.get("session", "")
         stability = pred.get("regime_stability", 0)
         r_e = {"Trending": "📈", "Ranging": "↔️",
-               "High_Volatility": "🔥", "Low_Volatility": "❄️"}.get(regime, "")
+               "High_Volatility": "🔥", "Low_Volatility": "❄️"}.get(regime_raw, "")
         s_e = {"London": "🇬🇧", "Overlap": "🌐", "Asian": "🌏", "Off": "💤"}.get(session, "")
 
         # Position size from Kelly
@@ -493,7 +498,7 @@ def _format_combined_signal(predictions: dict, filtered: dict) -> str:
         lines.append(f"⏳ *EXPIRY*: 5 Min (1 Candle)")
         lines.append(f"📊 Prob: {green:.1f}% │ Conf: {conf:.0f}%")
         lines.append(f"🧠 Meta: {meta_rel:.0f}% │ Unc: {uncertainty:.1f}%")
-        lines.append(f"{r_e} {regime} (stab: {stability:.0%}) │ {s_e} {session}")
+        lines.append(f"{r_e} {regime_clean} (stab: {stability:.0%}) │ {s_e} {session}")
         lines.append(f"💰 Kelly: {kelly:.1f}% │ Size: {size}")
         lines.append(f"💡 *{trade}*")
 
@@ -504,8 +509,8 @@ def _format_combined_signal(predictions: dict, filtered: dict) -> str:
     lines.append(f"🏗 V3 Engine │ 14 Layers │ 65 Features")
 
     if filtered:
-        reasons = [f"{s}({r})" for s, r in filtered.items()]
-        lines.append(f"⏭ Filtered: _{', '.join(reasons[:3])}_")
+        reasons = [f"{s}({str(r).replace('_', '-')})" for s, r in filtered.items()]
+        lines.append(f"⏭ Filtered: {', '.join(reasons[:3])}")
 
     return "\n".join(lines)
 
@@ -594,7 +599,7 @@ async def _auto_signal_job(app: Application):
                 for sym in list(needed_symbols):
                     try:
                         data = fetch_multi_timeframe(sym, 500)
-                        df   = compute_features(data.get('M5'))
+                        df   = compute_features(data.get('M5'), m15_df=data.get('M15'), h1_df=data.get('H1'), m1_df=data.get('M1'))
                         res  = score_pair(df, symbol=sym)
                         _pair_scores[sym] = res['total']
                         log.info('Pair score %s: %d/30', sym, res['total'])
@@ -680,19 +685,8 @@ async def _auto_signal_job(app: Application):
                     record_error(f"{sym}: {e}")
 
             # =================================================================
-            # UPGRADE 1: Cross-Pair Correlation Filter
+            # Phase 6: Bypass Correlation Filter
             # =================================================================
-            if len(predictions) > 1:
-                corr_filtered = {}
-                for sym, pred in predictions.items():
-                    direction = pred["suggested_direction"]
-                    cr = check_correlation(sym, direction, predictions)
-                    if cr["corr_pass"]:
-                        corr_filtered[sym] = pred
-                    else:
-                        filtered_out[sym] = cr["reason"]
-                        log.info("Correlation filter: %s skipped — %s", sym, cr["reason"])
-                predictions = corr_filtered
 
             # =================================================================
             # Phase 6: Bypass Stacking Gatekeeper & Rank/Select
@@ -706,10 +700,14 @@ async def _auto_signal_job(app: Application):
                 gemini_filtered = {}
                 for sym, pred in predictions.items():
                     try:
-                        data_mtf = fetch_multi_timeframe(sym, 50)
+                        data_mtf = fetch_multi_timeframe(sym, 250)
                         m5_df = data_mtf.get('M5')
-                        if m5_df is not None and not m5_df.empty:
-                            m5_feats = compute_features(m5_df)
+                        m1_df = data_mtf.get('M1')
+                        if m5_df is not None and not m5_df.empty and len(m5_df) > 5:
+                            m5_feats = compute_features(m5_df, m15_df=data_mtf.get('M15'), h1_df=data_mtf.get('H1'), m1_df=m1_df)
+                            if m5_feats is None or m5_feats.empty:
+                                raise ValueError("Computed features returned empty df")
+                                
                             last_row = m5_feats.iloc[-1]
                             price = last_row.get("close", 0)
                             e20 = last_row.get("ema_20", 0)
@@ -727,10 +725,28 @@ async def _auto_signal_job(app: Application):
                             bear_div = last_row.get("bearish_divergence", 0.0)
                             vol_accel = last_row.get("tick_vol_accel_1", 0.0)
                             
+                            # Phase 8 Microstructure Extractions
+                            cum_delta = last_row.get("cumulative_delta", 0.0)
+                            m1_absorp = last_row.get("m1_absorption", 0.0)
+                            trade_int = last_row.get("trade_intensity", 0.0)
+                            
                             recent_candles_df = m5_df.tail(5)[['time', 'open', 'high', 'low', 'close', 'tick_volume']].copy()
                             recent_candles_str = recent_candles_df.to_string(index=False)
                             
-                            v = verify_signal(
+                            # Phase 8: Live News & Macro Asset Scraping
+                            live_news_text = fetch_live_news()
+                            
+                            def safe_tick_price(s):
+                                try:
+                                    t = mt5.symbol_info_tick(s)
+                                    return t.bid if t else 0.0
+                                except: return 0.0
+
+                            dxy_proxy = safe_tick_price("USDX") or safe_tick_price("DXY")
+                            gold_price = safe_tick_price("XAUUSD")
+                            eurgbp_price = safe_tick_price("EURGBP")
+                            
+                            v = await verify_signal(
                                 symbol=sym,
                                 timestamp=datetime.now(timezone.utc).isoformat(),
                                 direction=pred["suggested_direction"],
@@ -753,15 +769,25 @@ async def _auto_signal_job(app: Application):
                                 bull_div=bull_div,
                                 bear_div=bear_div,
                                 vol_accel=vol_accel,
-                                news_sentiment="N/A"
+                                cumulative_delta=cum_delta,
+                                m1_absorption=m1_absorp,
+                                trade_intensity=trade_int,
+                                news_sentiment=live_news_text,
+                                dxy_price=dxy_proxy,
+                                gold_price=gold_price,
+                                eurgbp_price=eurgbp_price
                             )
-                            # Phase 6: Gemini represents the ultimate Directional Override
+                            # Phase 6 & 8: Gemini represents the ultimate Directional Override
                             # It forces a YES/NO on the current direction, converting the signal.
-                            pred["suggested_direction"] = v["verdict"]
-                            if v.get("gemini_confidence", 0) > 0:
-                                pred["final_confidence_percent"] = v["gemini_confidence"]
-                            gemini_filtered[sym] = pred
-                            log.info("Gemini OVERRIDE on %s to %s (Conf: %s%%): %s", sym, v["verdict"], v.get("gemini_confidence", "?"), v["reason"])
+                            if v["verdict"] == "NO_TRADE" or not v.get("approved", True):
+                                filtered_out.append(f"{sym}: {v['reason']}")
+                                log.info("Gemini filtered out %s: %s", sym, v["reason"])
+                            else:
+                                pred["suggested_direction"] = v["verdict"]
+                                if v.get("gemini_confidence", 0) > 0:
+                                    pred["final_confidence_percent"] = v["gemini_confidence"]
+                                gemini_filtered[sym] = pred
+                                log.info("Gemini OVERRIDE on %s to %s (Conf: %s%%): %s", sym, v["verdict"], v.get("gemini_confidence", "?"), v["reason"])
                     except Exception as e:
                         log.warning("Gemini integration error on %s: %s", sym, e)
                         gemini_filtered[sym] = pred  # Fail-open
@@ -874,10 +900,16 @@ async def _check_outcomes(bot: Bot, predictions: dict, subscribers: dict,
             predicted_up = pred["suggested_direction"] == "UP"
             correct = (predicted_up == actual_green)
 
-            # Online Learner update
+            # Phase 8: Online Learner Update
+            # The Online Learner trains the Base ML Meta-model. It MUST train on the base ML's
+            # original prediction ('primary_direction'), NOT the Gemini-override direction.
+            # Otherwise, Gemini wins will reinforce incorrect Base ML weights.
+            base_ml_up = pred.get("primary_direction") == "GREEN"
+            base_ml_correct = (base_ml_up == actual_green)
+            
             meta_row = _last_predictions.get(sym, {}).get("meta_row")
             if meta_row is not None:
-                update_online_learner(meta_row, correct)
+                update_online_learner(meta_row, base_ml_correct)
 
             # Upgrade 3: Adaptive Threshold — record outcome
             _adaptive_thresh.record_outcome(correct)
