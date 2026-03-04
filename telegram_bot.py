@@ -837,8 +837,11 @@ async def _check_outcomes(bot: Bot, predictions: dict, subscribers: dict,
     Wait for the current candle to close, then check if predictions were correct.
     Send result notifications ONLY for symbols each subscriber actually received.
     """
-    # Wait for candle to close + 30s buffer for data availability
-    await asyncio.sleep(TELEGRAM_SEND_BEFORE_CLOSE_SEC + 30)
+    # Wait for the PREDICTED 5-minute candle to fully form + 30s buffer
+    # TELEGRAM_SEND_BEFORE_CLOSE_SEC gets us to the start of the new candle
+    # 300 seconds (5 mins) waits out the new candle
+    # 30 seconds is buffer for MT5 history update
+    await asyncio.sleep(TELEGRAM_SEND_BEFORE_CLOSE_SEC + 300 + 30)
 
     # Build all outcome data first
     all_outcomes = {}  # {sym: {emoji, msg_line, correct, conf, pred}}
