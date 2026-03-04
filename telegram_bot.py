@@ -732,21 +732,13 @@ async def _auto_signal_job(app: Application):
 
                     # (Session hour is now soft — no hard block)
 
-                    # =========================================================
-                    # STRATEGY 5: Consecutive Candle Confirmation
-                    # =========================================================
                     current_dir = pred["suggested_direction"]
-                    prev_dir = _prev_directions.get(sym)
-                    _prev_directions[sym] = current_dir  # always update
-                    if prev_dir is not None and prev_dir != current_dir:
-                        filtered_out[sym] = f"direction flip ({prev_dir}->{current_dir})"
-                        continue
 
                     # =========================================================
-                    # STRATEGY 1: Multi-TF Confluence
+                    # STRATEGY 1: Multi-TF Confluence (reuse cached data)
                     # =========================================================
                     try:
-                        data_mtf = fetch_multi_timeframe(sym, 50)
+                        data_mtf = _prefetched_data.get(sym, {})
                         confl = check_confluence(
                             m5_df=data_mtf.get('M5'),
                             m15_df=data_mtf.get('M15'),
