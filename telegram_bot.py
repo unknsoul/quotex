@@ -838,16 +838,35 @@ async def _auto_signal_job(app: Application):
                             rsi = last_row.get("rsi_14", 50)
                             vol_imb = last_row.get("volume_imbalance", 0)
                             
+                            recent_candles_df = m5_df.tail(5)[['time', 'open', 'high', 'low', 'close', 'tick_volume']].copy()
+                            recent_candles_str = recent_candles_df.to_string(index=False)
+                            
                             v = verify_signal(
-                                sym, pred["suggested_direction"], price,
-                                e20, e50, e100, e200, atr, adx, rsi, vol_imb, pred.get("market_regime", "Unknown")
+                                symbol=sym,
+                                timestamp=datetime.now(timezone.utc).isoformat(),
+                                direction=pred["suggested_direction"],
+                                green_prob=pred.get("green_prob_percent", 50.0) / 100.0,
+                                confidence=pred.get("final_confidence_percent", 0.0),
+                                meta_trust=pred.get("meta_reliability_percent", 50.0),
+                                uncertainty=pred.get("ensemble_variance", 0.0),
+                                regime=pred.get("market_regime", "Unknown"),
+                                session="Unknown", # Handled intrinsically or fallback
+                                kelly=pred.get("kelly_fraction_percent", 0.0),
+                                recent_candles=recent_candles_str,
+                                support1="N/A",  # Pending auto-SR implementation
+                                resistance1="N/A",
+                                ema20=e20,
+                                ema50=e50,
+                                rsi=rsi,
+                                atr=atr,
+                                news_sentiment="N/A"
                             )
                             if v["approved"]:
                                 gemini_filtered[sym] = pred
-                                log.info("Gemini APPROVED %s: %s", sym, v["reason"])
+                                log.info("Gemini APPROVED %s (Conf: %s%%): %s", sym, v.get("gemini_confidence", "?"), v["reason"])
                             else:
                                 filtered_out[sym] = f"Gemini Veto: {v['reason']}"
-                                log.info("Gemini REJECTED %s: %s", sym, v["reason"])
+                                log.info("Gemini REJECTED %s (Conf: %s%%): %s", sym, v.get("gemini_confidence", "?"), v["reason"])
                         else:
                             gemini_filtered[sym] = pred
                     except Exception as e:
