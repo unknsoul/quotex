@@ -195,7 +195,7 @@ def run_forward_test(symbol, n_bars=500, holdout_ratio=0.1):
     print(f"    Brier Score:       {brier:.4f}  (naive: 0.2500)")
     print(f"    Brier Skill:       {brier_skill:.4f}")
     print(f"    Log Loss:          {ll:.4f}  (naive: 0.6931)")
-    sp_status = "✅" if spearman >= 0.15 else "❌"
+    sp_status = "PASS" if spearman >= 0.15 else "FAIL"
     print(f"    Spearman:          {spearman:.4f} {sp_status}")
 
     print(f"\n  STABILITY:")
@@ -232,22 +232,22 @@ def run_forward_test(symbol, n_bars=500, holdout_ratio=0.1):
     total_checks = 3
 
     if accuracy > 60:
-        print(f"  ✅ PASS: Accuracy {accuracy:.1f}% > 60%")
+        print(f"  PASS: Accuracy {accuracy:.1f}% > 60%")
         passes += 1
     else:
-        print(f"  ❌ FAIL: Accuracy {accuracy:.1f}% <= 60%")
+        print(f"  FAIL: Accuracy {accuracy:.1f}% <= 60%")
 
     if spearman > 0.15:
-        print(f"  ✅ PASS: Spearman {spearman:.4f} > 0.15")
+        print(f"  PASS: Spearman {spearman:.4f} > 0.15")
         passes += 1
     else:
-        print(f"  ❌ FAIL: Spearman {spearman:.4f} <= 0.15")
+        print(f"  FAIL: Spearman {spearman:.4f} <= 0.15")
 
     if sub50_sustained <= 50:
-        print(f"  ✅ PASS: No sustained sub-50% streak (max={sub50_sustained})")
+        print(f"  PASS: No sustained sub-50% streak (max={sub50_sustained})")
         passes += 1
     else:
-        print(f"  ❌ FAIL: Sustained sub-50% streak of {sub50_sustained} bars")
+        print(f"  FAIL: Sustained sub-50% streak of {sub50_sustained} bars")
 
     verdict = "DEPLOYABLE" if passes == total_checks else "NOT READY"
     print(f"\n  VERDICT: {verdict} ({passes}/{total_checks} checks passed)")

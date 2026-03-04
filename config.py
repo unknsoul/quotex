@@ -81,9 +81,9 @@ ATR_PERCENTILE_WINDOW = 100
 # --- v5 Target Threshold -----------------------------------------------------
 TARGET_ATR_THRESHOLD = 0.3  # only train on moves > 0.3 * ATR
 
-# --- Target Generation (Phase 5: 1-Candle Fixed Time) ------------------------
-TARGET_LOOKAHEAD = 1        # Predict exactly the next 1 candle
-TRIPLE_BARRIER_ENABLED = False  # Disabled for Binary Options prediction
+# --- Target Generation (Phase 10: Master Architecture) ----------------------
+TARGET_LOOKAHEAD = 3        # Predict smoothed 3 candles
+TRIPLE_BARRIER_ENABLED = True  # Enabled for S-Tier Binary Options positioning
 TRIPLE_BARRIER_TP = 1.5
 TRIPLE_BARRIER_SL = 1.5
 TRIPLE_BARRIER_MAX_BARS = 12      # max bars before time barrier (60 min at M5)

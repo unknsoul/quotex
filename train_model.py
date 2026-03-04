@@ -42,7 +42,7 @@ from config import (
 from data_collector import load_csv, load_multi_tf
 from feature_engineering import (
     compute_features, add_target_atr_filtered, add_target,
-    add_target_triple_barrier, FEATURE_COLUMNS,
+    add_target_triple_barrier, add_target_smoothed, FEATURE_COLUMNS,
 )
 
 log = logging.getLogger("train_model")
@@ -105,9 +105,9 @@ def train(symbol):
     print(f">> Computing {len(FEATURE_COLUMNS)} features...")
     df = compute_features(df, m15_df=m15, h1_df=h1)
 
-    # Phase 5: Strict 1-Candle Fixed Time Binary Target
-    print(">> Using 1-Candle Next-Bar Target (Phase 5 Quotex Overhaul)")
-    df_train = add_target(df)
+    # Phase 10: Master Architecture smoothed target (15-min Trend Prediction)
+    print(">> Using Smoothed Target (lookahead=3) to filter M5 noise")
+    df_train = add_target_smoothed(df, lookahead=3)
     df_train = df_train.dropna(subset=["target"]).reset_index(drop=True)
     df_train["target"] = df_train["target"].astype(int)
 

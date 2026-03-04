@@ -685,13 +685,50 @@ async def _auto_signal_job(app: Application):
                     record_error(f"{sym}: {e}")
 
             # =================================================================
-            # Phase 6: Bypass Correlation Filter
+            # Phase 10: Restore Correlation Filter
             # =================================================================
+            try:
+                corr_passed, corr_reason = check_correlation(predictions)
+                if not corr_passed:
+                    log.warning("Correlation filter blocked trade: %s", corr_reason)
+                    predictions.clear()
+            except Exception as e:
+                log.warning("Correlation EXCEPTION — signal BLOCKED: %s", e)
+                predictions.clear()
 
             # =================================================================
-            # Phase 6: Bypass Stacking Gatekeeper & Rank/Select
-            # We want to allow ALL signals through to the Gemini layer
+            # Phase 10: Restore Direction Flip Filter (Strategy 5)
             # =================================================================
+            for sym, pred in list(predictions.items()):
+                direction = pred["suggested_direction"]
+                regime = pred.get("market_regime", "Unknown")
+                if sym in _prev_directions:
+                    if _prev_directions[sym] != direction and regime != "Trending":
+                        log.info("Blocked direction flip for %s in %s", sym, regime)
+                        filtered_out[sym] = "direction_flip"
+                        del predictions[sym]
+                if sym in predictions:
+                    _prev_directions[sym] = direction
+
+            # =================================================================
+            # Phase 10: Restore Stacking Gatekeeper & Rank/Select
+            # =================================================================
+            if predictions:
+                for sym, pred in list(predictions.items()):
+                    try:
+                        stack_pass, stack_reason = _stacker.check_gate(pred)
+                        if not stack_pass:
+                            log.info("Stack blocker %s: %s", sym, stack_reason)
+                            filtered_out[sym] = f"stack_reject: {stack_reason}"
+                            del predictions[sym]
+                    except Exception as e:
+                        log.warning("Stacking EXCEPTION on %s — signal BLOCKED: %s", sym, e)
+                        filtered_out[sym] = "stack_error"
+                        if sym in predictions: del predictions[sym]
+                
+                if predictions:
+                    ranked = rank_and_select(predictions, max_signals=MAX_SIGNALS_PER_CYCLE)
+                    predictions = {sym: pred for sym, pred, score in ranked}
 
             # =================================================================
             # LAYER 13: Gemini AI Master Trader Verification
@@ -780,7 +817,7 @@ async def _auto_signal_job(app: Application):
                             # Phase 6 & 8: Gemini represents the ultimate Directional Override
                             # It forces a YES/NO on the current direction, converting the signal.
                             if v["verdict"] == "NO_TRADE" or not v.get("approved", True):
-                                filtered_out.append(f"{sym}: {v['reason']}")
+                                filtered_out[sym] = f"Gemini Veto: {v['reason']}"
                                 log.info("Gemini filtered out %s: %s", sym, v["reason"])
                             else:
                                 pred["suggested_direction"] = v["verdict"]
@@ -789,8 +826,8 @@ async def _auto_signal_job(app: Application):
                                 gemini_filtered[sym] = pred
                                 log.info("Gemini OVERRIDE on %s to %s (Conf: %s%%): %s", sym, v["verdict"], v.get("gemini_confidence", "?"), v["reason"])
                     except Exception as e:
-                        log.warning("Gemini integration error on %s: %s", sym, e)
-                        gemini_filtered[sym] = pred  # Fail-open
+                        log.warning("Gemini EXCEPTION on %s — signal BLOCKED: %s", sym, e)
+                        filtered_out[sym] = f"Gemini Error: {e}"
                 predictions = gemini_filtered
 
             # Send ONE combined message per subscriber (respecting alert mode)
