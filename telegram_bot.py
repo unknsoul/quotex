@@ -434,6 +434,7 @@ def _format_prediction(pred: dict, is_auto=False) -> str:
         f"🎯 Confidence:  `[{bar}]` *{conf:.0f}%*\n"
         f"🧠 Meta Trust:  *{meta_rel:.0f}%*\n"
         f"📉 Uncertainty: *{uncertainty:.1f}%*\n\n"
+        f"⏳ Expiry: *5 MINUTES (1 CANDLE)*\n"
         f"{regime_emoji} Regime: *{regime}* (stab: {stability:.0%})\n"
         f"{session_emoji} Session: *{session}*\n"
         f"💰 Kelly: *{kelly:.1f}%* │ Size: {size}\n"
@@ -487,13 +488,15 @@ def _format_combined_signal(predictions: dict, filtered: dict) -> str:
         filled = int(conf / 10)
         bar = "█" * filled + "░" * (10 - filled)
 
-        lines.append(
-            f"\n{d} *{sym}* {r_e}{s_e} {arrow} *{pred['suggested_direction']}*\n"
-            f"  `[{bar}]` *{conf:.0f}%*\n"
-            f"  Prob *{green:.1f}%* │ Meta *{meta_rel:.0f}%* │ Unc *{uncertainty:.0f}%*\n"
-            f"  Kelly *{kelly:.1f}%* │ {size}\n"
-            f"  💡 *{trade}*"
-        )
+        direction_text = "UP" if pred["suggested_direction"] == "UP" else "DOWN"
+        lines.append(f"\n{d} {arrow} *{sym}* - {direction_text}")
+        lines.append(f"⏳ *EXPIRY*: 5 Min (1 Candle)")
+        lines.append(f"📊 Prob: {green:.1f}% │ Conf: {conf:.0f}%")
+        lines.append(f"🧠 Meta: {meta_rel:.0f}% │ Unc: {uncertainty:.1f}%")
+        lines.append(f"{r_e} {regime} (stab: {stability:.0%}) │ {s_e} {session}")
+        lines.append(f"💰 Kelly: {kelly:.1f}% │ Size: {size}")
+        lines.append(f"💡 *{trade}*")
+
 
     # Footer
     lines.append(f"\n━━━━━━━━━━━━━━━━━━━━━━━")

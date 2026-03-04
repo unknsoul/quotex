@@ -102,12 +102,9 @@ def train(symbol):
     print(f">> Computing {len(FEATURE_COLUMNS)} features...")
     df = compute_features(df, m15_df=m15, h1_df=h1)
 
-    # Phase 4: Triple Barrier labeling or ATR-filtered target
-    if TRIPLE_BARRIER_ENABLED:
-        print(">> Using TRIPLE BARRIER labeling (Phase 4)")
-        df_train = add_target_triple_barrier(df)
-    else:
-        df_train = add_target_atr_filtered(df)
+    # Phase 5: Strict 1-Candle Fixed Time Binary Target
+    print(">> Using 1-Candle Next-Bar Target (Phase 5 Quotex Overhaul)")
+    df_train = add_target(df)
     df_train = df_train.dropna(subset=["target"]).reset_index(drop=True)
     df_train["target"] = df_train["target"].astype(int)
 

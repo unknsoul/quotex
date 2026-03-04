@@ -81,10 +81,11 @@ ATR_PERCENTILE_WINDOW = 100
 # --- v5 Target Threshold -----------------------------------------------------
 TARGET_ATR_THRESHOLD = 0.3  # only train on moves > 0.3 * ATR
 
-# --- Triple Barrier Method (V3) ---------------------------------------------
-TRIPLE_BARRIER_ENABLED = True     # V3: TB labels with sample weights
-TRIPLE_BARRIER_TP = 1.5           # take-profit = 1.5 × ATR (symmetric)
-TRIPLE_BARRIER_SL = 1.5           # stop-loss = 1.5 × ATR (symmetric)
+# --- Target Generation (Phase 5: 1-Candle Fixed Time) ------------------------
+TARGET_LOOKAHEAD = 1        # Predict exactly the next 1 candle
+TRIPLE_BARRIER_ENABLED = False  # Disabled for Binary Options prediction
+TRIPLE_BARRIER_TP = 1.5
+TRIPLE_BARRIER_SL = 1.5
 TRIPLE_BARRIER_MAX_BARS = 12      # max bars before time barrier (60 min at M5)
 
 # --- Regime Detection --------------------------------------------------------
@@ -142,7 +143,7 @@ ENSEMBLE_SIZE = len(ENSEMBLE_SEEDS)
 
 # --- XGBoost Primary Hyperparams --------------------------------------------
 XGB_N_ESTIMATORS = 400
-XGB_MAX_DEPTH = 5
+XGB_MAX_DEPTH = 3  # Phase 5: Dropped from 5. Shallow trees prevent overfitting 1-candle noise
 XGB_LEARNING_RATE = 0.05
 XGB_SUBSAMPLE = 0.8
 XGB_COLSAMPLE_BYTREE = 0.8
@@ -157,11 +158,11 @@ PURGE_EMBARGO_BARS = 50  # purge gap between train/test to prevent leakage
 ROLLING_TRAIN_WINDOW = 0  # 0=expanding, >0=rolling window (bars). Try 5000 (~17 days M5)
 
 # --- Meta Model (LightGBM) --------------------------------------------------
-META_N_ESTIMATORS = 200
-META_MAX_DEPTH = 4
+META_N_ESTIMATORS = 100
+META_MAX_DEPTH = 3
 META_LEARNING_RATE = 0.05
 META_SUBSAMPLE = 0.8
-META_NUM_LEAVES = 31
+META_NUM_LEAVES = 15
 
 # --- Confidence Correlation Monitoring ---------------------------------------
 CONFIDENCE_CORRELATION_WINDOW = 200
