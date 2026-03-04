@@ -80,9 +80,9 @@ TARGET_ATR_THRESHOLD = 0.3  # only train on moves > 0.3 * ATR
 
 # --- Triple Barrier Method (V3) ---------------------------------------------
 TRIPLE_BARRIER_ENABLED = True     # V3: TB labels with sample weights
-TRIPLE_BARRIER_TP = 1.5           # take-profit = 1.5 × ATR (asymmetric)
-TRIPLE_BARRIER_SL = 1.0           # stop-loss = 1.0 × ATR
-TRIPLE_BARRIER_MAX_BARS = 4       # max bars before time barrier (20 min at M5)
+TRIPLE_BARRIER_TP = 1.5           # take-profit = 1.5 × ATR (symmetric)
+TRIPLE_BARRIER_SL = 1.5           # stop-loss = 1.5 × ATR (symmetric)
+TRIPLE_BARRIER_MAX_BARS = 12      # max bars before time barrier (60 min at M5)
 
 # --- Regime Detection --------------------------------------------------------
 ADX_TRENDING_THRESHOLD = 25
@@ -93,13 +93,13 @@ ATR_ROLLING_WINDOW = 100
 
 # --- Regime Thresholds (trade suggestions) -----------------------------------
 REGIME_THRESHOLDS = {
-    "Trending":        {"primary": 0.52, "meta": 0.45},
-    "Ranging":         {"primary": 0.53, "meta": 0.48},
-    "High_Volatility": {"primary": 0.55, "meta": 0.50},
-    "Low_Volatility":  {"primary": 0.54, "meta": 0.48},
+    "Trending":        {"primary": 0.58, "meta": 0.55},
+    "Ranging":         {"primary": 0.59, "meta": 0.55},
+    "High_Volatility": {"primary": 0.60, "meta": 0.56},
+    "Low_Volatility":  {"primary": 0.59, "meta": 0.55},
 }
-PRIMARY_BASE_THRESHOLD = 0.52
-META_BASE_THRESHOLD = 0.45
+PRIMARY_BASE_THRESHOLD = 0.58
+META_BASE_THRESHOLD = 0.55
 
 # --- Adaptive Regime Filter (Phase 3) ---------------------------------------
 REGIME_FILTER_ENABLED = True

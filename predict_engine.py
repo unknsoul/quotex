@@ -432,15 +432,24 @@ def predict(df, regime):
         should_skip, skip_reason = _should_skip(regime, confidence_pct, df,
                                                   ensemble_variance=variance)
 
-        # Trade suggestion (with skip override)
+        # Trade suggestion (with skip override and EMA alignment gate - Gap 6)
         if should_skip:
             trade = "SKIP"
         else:
             thresholds = get_regime_thresholds(regime)
+            
+            # Phase 1: EMA Alignment Hard Gate
+            ema_50 = df["ema_50"].iloc[-1]
+            ema_200 = df["ema_200"].iloc[-1]
+            trend_is_up = ema_50 > ema_200
+            trend_is_down = ema_50 < ema_200
+            
             if green_p >= thresholds["primary"] and meta_rel >= thresholds["meta"]:
-                trade = "BUY"
+                trade = "BUY" if trend_is_up else "HOLD"
+                if trade == "HOLD": skip_reason = "EMA bearish alignment"
             elif green_p <= (1 - thresholds["primary"]) and meta_rel >= thresholds["meta"]:
-                trade = "SELL"
+                trade = "SELL" if trend_is_down else "HOLD"
+                if trade == "HOLD": skip_reason = "EMA bullish alignment"
             else:
                 trade = "HOLD"
 

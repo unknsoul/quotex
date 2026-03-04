@@ -115,7 +115,7 @@ def get_session(hour: int) -> str:
     """Identify trading session from UTC hour."""
     from config import SESSION_ASIA, SESSION_LONDON, SESSION_NEW_YORK
     # Check overlap first (London + NY)
-    if SESSION_LONDON[0] <= hour < SESSION_NEW_YORK[1] and SESSION_NEW_YORK[0] <= hour:
+    if SESSION_NEW_YORK[0] <= hour < SESSION_LONDON[1]:
         return "Overlap"
     if SESSION_LONDON[0] <= hour < SESSION_LONDON[1]:
         return "London"

@@ -706,7 +706,7 @@ async def _auto_signal_job(app: Application):
                     current_dir = pred["suggested_direction"]
                     prev_dir = _prev_directions.get(sym)
                     _prev_directions[sym] = current_dir  # always update
-                    if prev_dir is not None and prev_dir != current_dir:
+                    if prev_dir is not None and prev_dir != current_dir and regime == "Ranging":
                         filtered_out[sym] = f"direction flip ({prev_dir}->{current_dir})"
                         continue
 
@@ -727,19 +727,22 @@ async def _auto_signal_job(app: Application):
                             filtered_out[sym] = confl["reason"]
                             continue
                     except Exception as e:
-                        log.debug("Confluence check error %s: %s", sym, e)
-                        pred["confluence_score"] = 3  # benefit of doubt
+                        log.warning("Confluence check exception %s: %s", sym, e)
+                        filtered_out[sym] = f"confluence error ({e})"
+                        continue
 
                     # =========================================================
                     # UPGRADE 2: Candle Pattern Confirmation
                     # =========================================================
                     try:
                         cp = pattern_confirms(data.get('M5'), current_dir)
-                        if not cp["confirmed"] and cp["patterns"]:
+                        if not cp["confirmed"]:
                             filtered_out[sym] = cp["reason"]
                             continue
                     except Exception as e:
-                        log.debug("Candle pattern check error %s: %s", sym, e)
+                        log.warning("Candle pattern exception %s: %s", sym, e)
+                        filtered_out[sym] = f"pattern error ({e})"
+                        continue
 
                     # =========================================================
                     # UPGRADE 4: News Calendar Filter
@@ -750,7 +753,9 @@ async def _auto_signal_job(app: Application):
                             filtered_out[sym] = nf["reason"]
                             continue
                     except Exception as e:
-                        log.debug("News filter error %s: %s", sym, e)
+                        log.warning("News filter exception %s: %s", sym, e)
+                        filtered_out[sym] = f"news error ({e})"
+                        continue
 
                     predictions[sym] = pred
                     _last_predictions[sym] = {

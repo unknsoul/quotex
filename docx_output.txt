@@ -1,0 +1,168 @@
+
+QUOTEX-LORD v10
+ACCURACY AUDIT & FIX ROADMAP
+Comprehensive Code Review · Gap Analysis · Priority Fixes
+
+
+⚠  CRITICAL FINDINGS INSIDE — REVIEW ALL SECTIONS BEFORE DEPLOYING
+
+1. EXECUTIVE SUMMARY
+
+After a complete review of all 82 files in the quotex-main codebase, this audit identified 13 distinct bugs and gaps across 8 modules. The system currently operates at 50–55% accuracy — equivalent to a coin flip — despite its sophisticated multi-layer ML architecture. The primary cause is a fundamental mismatch between how the model is trained and what the trading logic actually needs to predict.
+
+
+Summary of Findings by Severity
+
+
+2. ROOT CAUSE — WHY IT GOES OPPOSITE TO TRENDS
+
+2.1  The Triple Barrier Labeling Problem
+
+The system uses Triple Barrier labeling in triple_barrier_labeler.py with these settings: TP = 1.5 × ATR, SL = 1.0 × ATR, max_bars = 4 (20 minutes). This is the single largest cause of the opposite-direction problem.
+
+How the mislabeling works in a trending market:
+
+
+2.2  The three_candle_momentum Feature Amplifies This
+
+In feature_engineering.py at line 309, the feature three_candle_momentum is encoded as: d2 * 4 + d1 * 2 + d0. When 3 consecutive candles are green, this equals 7 (binary 111) — the maximum value. The model has learned from Triple Barrier labels that value=7 (three greens) precedes label=0 (SL hit). So the model correctly learned a wrong pattern — it is internally consistent but externally wrong.
+
+2.3  Direction Flip Filter Worsens It (Strategy 5)
+
+In telegram_bot.py (around line 706), Strategy 5 blocks any signal where the direction changes from the previous bar:
+
+
+This filter was designed to avoid whipsaw entries. However, it also blocks the model from correctly switching direction at the start of a new trend. When the model finally detects an uptrend and signals UP after a series of DOWN signals, Strategy 5 blocks it as a "direction flip". The system is structurally incapable of catching trend reversals.
+
+3. ALL GAPS — DETAILED ANALYSIS
+
+Gap 1 — Triple Barrier: Asymmetric TP/SL Creates Reversal Labels
+
+Current code:
+
+Problem: In trending markets, small intra-trend pullbacks regularly hit the SL (10 pips) before the TP (15 pips) is reached. max_bars=4 is only 20 minutes — far too short to confirm a trend direction. This produces incorrect labels for trending setups.
+
+Fix: Switch to SYMMETRIC barriers for trend-following, or use the smoothed target function already available in feature_engineering.py.
+
+
+Gap 2 — three_candle_momentum: Mean-Reversion Signal as Feature
+
+Current code:
+
+Problem: The feature is correct — it accurately encodes 3-candle direction. The problem is the label it was trained against. Once the Triple Barrier label is fixed (Gap 1), this feature will correctly learn that 3 greens = trend continuation = BUY.
+However, you should also add a trend-context wrapper so the model distinguishes between 3 greens in a trend vs. 3 greens in ranging (where reversal is valid).
+
+
+Gap 3 — Signal Thresholds Dangerously Low
+
+Current thresholds:
+
+The meta threshold of 0.45 for Trending regime means the system will execute a trade even when the meta model says the primary model is MORE LIKELY WRONG than right. This is a critical misconfiguration.
+
+Fixed values:
+
+Gap 4 — Confluence Filter Silently Bypassed When Data Is Missing
+
+Current code in confluence_filter.py:
+
+Additionally in telegram_bot.py line 731:
+
+Fix — remove all benefit-of-doubt, replace with NEUTRAL (does not count for or against):
+
+Gap 5 — Candle Pattern Confirmation Not a Real Gate
+
+Current logic in telegram_bot.py:
+
+Fix — require at least neutral patterns; block if contradicting patterns are found; allow through if confirming OR absent:
+
+Gap 6 — No EMA Alignment Hard Gate (Trend-Following Not Enforced)
+
+Current trade decision logic:
+
+Fix — add EMA alignment check as a hard gate before the trade decision:
+
+Gap 7 — Exception Handling Silently Passes Filter Checks
+
+Pattern found in 3 places in telegram_bot.py:
+
+Fix — on any filter exception, BLOCK the signal with a reason logged at WARNING level (not DEBUG):
+
+Gap 8 — Session Overlap Hours Logic Bug
+
+Current code:
+
+Fix:
+
+Gap 9 — Direction Flip Filter Blocks Valid Trend Entries
+
+Current code:
+
+Problem: This filter was designed to reduce whipsaw, but it also blocks the system from ever catching a trend reversal. When a downtrend ends and the model correctly signals UP for the first time, it gets blocked. Fix: only apply this filter in Ranging regime, not in Trending regime.
+
+Gaps 10–13 — Secondary Issues
+
+
+4. PRIORITY FIX ROADMAP
+
+4.1  Phase 1 — Immediate Fixes (Do This First — Day 1)
+
+These fixes address the root cause of opposite-direction predictions. Apply all before retraining.
+
+
+4.2  Phase 2 — Retrain Model (After Phase 1 Fixes)
+
+Once the labeling and threshold bugs are fixed, retrain the model. The model needs to learn from corrected labels.
+
+
+4.3  Phase 3 — Advanced Improvements (Week 2)
+
+
+5. EXPECTED ACCURACY IMPROVEMENT
+
+The table below shows the expected cumulative accuracy gains from each phase of fixes. These estimates are based on the code analysis — actual gains depend on data quality and retraining.
+
+
+5.1  Why These Gains Are Realistic
+
+The current system's accuracy is artificially suppressed by the labeling bug. This is not a model quality problem — it is a training data problem. Fixing the labels alone should recover 8–12%.
+The confluence filter, candle pattern filter, and EMA gate are all adding friction at the signal level. Once they actually work correctly, they will filter out an estimated 20–30% of signals — but the remaining signals will be much higher quality.
+Less signals does not mean less profit. Trading only high-confidence signals with correct trend alignment is the professional approach for binary options.
+The LightGBM meta model and XGBoost ensemble are solid architectures — the infrastructure is good. Only the training and filtering layers need fixing.
+
+6. QUICK REFERENCE — EXACT CODE CHANGES
+
+config.py — Minimum Required Changes
+
+telegram_bot.py — Filter Exception Handlers
+
+regime_detection.py — Session Fix
+
+predict_engine.py — EMA Alignment Gate
+
+7. DEPLOYMENT CHECKLIST
+
+Phase 1 — Before Retraining (Config + Filter Fixes)
+Update config.py: TRIPLE_BARRIER_SL=1.5, TRIPLE_BARRIER_MAX_BARS=12
+Update config.py: all REGIME_THRESHOLDS (primary 0.58+, meta 0.55+)
+Fix telegram_bot.py: remove 'and cp["patterns"]' from candle check
+Fix telegram_bot.py: all filter exception handlers → block + continue
+Fix confluence_filter.py: remove benefit-of-doubt score += 1
+Fix regime_detection.py: get_session() overlap logic
+Test in paper trading mode for at least 48 hours
+
+Phase 2 — Retrain Model
+Run train_model.py with new Triple Barrier settings
+Verify label balance: should be 45–55% green/red (not 40/60 or 60/40)
+Run forward_test.py on last 2 weeks of data — verify >60% accuracy
+Add momentum_in_trend and momentum_vs_ema features to FEATURE_COLUMNS
+Add EMA alignment hard gate to predict_engine.py
+Test with paper account for 72 hours before going live
+
+Phase 3 — Advanced (After confirming >62% accuracy)
+Fix direction flip filter (Strategy 5) — only apply in Ranging regime
+Fix Kelly sizing — remove 0.51 floor
+Raise online learner minimum updates to 200
+Add EMA stack to regime detection
+Run full backtest.py and verify performance metrics
+
+QUOTEX-LORD v10 — Accuracy Audit Report  |  March 2026  |  Confidential  |  Confidential — Internal Use Only

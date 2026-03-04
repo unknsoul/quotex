@@ -109,7 +109,7 @@ def check_confluence(m5_df, m15_df=None, h1_df=None,
             score += 1
     else:
         directions["M15"] = "N/A"
-        score += 1  # benefit of the doubt if data missing
+        # Phase 1 Gap 4: No benefit of doubt point. Neutral rating.
 
     # H1 direction
     if h1_df is not None and len(h1_df) >= 20:
@@ -119,7 +119,7 @@ def check_confluence(m5_df, m15_df=None, h1_df=None,
             score += 1
     else:
         directions["H1"] = "N/A"
-        score += 1  # benefit of the doubt if data missing
+        # Phase 1 Gap 4: No benefit of doubt point. Neutral rating.
 
     passed = score >= min_score
 

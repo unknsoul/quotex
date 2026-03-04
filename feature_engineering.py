@@ -83,6 +83,8 @@ FEATURE_COLUMNS = [
     "move_vs_spread",
     # Hour granularity
     "minute_sin",
+    # Phase 1: Trend-wrapped momentum (2)
+    "momentum_in_trend", "momentum_vs_ema",
 ]
 
 
@@ -307,6 +309,18 @@ def compute_features(df, m15_df=None, h1_df=None):
     d1 = d0.shift(1).fillna(0).astype(int)
     d2 = d0.shift(2).fillna(0).astype(int)
     df["three_candle_momentum"] = d2 * 4 + d1 * 2 + d0
+
+    # Phase 1: Contextualize momentum inside trend wrapper
+    ema_slope_dir = (df["ema_slope"] > 0).astype(int) * 2 - 1  # 1 for up, -1 for down
+    adx_trend = (df["adx"] > 25).astype(int)
+    
+    # 1 if momentum aligns with strong trend, -1 if against strong trend, 0 if ranging/weak
+    df["momentum_in_trend"] = 0
+    df.loc[(df["candle_direction"] == 1) & (ema_slope_dir == 1) & (adx_trend == 1), "momentum_in_trend"] = 1
+    df.loc[(df["candle_direction"] == 0) & (ema_slope_dir == -1) & (adx_trend == 1), "momentum_in_trend"] = -1
+    
+    # EMA distance interaction with momentum
+    df["momentum_vs_ema"] = df["three_candle_momentum"] * (c - df["ema_20"]) / (df["ema_20"] + 1e-10)
 
     # Context
     hour = df["time"].dt.hour
