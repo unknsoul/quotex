@@ -470,13 +470,12 @@ def _format_combined_signal(predictions: dict, filtered: dict) -> str:
         session_name = "OFF-MARKET"
 
     lines = [
-        "\u250f\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2513",
-        "\u2503  \U0001f451 *QUOTEX LORD PRO*   \u2503",
-        "\u2503  _Signal Intelligence v10_  \u2503",
-        "\u2517\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u251b",
-        f"\u23f0 *{now_utc.strftime('%H:%M:%S')} UTC* | Candle close: {close_str}",
-        f"\U0001f30d Session: *{session_name}*",
+        "\u26a1\u26a1\u26a1 *LIVE SIGNAL* \u26a1\u26a1\u26a1",
         "",
+        "\U0001f451 *QUOTEX LORD PRO*",
+        f"\u23f0 *{now_utc.strftime('%H:%M:%S')} UTC* | Close: {close_str}",
+        f"\U0001f30d Session: *{session_name}*",
+        "\u2501" * 24,
     ]
 
     for sym, pred in sorted(predictions.items()):
