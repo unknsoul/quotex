@@ -19,9 +19,9 @@ log = logging.getLogger("adaptive_threshold")
 STATE_FILE = os.path.join(os.path.dirname(__file__), "logs", "adaptive_state.json")
 
 # Bounds — never go below or above these
-MIN_BOUND = 38.0    # absolute minimum confidence threshold
-MAX_BOUND = 55.0    # absolute maximum
-DEFAULT = 42.0      # starting point
+MIN_BOUND = 25.0    # absolute minimum confidence threshold
+MAX_BOUND = 50.0    # absolute maximum
+DEFAULT = 28.0      # starting point (matches MIN_CONFIDENCE_FILTER)
 
 # Tuning parameters
 EVAL_WINDOW = 30    # evaluate every N outcomes

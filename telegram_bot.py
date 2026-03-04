@@ -86,23 +86,23 @@ _cooldown_until = {}  # {symbol: datetime}
 _last_regime = {}  # {symbol: regime_name} — for transition detection
 _regime_transition_skip = {}  # {symbol: int} — candles to skip
 
-# Signal quality thresholds (DATA-DRIVEN: tuned from 130 signal history)
-# Confidence <42% has 45.8% win rate (losing!) vs >=42% has 70.7%
-MIN_CONFIDENCE_FILTER = 42.0   # raised from 35 — kills the losing 38-42% tier
-HIGH_CONF_THRESHOLD = 45.0     # for "high" mode subscribers
+# Signal quality thresholds
+# The 12-layer filter pipeline handles quality — confidence is just one factor
+MIN_CONFIDENCE_FILTER = 28.0   # base minimum (pipeline filters handle quality)
+HIGH_CONF_THRESHOLD = 40.0     # for "high" mode subscribers
 COOLDOWN_CANDLES = 3
-MAX_CONSECUTIVE_LOSSES = 2     # tightened from 3 — faster cooldown per symbol
+MAX_CONSECUTIVE_LOSSES = 2     # faster cooldown per symbol
 REGIME_SKIP_CANDLES = 2  # skip after regime transition
 
 # Regimes to block entirely (win rate < 50% in historical data)
 BLOCKED_REGIMES = {"High_Volatility"}  # 47.8% win rate = losing
 
-# Symbols to block (consistently underperforming)
-BLOCKED_SYMBOLS = {"AUDUSD"}  # 43.8% win rate over 16 signals
+# Symbols to block (empty — let the filter pipeline handle it)
+BLOCKED_SYMBOLS = set()  # removed AUDUSD block — pipeline filters are enough
 
-# Ensemble disagreement threshold — skip when models disagree too much
-MAX_ENSEMBLE_VARIANCE = 0.035  # skip if variance > this (models arguing)
-MIN_UNANIMITY = 0.714          # Strategy 2: require 5/7 models to agree (71.4%)
+# Ensemble disagreement threshold
+MAX_ENSEMBLE_VARIANCE = 0.05   # loosened — let ranking handle quality
+MIN_UNANIMITY = 0.571          # require 4/7 models to agree (57.1%)
 
 # Strategy 3: Trading session windows (UTC hours)
 # Peak hours get a boost in ranking, off-peak get a small penalty
@@ -729,13 +729,7 @@ async def _auto_signal_job(app: Application):
                         filtered_out[sym] = f"split vote ({agree}/{total})"
                         continue
 
-                    # =========================================================
-                    # STRATEGY 3: Session Hour Window
-                    # =========================================================
-                    current_hour = now_utc.hour
-                    if current_hour in BLOCKED_HOURS_UTC:
-                        filtered_out[sym] = f"off-hours ({current_hour}:00 UTC)"
-                        continue
+                    # (Session hour is now soft — no hard block)
 
                     # =========================================================
                     # STRATEGY 5: Consecutive Candle Confirmation
