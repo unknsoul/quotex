@@ -691,9 +691,10 @@ async def _auto_signal_job(app: Application):
                     if conf < active_min_conf:
                         filtered_out[sym] = f"low-conf ({conf:.0f}%)"
                         continue
-                    if trade == "HOLD" and conf < 42:
-                        filtered_out[sym] = "HOLD signal"
-                        continue
+                    # If model says HOLD, convert to BUY/SELL based on direction
+                    if trade == "HOLD":
+                        trade = "BUY" if pred["suggested_direction"] == "UP" else "SELL"
+                        pred["suggested_trade"] = trade
                     if sym in filtered_out:  # regime transition
                         continue
 
