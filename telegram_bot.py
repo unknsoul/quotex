@@ -863,11 +863,44 @@ async def _check_outcomes(bot: Bot, predictions: dict, subscribers: dict,
     Wait for the current candle to close, then check if predictions were correct.
     Send result notifications ONLY for symbols each subscriber actually received.
     """
-    # Wait for the PREDICTED 5-minute candle to fully form + 30s buffer
-    # TELEGRAM_SEND_BEFORE_CLOSE_SEC gets us to the start of the new candle
-    # 300 seconds (5 mins) waits out the new candle
-    # 30 seconds is buffer for MT5 history update
-    await asyncio.sleep(TELEGRAM_SEND_BEFORE_CLOSE_SEC + 300 + 30)
+    # STAGE 1: Wait for current candle to close (trade opens) + 15s buffer
+    # TELEGRAM_SEND_BEFORE_CLOSE_SEC is usually 15s, so this waits ~30s total
+    await asyncio.sleep(TELEGRAM_SEND_BEFORE_CLOSE_SEC + 15)
+
+    # Send ENTRY CONFIRMATION to subscribers who received these signals
+    for chat_id, info in subscribers.items():
+        if not info.get("active", False):
+            continue
+
+        if sent_symbols_per_sub and chat_id in sent_symbols_per_sub:
+            sub_syms = sent_symbols_per_sub[chat_id]
+        else:
+            sub_syms = set(predictions.keys())
+
+        if not sub_syms:
+            continue
+
+        entry_lines = []
+        for sym in sub_syms:
+            if sym in predictions:
+                pred = predictions[sym]
+                d = "🟢 UP" if pred["suggested_direction"] == "UP" else "🔴 DOWN"
+                entry_lines.append(f"⏱ *{sym}* Trade is LIVE \u2192 *{d}*")
+
+        if entry_lines:
+            entry_msg = "⏳ *ENTRY CONFIRMED*\n━━━━━━━━━━━━━━━━━━━━━━━\n" + "\n".join(entry_lines) + "\n\n_Waiting 5 mins for candle close..._"
+            try:
+                await bot.send_message(
+                    chat_id=int(chat_id),
+                    text=entry_msg,
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                log.error("Failed to send entry confirmation to %s: %s", chat_id, e)
+
+    # STAGE 2: Wait for the PREDICTED 5-minute candle to fully form
+    # We already waited ~30s, now we wait the remaining 5 minutes + 15s buffer
+    await asyncio.sleep(300 + 15)
 
     # Build all outcome data first
     all_outcomes = {}  # {sym: {emoji, msg_line, correct, conf, pred}}
