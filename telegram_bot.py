@@ -720,6 +720,12 @@ async def _auto_signal_job(app: Application):
                             adx = last_row.get("adx", 0)
                             rsi = last_row.get("rsi_14", 50)
                             vol_imb = last_row.get("volume_imbalance", 0)
+                            # Phase 7 Microstructure Extractions
+                            dist_to_res = last_row.get("dist_to_resistance", 5.0)
+                            dist_to_sup = last_row.get("dist_to_support", 5.0)
+                            bull_div = last_row.get("bullish_divergence", 0.0)
+                            bear_div = last_row.get("bearish_divergence", 0.0)
+                            vol_accel = last_row.get("tick_vol_accel_1", 0.0)
                             
                             recent_candles_df = m5_df.tail(5)[['time', 'open', 'high', 'low', 'close', 'tick_volume']].copy()
                             recent_candles_str = recent_candles_df.to_string(index=False)
@@ -742,6 +748,11 @@ async def _auto_signal_job(app: Application):
                                 ema50=e50,
                                 rsi=rsi,
                                 atr=atr,
+                                dist_to_res=dist_to_res,
+                                dist_to_sup=dist_to_sup,
+                                bull_div=bull_div,
+                                bear_div=bear_div,
+                                vol_accel=vol_accel,
                                 news_sentiment="N/A"
                             )
                             # Phase 6: Gemini represents the ultimate Directional Override

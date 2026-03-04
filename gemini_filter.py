@@ -66,6 +66,12 @@ def verify_signal(
     ema50: float,
     rsi: float,
     atr: float,
+    # Phase 7 Microstructure
+    dist_to_res: float,
+    dist_to_sup: float,
+    bull_div: float,
+    bear_div: float,
+    vol_accel: float,
     news_sentiment: str = "N/A"
 ) -> dict:
     """
@@ -87,14 +93,19 @@ def verify_signal(
 Signal Details:
 - Symbol: {symbol}
 - Timestamp (UTC): {timestamp}
-- Direction: {direction} (BUY=up, SELL=down)
+- ML Base Direction: {direction} (BUY=up, SELL=down)
 - ML Probability (ensemble mean): {green_prob:.4f}
 - Confidence (final blended score): {confidence:.2f}
-- Meta Trust (reliability of primary model): {meta_trust:.2f}
-- Ensemble Variance (uncertainty): {uncertainty:.4f}
+
+Live Microstructure Data (1-Candle Focus):
+- Current RSI: {rsi:.1f}
+- Bullish RSI Divergence: {"YES" if bull_div > 0 else "NO"}
+- Bearish RSI Divergence: {"YES" if bear_div > 0 else "NO"}
+- Distance to Resistance (in ATRs): {dist_to_res:.2f} (Warning if < 0.5)
+- Distance to Support (in ATRs): {dist_to_sup:.2f} (Warning if < 0.5)
+- Tick Volume Acceleration: {vol_accel:.2f} (Spike if > 2.0)
 - Market Regime: {regime}
 - Session: {session}
-- Kelly Size (%): {kelly:.2f}
 
 Recent Market Data (last 5 completed M5 candles OHLCV):
 {recent_candles}

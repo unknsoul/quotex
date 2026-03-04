@@ -85,6 +85,10 @@ FEATURE_COLUMNS = [
     "upper_wick_percent", "lower_wick_percent", "body_percent",
     "rsi_velocity", "atr_acceleration", "close_to_high_dist", "close_to_low_dist",
     "micro_trend_3", "price_action_score",
+    # Phase 7 (60%+ Accuracy Upgrades)
+    "dist_to_resistance", "dist_to_support", 
+    "bullish_divergence", "bearish_divergence",
+    "tick_vol_accel_1", "tick_vol_accel_2", "dollar_strength_proxy",
 ]
 
 
@@ -446,6 +450,41 @@ def compute_features(df, m15_df=None, h1_df=None):
     # Bears get points for big body, small lower wick (closing near low)
     pa_score.loc[bear_mask] = -(df.loc[bear_mask, "body_percent"] - df.loc[bear_mask, "lower_wick_percent"])
     df["price_action_score"] = pa_score.fillna(0)
+
+    # --- Phase 7 (60%+ Accuracy Upgrades) ---
+    
+    # [Component 1] Live Support/Resistance Proximity (The Brick Wall Guard)
+    # Scan last 50 candles for local swing highs/lows
+    local_max = df["high"].rolling(window=50, min_periods=5).max()
+    local_min = df["low"].rolling(window=50, min_periods=5).min()
+    # Distance to resistance/support relative to current price ATR
+    atr_val = df["atr_14"].replace(0, 1e-10)
+    df["dist_to_resistance"] = ((local_max - close) / atr_val).fillna(5.0)
+    df["dist_to_support"] = ((close - local_min) / atr_val).fillna(5.0)
+    
+    # [Component 2] RSI Divergence Detection (The Reversal Cheat-Code)
+    # Simple 2-peak trailing comparison (Lookback 10 candles for a pivot)
+    rsi_shifted = df["rsi_14"].shift(3) # Proxy for previous peak
+    price_shifted = close.shift(3)
+    
+    # Bearish Divergence: Price making Higher High, RSI making Lower High
+    df["bearish_divergence"] = ((close > price_shifted) & (df["rsi_14"] < rsi_shifted)).astype(float)
+    # Bullish Divergence: Price making Lower Low, RSI making Higher Low
+    df["bullish_divergence"] = ((close < price_shifted) & (df["rsi_14"] > rsi_shifted)).astype(float)
+    
+    # [Component 3] Tick-Volume Acceleration
+    if "tick_volume" in df.columns:
+        tv = df["tick_volume"].astype(float).replace(0, 1e-10)
+        df["tick_vol_accel_1"] = (tv.diff(1) / tv.shift(1)).fillna(0)
+        df["tick_vol_accel_2"] = (tv.diff(2) / tv.shift(2)).fillna(0)
+    else:
+        df["tick_vol_accel_1"] = 0.0
+        df["tick_vol_accel_2"] = 0.0
+        
+    # [Component 4] Multi-Pair Dollar Liquidity Proxy
+    # Since we don't have multi-symbol streams natively here, we use EUR/USD 
+    # inverted trend as a proxy for raw Dollar strength
+    df["dollar_strength_proxy"] = -df["ema_slope"].fillna(0)
 
     # ---- v7: Accuracy upgrades ----
 
