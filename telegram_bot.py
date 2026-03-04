@@ -53,6 +53,7 @@ from candle_patterns import pattern_confirms
 from news_filter import check_news_filter
 from adaptive_threshold import AdaptiveThreshold
 from stacking_model import StackingGatekeeper
+from gemini_filter import verify_signal
 import threading
 from stability import AccuracyTracker, ConfidenceCorrelationTracker
 from production_state import (
@@ -814,6 +815,45 @@ async def _auto_signal_job(app: Application):
                     max_signals=MAX_SIGNALS_PER_CYCLE,
                     min_score=MIN_SIGNAL_SCORE,
                 )
+
+            # =================================================================
+            # LAYER 13: Gemini AI Master Trader Verification
+            # =================================================================
+            if predictions:
+                gemini_filtered = {}
+                for sym, pred in predictions.items():
+                    try:
+                        data_mtf = fetch_multi_timeframe(sym, 50)
+                        m5_df = data_mtf.get('M5')
+                        if m5_df is not None and not m5_df.empty:
+                            m5_feats = compute_features(m5_df)
+                            last_row = m5_feats.iloc[-1]
+                            price = last_row.get("close", 0)
+                            e20 = last_row.get("ema_20", 0)
+                            e50 = last_row.get("ema_50", 0)
+                            e100 = last_row.get("ema_100", 0)
+                            e200 = last_row.get("ema_200", 0)
+                            atr = last_row.get("atr_14", 0)
+                            adx = last_row.get("adx", 0)
+                            rsi = last_row.get("rsi_14", 50)
+                            vol_imb = last_row.get("volume_imbalance", 0)
+                            
+                            v = verify_signal(
+                                sym, pred["suggested_direction"], price,
+                                e20, e50, e100, e200, atr, adx, rsi, vol_imb, pred.get("market_regime", "Unknown")
+                            )
+                            if v["approved"]:
+                                gemini_filtered[sym] = pred
+                                log.info("Gemini APPROVED %s: %s", sym, v["reason"])
+                            else:
+                                filtered_out[sym] = f"Gemini Veto: {v['reason']}"
+                                log.info("Gemini REJECTED %s: %s", sym, v["reason"])
+                        else:
+                            gemini_filtered[sym] = pred
+                    except Exception as e:
+                        log.warning("Gemini integration error on %s: %s", sym, e)
+                        gemini_filtered[sym] = pred  # Fail-open
+                predictions = gemini_filtered
 
             # Send ONE combined message per subscriber (respecting alert mode)
             # Track which symbols were actually sent per subscriber

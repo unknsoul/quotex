@@ -215,7 +215,7 @@ def _generate_oof_predictions(X_tr, y_tr, spw, seeds, sample_weight=None,
 #  Walk-Forward Engine
 # =============================================================================
 
-def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0):
+def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0, bars=0):
     mtf = load_multi_tf(symbol)
     df = mtf.get("M5")
     if df is None:
@@ -237,6 +237,12 @@ def run_walk_forward(symbol, train_ratio=0.6, chunk_ratio=0.1, rolling_window=0)
         df_eval["tb_weight"] = 1.0  # No TB weights for smoothed target
 
     df_eval = df_eval.dropna(subset=["target"]).reset_index(drop=True)
+    
+    # Phase 4 Update: Slice the last N bars if requested (for faster testing of recent conditions)
+    if bars > 0 and bars < len(df_eval):
+        df_eval = df_eval.iloc[-bars:].reset_index(drop=True)
+        print(f"\n>> Sliced backtest dataset to the most recent {bars} bars.")
+        
     df_eval["target"] = df_eval["target"].astype(int)
 
     # V3: Compute time weights (exponential recency)
@@ -805,9 +811,11 @@ def main():
     parser.add_argument("--rolling-window", type=int, default=0,
                         help="Rolling window size in bars. 0=expanding (default). "
                              "3500≈12 months of M5 data.")
+    parser.add_argument("--bars", type=int, default=0, 
+                        help="Limit backtest to the last N bars (0=all).")
     args = parser.parse_args()
     result = run_walk_forward(args.symbol, args.train_ratio, args.chunk_ratio,
-                              args.rolling_window)
+                              args.rolling_window, args.bars)
     print_report(result)
 
 

@@ -40,6 +40,9 @@ MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
 MT5_SERVER = os.getenv("MT5_SERVER", "")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
 
+# --- Gemini API --------------------------------------------------------------
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
 # --- Data Settings -----------------------------------------------------------
 DEFAULT_SYMBOL = "EURUSD"
 CANDLES_TO_FETCH = 50000  # v8: expanded from 15K for better generalization
