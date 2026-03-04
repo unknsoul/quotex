@@ -66,13 +66,13 @@ def build_seeded_xgb_ensemble(X_train, y_train, X_cal, y_cal, spw=1.0,
     cs = xgb_params.get("colsample_bytree", 0.8)
 
     # Each model spec: (params, temporal_window_ratio)
-    # Moderately regularized to prevent overfitting on noisy M5 data
+    # Heavily regularized to prevent overfitting on noisy M5 data
     model_specs = [
-        ({"max_depth": 3, "learning_rate": 0.02, "n_estimators": 250}, 0.4),
-        ({"max_depth": 3, "learning_rate": 0.03, "n_estimators": 250}, 0.7),
-        ({"max_depth": 4, "learning_rate": 0.03, "n_estimators": 200}, 1.0),
-        ({"max_depth": 2, "learning_rate": 0.05, "n_estimators": 200}, 0.5),
-        ({"max_depth": 3, "learning_rate": 0.02, "n_estimators": 300}, 1.0),
+        ({"max_depth": 3, "learning_rate": 0.01, "n_estimators": 200}, 0.4),
+        ({"max_depth": 3, "learning_rate": 0.02, "n_estimators": 200}, 0.7),
+        ({"max_depth": 4, "learning_rate": 0.02, "n_estimators": 200}, 1.0),
+        ({"max_depth": 2, "learning_rate": 0.03, "n_estimators": 150}, 0.5),
+        ({"max_depth": 3, "learning_rate": 0.01, "n_estimators": 250}, 1.0),
     ]
 
     if not temporal or len(X_train) <= 1000:
@@ -97,8 +97,8 @@ def build_seeded_xgb_ensemble(X_train, y_train, X_cal, y_cal, spw=1.0,
             scale_pos_weight=spw,
             objective="binary:logistic", eval_metric="logloss",
             use_label_encoder=False, random_state=seed, verbosity=0,
-            min_child_weight=5, reg_alpha=0.5, reg_lambda=3.0,
-            gamma=0.5,
+            min_child_weight=10, reg_alpha=1.0, reg_lambda=5.0,
+            gamma=1.0,
         )
         model.fit(X_tr, y_tr, verbose=False)
         name = f"XGB_d{params['max_depth']}_lr{params['learning_rate']}_{window_pct}pct"
