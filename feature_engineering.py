@@ -81,10 +81,10 @@ FEATURE_COLUMNS = [
     "delta_adx_accel", "delta_atr_accel",
     # Spread-relative move size
     "move_vs_spread",
-    # Hour granularity
-    "minute_sin",
-    # Phase 1: Trend-wrapped momentum (2)
-    "momentum_in_trend", "momentum_vs_ema",
+    # Phase 5 (1-Candle Expiry) Binary Options Microstructure
+    "upper_wick_percent", "lower_wick_percent", "body_percent",
+    "rsi_velocity", "atr_acceleration", "close_to_high_dist", "close_to_low_dist",
+    "micro_trend_3", "price_action_score",
 ]
 
 
@@ -410,6 +410,43 @@ def compute_features(df, m15_df=None, h1_df=None):
     # Compression acceleration (how fast is range narrowing)
     df["range_compression_speed"] = df["compression_ratio"] - df["compression_ratio"].shift(5)
 
+    # --- Phase 5 (1-Candle Expiry) Proprietary Features ---
+    # Define variables explicitly
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    
+    # 1. Wick & Body Proportions (crucial for next-candle momentum)
+    candle_range = (high - low).replace(0, 1e-10)
+    df["upper_wick_percent"] = (high - df[["open", "close"]].max(axis=1)) / candle_range
+    df["lower_wick_percent"] = (df[["open", "close"]].min(axis=1) - low) / candle_range
+    df["body_percent"] = df["body_size"] / candle_range
+    
+    # 2. RSI Velocity (How fast is momentum shifting right now)
+    df["rsi_velocity"] = df["rsi_14"].diff(1).fillna(0)
+    
+    # 3. ATR Acceleration (Volatility expansion inside the 5m window)
+    df["atr_acceleration"] = (df["atr_14"].diff(1) / df["atr_14"].shift(1).replace(0, 1e-10)).fillna(0)
+    
+    # 4. Intra-candle closing pressure
+    df["close_to_high_dist"] = (high - close) / candle_range
+    df["close_to_low_dist"] = (close - low) / candle_range
+    
+    # 5. Micro-trend (3-bar immediate direction)
+    df["micro_trend_3"] = (close > close.shift(3)).astype(float).fillna(0.5)
+    
+    # 6. Synthesized Price Action Score (Combines wicks + body direction)
+    # A strong green body closing near the high = 1.0, strong red closing near low = -1.0
+    pa_score = pd.Series(0.0, index=df.index)
+    bull_mask = close > df["open"]
+    bear_mask = close < df["open"]
+    
+    # Bulls get points for big body, small upper wick (closing near high)
+    pa_score.loc[bull_mask] = df.loc[bull_mask, "body_percent"] - df.loc[bull_mask, "upper_wick_percent"]
+    # Bears get points for big body, small lower wick (closing near low)
+    pa_score.loc[bear_mask] = -(df.loc[bear_mask, "body_percent"] - df.loc[bear_mask, "lower_wick_percent"])
+    df["price_action_score"] = pa_score.fillna(0)
+
     # ---- v7: Accuracy upgrades ----
 
     # 1. Tick volume imbalance bars (order flow proxy)
@@ -446,7 +483,8 @@ def compute_features(df, m15_df=None, h1_df=None):
     df["five_candle_pattern"] = d4 * 16 + d3 * 8 + d2 * 4 + d1 * 2 + d0
 
     # Doji count (small body candles)
-    body_ratio = (c - o).abs() / candle_range
+    candle_range_5 = (df["high"] - df["low"]).replace(0, 1e-10)
+    body_ratio = (df["close"] - df["open"]).abs() / candle_range_5
     is_doji = (body_ratio < 0.3).astype(int)
     df["doji_count_5"] = is_doji.rolling(5, min_periods=1).sum()
 

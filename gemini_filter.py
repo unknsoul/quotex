@@ -119,12 +119,9 @@ Now, apply advanced verification techniques used by elite traders (including Chi
 - Consideration of upcoming high-impact news events (if known)
 
 Return a JSON object with the following fields:
-- verdict: string, one of ["WIN", "LOSE", "UNCERTAIN"]
+- direction: string, exactly one of ["UP", "DOWN"] (your predicted direction for the next candle)
 - confidence: integer 0-100 (how sure you are of your verdict)
 - reasoning: string (brief explanation of your analysis)
-- suggested_probability_adjustment: float (optional, e.g., +0.05 to increase original probability)
-- suggested_confidence_adjustment: float (optional, similar)
-- filter_signal: boolean (true if the signal should be skipped/filtered out)
 """
     
     try:
@@ -133,34 +130,18 @@ Return a JSON object with the following fields:
         
         parsed = json.loads(text)
         
-        # The prompt forces filter_signal (boolean). Let's use it or fallback to verdict
-        should_filter = parsed.get("filter_signal", False)
-        verdict = parsed.get("verdict", "UNCERTAIN").upper()
-        
-        # If the LLM didn't pass filter_signal boolean, fallback to LOSE/UNCERTAIN logic
-        if "filter_signal" not in parsed:
-            if verdict == "LOSE":
-                should_filter = True
-                
+        direction_pred = parsed.get("direction", "UNKNOWN").upper()
         reason = parsed.get("reasoning", "No reasoning provided.")
         gemini_conf = parsed.get("confidence", 0)
         
-        if not should_filter:
-            return {
-                "approved": True, 
-                "reason": f"Gemini {verdict} ({gemini_conf}%): {reason}",
-                "gemini_confidence": gemini_conf,
-                "verdict": verdict
-            }
-        else:
-            return {
-                "approved": False, 
-                "reason": f"Gemini Filtered ({verdict}): {reason}",
-                "gemini_confidence": gemini_conf,
-                "verdict": verdict
-            }
+        return {
+            "approved": True,  # Always pass through now
+            "reason": f"Gemini Predicts {direction_pred} ({gemini_conf}%): {reason}",
+            "gemini_confidence": gemini_conf,
+            "verdict": direction_pred
+        }
             
     except Exception as e:
         log.warning("Gemini API call failed for %s: %s", symbol, e)
-        # Fail open if the API goes down so trading continues, but log it.
-        return {"approved": True, "reason": f"Gemini Error (Auto-Passed): {str(e)}", "gemini_confidence": 0, "verdict": "ERROR"}
+        # Fail open by defaulting to original direction if API goes down
+        return {"approved": True, "reason": f"Gemini Error (Auto-Passed): {str(e)}", "gemini_confidence": 0, "verdict": direction}

@@ -650,117 +650,16 @@ async def _auto_signal_job(app: Application):
                     # Log EVERY prediction to CSV (before filtering)
                     _log_prediction_csv(sym, pred)
 
-                    # 4. Signal quality filters (using adaptive threshold)
-                    active_min_conf = _adaptive_thresh.current
+                    # =========================================================
+                    # Phase 6 (Always-On High Frequency Override):
+                    # We bypass ALL legacy ML confidence thresholds, regime blockers, 
+                    # and session filters. Every single 5-minute candle passes through 
+                    # to the Gemini Oracle for a forced directional verdict.
+                    # =========================================================
                     if pred.get("error"):
                         filtered_out[sym] = pred["error"]
                         continue
-                    if conf < active_min_conf:
-                        filtered_out[sym] = f"low-conf ({conf:.0f}%)"
-                        continue
-                    if trade == "HOLD" and conf < 42:
-                        filtered_out[sym] = "HOLD signal"
-                        continue
-                    if sym in filtered_out:  # regime transition
-                        continue
-
-                    # 5. Block losing regimes
-                    if regime in BLOCKED_REGIMES:
-                        filtered_out[sym] = f"blocked regime ({regime})"
-                        continue
-
-                    # 6. Block underperforming symbols
-                    if sym in BLOCKED_SYMBOLS:
-                        filtered_out[sym] = f"blocked symbol"
-                        continue
-
-                    # 7. Ensemble disagreement filter
-                    ens_var = pred.get("ensemble_variance", 0)
-                    if ens_var > MAX_ENSEMBLE_VARIANCE:
-                        filtered_out[sym] = f"ensemble disagree (var={ens_var:.4f})"
-                        continue
-
-                    # 8. Skip when meta reliability is too low
-                    meta_rel = pred.get("meta_reliability_percent", 50)
-                    if meta_rel < 40 and conf < 48:
-                        filtered_out[sym] = f"low meta ({meta_rel:.0f}%)"
-                        continue
-
-                    # =========================================================
-                    # STRATEGY 2: Ensemble Unanimity (require 6/7+ agreement)
-                    # =========================================================
-                    unanimity = pred.get("ensemble_unanimity", 0.5)
-                    if unanimity < MIN_UNANIMITY:
-                        agree = pred.get('ensemble_agree_count', '?')
-                        total = pred.get('ensemble_total', '?')
-                        filtered_out[sym] = f"split vote ({agree}/{total})"
-                        continue
-
-                    # =========================================================
-                    # STRATEGY 3: Session Hour Window
-                    # =========================================================
-                    current_hour = now_utc.hour
-                    if current_hour in BLOCKED_HOURS_UTC:
-                        filtered_out[sym] = f"off-hours ({current_hour}:00 UTC)"
-                        continue
-
-                    # =========================================================
-                    # STRATEGY 5: Consecutive Candle Confirmation
-                    # =========================================================
-                    current_dir = pred["suggested_direction"]
-                    prev_dir = _prev_directions.get(sym)
-                    _prev_directions[sym] = current_dir  # always update
-                    if prev_dir is not None and prev_dir != current_dir and regime == "Ranging":
-                        filtered_out[sym] = f"direction flip ({prev_dir}->{current_dir})"
-                        continue
-
-                    # =========================================================
-                    # STRATEGY 1: Multi-TF Confluence
-                    # =========================================================
-                    try:
-                        data_mtf = fetch_multi_timeframe(sym, 50)
-                        confl = check_confluence(
-                            m5_df=data_mtf.get('M5'),
-                            m15_df=data_mtf.get('M15'),
-                            h1_df=data_mtf.get('H1'),
-                            predicted_direction=current_dir,
-                            min_score=2,
-                        )
-                        pred["confluence_score"] = confl["confluence_score"]
-                        if not confl["confluence_pass"]:
-                            filtered_out[sym] = confl["reason"]
-                            continue
-                    except Exception as e:
-                        log.warning("Confluence check exception %s: %s", sym, e)
-                        filtered_out[sym] = f"confluence error ({e})"
-                        continue
-
-                    # =========================================================
-                    # UPGRADE 2: Candle Pattern Confirmation
-                    # =========================================================
-                    try:
-                        cp = pattern_confirms(data.get('M5'), current_dir)
-                        if not cp["confirmed"]:
-                            filtered_out[sym] = cp["reason"]
-                            continue
-                    except Exception as e:
-                        log.warning("Candle pattern exception %s: %s", sym, e)
-                        filtered_out[sym] = f"pattern error ({e})"
-                        continue
-
-                    # =========================================================
-                    # UPGRADE 4: News Calendar Filter
-                    # =========================================================
-                    try:
-                        nf = check_news_filter(sym, now_utc)
-                        if nf["blocked"]:
-                            filtered_out[sym] = nf["reason"]
-                            continue
-                    except Exception as e:
-                        log.warning("News filter exception %s: %s", sym, e)
-                        filtered_out[sym] = f"news error ({e})"
-                        continue
-
+                        
                     predictions[sym] = pred
                     _last_predictions[sym] = {
                         "pred": pred,
@@ -796,28 +695,9 @@ async def _auto_signal_job(app: Application):
                 predictions = corr_filtered
 
             # =================================================================
-            # UPGRADE 6: Stacking Gatekeeper
+            # Phase 6: Bypass Stacking Gatekeeper & Rank/Select
+            # We want to allow ALL signals through to the Gemini layer
             # =================================================================
-            if predictions:
-                stacker_filtered = {}
-                for sym, pred in predictions.items():
-                    gate = _stacker.should_send(pred, threshold=0.55)
-                    if gate["send"]:
-                        stacker_filtered[sym] = pred
-                    else:
-                        filtered_out[sym] = gate["reason"]
-                        log.info("Stacker gate: %s blocked — %s", sym, gate["reason"])
-                predictions = stacker_filtered
-
-            # =================================================================
-            # STRATEGY 4: Rank and select only top N signals
-            # =================================================================
-            if predictions:
-                predictions = rank_and_select(
-                    predictions,
-                    max_signals=MAX_SIGNALS_PER_CYCLE,
-                    min_score=MIN_SIGNAL_SCORE,
-                )
 
             # =================================================================
             # LAYER 13: Gemini AI Master Trader Verification
@@ -864,14 +744,13 @@ async def _auto_signal_job(app: Application):
                                 atr=atr,
                                 news_sentiment="N/A"
                             )
-                            if v["approved"]:
-                                gemini_filtered[sym] = pred
-                                log.info("Gemini APPROVED %s (Conf: %s%%): %s", sym, v.get("gemini_confidence", "?"), v["reason"])
-                            else:
-                                filtered_out[sym] = f"Gemini Veto: {v['reason']}"
-                                log.info("Gemini REJECTED %s (Conf: %s%%): %s", sym, v.get("gemini_confidence", "?"), v["reason"])
-                        else:
+                            # Phase 6: Gemini represents the ultimate Directional Override
+                            # It forces a YES/NO on the current direction, converting the signal.
+                            pred["suggested_direction"] = v["verdict"]
+                            if v.get("gemini_confidence", 0) > 0:
+                                pred["final_confidence_percent"] = v["gemini_confidence"]
                             gemini_filtered[sym] = pred
+                            log.info("Gemini OVERRIDE on %s to %s (Conf: %s%%): %s", sym, v["verdict"], v.get("gemini_confidence", "?"), v["reason"])
                     except Exception as e:
                         log.warning("Gemini integration error on %s: %s", sym, e)
                         gemini_filtered[sym] = pred  # Fail-open

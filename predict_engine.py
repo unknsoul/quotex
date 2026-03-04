@@ -432,32 +432,13 @@ def predict(df, regime):
             kelly_quarter = max(0, kelly_full * 0.25)
             kelly_pct = round(kelly_quarter * 100, 1)
 
-        # Phase 3+4: Adaptive regime filter -- check if we should skip
-        should_skip, skip_reason = _should_skip(regime, confidence_pct, df,
-                                                  ensemble_variance=variance)
-
-        # Trade suggestion (with skip override and EMA alignment gate - Gap 6)
-        if should_skip:
-            trade = "SKIP"
-        else:
-            thresholds = get_regime_thresholds(regime)
-            
-            # Phase 3: 4-EMA Stack Alignment Hard Gate
-            ema_20 = df["ema_20"].iloc[-1]
-            ema_50 = df["ema_50"].iloc[-1]
-            ema_100 = df["ema_100"].iloc[-1]
-            ema_200 = df["ema_200"].iloc[-1]
-            trend_is_up = (ema_20 > ema_50) and (ema_50 > ema_100) and (ema_100 > ema_200)
-            trend_is_down = (ema_20 < ema_50) and (ema_50 < ema_100) and (ema_100 < ema_200)
-            
-            if green_p >= thresholds["primary"] and meta_rel >= thresholds["meta"]:
-                trade = "BUY" if trend_is_up else "HOLD"
-                if trade == "HOLD": skip_reason = "EMA bearish/mixed alignment"
-            elif green_p <= (1 - thresholds["primary"]) and meta_rel >= thresholds["meta"]:
-                trade = "SELL" if trend_is_down else "HOLD"
-                if trade == "HOLD": skip_reason = "EMA bullish/mixed alignment"
-            else:
-                trade = "HOLD"
+        # Phase 6 (Always-On High Frequency Override):
+        # We completely bypass the should_skip regime filters, confidence minimums, 
+        # and EMA alignment gates. The ML engine MUST provide a base directional
+        # bias for every single candle so Gemini can make the final Override decision.
+        should_skip = False
+        skip_reason = ""
+        trade = "BUY" if green_p >= 0.5 else "SELL"
 
         # Update direction history for live parity
         _direction_history.append(1 if green_p >= 0.5 else 0)
