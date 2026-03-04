@@ -86,33 +86,32 @@ _cooldown_until = {}  # {symbol: datetime}
 _last_regime = {}  # {symbol: regime_name} — for transition detection
 _regime_transition_skip = {}  # {symbol: int} — candles to skip
 
-# Signal quality thresholds
-# The 12-layer filter pipeline handles quality — confidence is just one factor
-MIN_CONFIDENCE_FILTER = 28.0   # base minimum (pipeline filters handle quality)
-HIGH_CONF_THRESHOLD = 40.0     # for "high" mode subscribers
+# Signal quality thresholds (DATA-DRIVEN: tuned from 130 signal history)
+# Confidence <42% has 45.8% win rate (losing!) vs >=42% has 70.7%
+MIN_CONFIDENCE_FILTER = 42.0   # raised from 35 — kills the losing 38-42% tier
+HIGH_CONF_THRESHOLD = 45.0     # for "high" mode subscribers
 COOLDOWN_CANDLES = 3
-MAX_CONSECUTIVE_LOSSES = 2     # faster cooldown per symbol
+MAX_CONSECUTIVE_LOSSES = 2     # tightened from 3 — faster cooldown per symbol
 REGIME_SKIP_CANDLES = 2  # skip after regime transition
 
 # Regimes to block entirely (win rate < 50% in historical data)
 BLOCKED_REGIMES = {"High_Volatility"}  # 47.8% win rate = losing
 
-# Symbols to block (empty — let the filter pipeline handle it)
-BLOCKED_SYMBOLS = set()  # removed AUDUSD block — pipeline filters are enough
+# Symbols to block (consistently underperforming)
+BLOCKED_SYMBOLS = {"AUDUSD"}  # 43.8% win rate over 16 signals
 
-# Ensemble disagreement threshold
-MAX_ENSEMBLE_VARIANCE = 0.05   # loosened — let ranking handle quality
-MIN_UNANIMITY = 0.571          # require 4/7 models to agree (57.1%)
+# Ensemble disagreement threshold — skip when models disagree too much
+MAX_ENSEMBLE_VARIANCE = 0.035  # skip if variance > this (models arguing)
+MIN_UNANIMITY = 0.857          # Strategy 2: require 6/7 models to agree (85.7%)
 
-# Strategy 3: Trading session windows (UTC hours)
-# Peak hours get a boost in ranking, off-peak get a small penalty
-# but NO hard block — signals can still come through if strong enough
-PEAK_HOURS_UTC = {8, 9, 10, 11, 12, 13, 14, 16, 17}  # best sessions
-WEAK_HOURS_UTC = {15, 19}  # historically weak hours
+# Strategy 3: Trading session windows (UTC hours that are profitable)
+# 14:00 UTC = 76.7% WR, 16:00 = 60%. Block 15:00 (47.5%) and 19:00 (40%)
+PROFITABLE_HOURS_UTC = {7, 8, 9, 10, 11, 12, 13, 14, 16, 17}  # allowed hours
+BLOCKED_HOURS_UTC = {15, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4, 5, 6}  # blocked
 
 # Strategy 4: Max signals per cycle
 MAX_SIGNALS_PER_CYCLE = 2     # only send top 2 ranked signals
-MIN_SIGNAL_SCORE = 45.0       # minimum composite score to qualify
+MIN_SIGNAL_SCORE = 50.0       # minimum composite score to qualify
 
 # Strategy 5: Consecutive candle confirmation
 _prev_directions = {}  # {symbol: last_predicted_direction}
@@ -443,44 +442,66 @@ def _format_prediction(pred: dict, is_auto=False) -> str:
 
 
 def _format_combined_signal(predictions: dict, filtered: dict) -> str:
-    """Simple plain-text signal message — guaranteed to display on Telegram."""
+    """V3 industry-grade combined signal message with all metrics."""
     now_utc = datetime.now(timezone.utc)
     ist = now_utc + timedelta(hours=5, minutes=30)
+    time_str = f"{now_utc.strftime('%H:%M')} UTC │ {ist.strftime('%H:%M')} IST"
 
-    # Candle close time (next M5 boundary)
-    minute = now_utc.minute
-    next_close_min = ((minute // 5) + 1) * 5
-    close_str = f"{now_utc.hour:02d}:{next_close_min:02d}"
+    # Win rate from recent outcomes
+    recent = _outcome_results[-20:] if _outcome_results else []
+    total_r = len(recent)
+    wins_r = sum(1 for r in recent if r["correct"])
+    wr_pct = f"{wins_r/total_r*100:.0f}%" if total_r > 0 else "—"
+    wr_str = f"{wins_r}/{total_r} ({wr_pct})" if total_r > 0 else "No data"
 
     lines = [
-        "\u26a1\u26a1\u26a1 LIVE SIGNAL \u26a1\u26a1\u26a1",
-        "",
-        "\U0001f451 QUOTEX LORD PRO",
-        f"\u23f0 {now_utc.strftime('%H:%M:%S')} UTC | {ist.strftime('%H:%M')} IST",
-        f"\U0001f4ca Candle closes: {close_str} UTC",
-        "\u2501" * 24,
+        f"🤖 *QUOTEX LORD V3*",
+        f"⏱ {time_str}",
+        f"━━━━━━━━━━━━━━━━━━━━━━━",
     ]
 
     for sym, pred in sorted(predictions.items()):
-        direction = pred["suggested_direction"]
-        arrow = "\U0001f7e2 UP" if direction == "UP" else "\U0001f534 DOWN"
+        d = "🟢" if pred["suggested_direction"] == "UP" else "🔴"
+        arrow = "⬆" if pred["suggested_direction"] == "UP" else "⬇"
         conf = pred["final_confidence_percent"]
+        green = pred["green_probability_percent"]
+        kelly = pred.get("kelly_fraction_percent", 0.0)
         trade = pred["suggested_trade"]
-        agree = pred.get("ensemble_agree_count", "?")
-        total_m = pred.get("ensemble_total", 7)
-        score = pred.get("signal_score", 0)
+        regime = pred.get("market_regime", "")
+        meta_rel = pred.get("meta_reliability_percent", 0)
+        uncertainty = pred.get("uncertainty_percent", 0)
+        session = pred.get("session", "")
+        stability = pred.get("regime_stability", 0)
+        r_e = {"Trending": "📈", "Ranging": "↔️",
+               "High_Volatility": "🔥", "Low_Volatility": "❄️"}.get(regime, "")
+        s_e = {"London": "🇬🇧", "Overlap": "🌐", "Asian": "🌏", "Off": "💤"}.get(session, "")
 
-        lines.append("")
-        lines.append(f"{arrow}  {sym}")
-        lines.append(f"   Confidence: {conf:.0f}%")
-        lines.append(f"   Models: {agree}/{total_m} agree")
-        lines.append(f"   Action: {trade}")
-        lines.append(f"   Score: {score}/100")
+        # Position size from Kelly
+        if kelly > 3: size = "🟢 STRONG"
+        elif kelly > 2: size = "🟡 MEDIUM"
+        elif kelly > 1: size = "🟠 LIGHT"
+        else: size = "⚪ MIN"
 
-    lines.append("")
-    lines.append("\u2501" * 24)
-    lines.append("\U0001f6e1 12-Layer Filter | 7 Models")
-    lines.append(f"\u23f1 Expires: {close_str} UTC")
+        # Confidence bar
+        filled = int(conf / 10)
+        bar = "█" * filled + "░" * (10 - filled)
+
+        lines.append(
+            f"\n{d} *{sym}* {r_e}{s_e} {arrow} *{pred['suggested_direction']}*\n"
+            f"  `[{bar}]` *{conf:.0f}%*\n"
+            f"  Prob *{green:.1f}%* │ Meta *{meta_rel:.0f}%* │ Unc *{uncertainty:.0f}%*\n"
+            f"  Kelly *{kelly:.1f}%* │ {size}\n"
+            f"  💡 *{trade}*"
+        )
+
+    # Footer
+    lines.append(f"\n━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"🎯 Recent: *{wr_str}*")
+    lines.append(f"🏗 V3 Engine │ 14 Layers │ 65 Features")
+
+    if filtered:
+        reasons = [f"{s}({r})" for s, r in filtered.items()]
+        lines.append(f"⏭ Filtered: _{', '.join(reasons[:3])}_")
 
     return "\n".join(lines)
 
@@ -578,35 +599,23 @@ async def _auto_signal_job(app: Application):
 
             # Filter: skip symbols with score < 18/30
             tradeable = {s for s in needed_symbols if _pair_scores.get(s, 25) >= 18}
-            skipped = needed_symbols - tradeable
+            skipped   = needed_symbols - tradeable
             if skipped:
                 log.info('Pair selector skipped %s (low score)', skipped)
             needed_symbols = tradeable
 
             # Weekend check (Sat/Sun)
             now_utc = datetime.now(timezone.utc)
-            if now_utc.weekday() >= 5:
+            if now_utc.weekday() >= 5:  # Saturday=5, Sunday=6
                 log.info("Auto-signal: market closed (weekend). Sleeping 30 min.")
                 await asyncio.sleep(1800)
                 continue
 
-            # Session hour info (soft — no hard block)
-            current_hour = now_utc.hour
-
             predictions = {}
             filtered_out = {}
-            _prefetched_data = {}  # cache MT5 data per symbol
-
             for sym in needed_symbols:
                 try:
-                    # FAST CHECKS FIRST (no data fetch needed)
-
-                    # Quick: blocked symbol?
-                    if sym in BLOCKED_SYMBOLS:
-                        filtered_out[sym] = "blocked symbol"
-                        continue
-
-                    # Quick: cooldown check
+                    # 1. Cooldown check
                     if sym in _cooldown_until:
                         if datetime.now(timezone.utc) < _cooldown_until[sym]:
                             filtered_out[sym] = "cooldown"
@@ -625,10 +634,13 @@ async def _auto_signal_job(app: Application):
                     trade = pred["suggested_trade"]
                     regime = pred.get("market_regime", "Unknown")
 
-                    # 3. Regime transition detection (log only, don't block)
+                    # 3. Regime transition detection
                     prev_regime = _last_regime.get(sym)
                     if prev_regime and regime != prev_regime:
-                        log.info("Regime shift %s: %s -> %s", sym, prev_regime, regime)
+                        _regime_transition_skip[sym] = REGIME_SKIP_CANDLES
+                        filtered_out[sym] = f"regime changed {prev_regime}→{regime}"
+                        log.info("REGIME SHIFT %s: %s -> %s, pausing %d candles",
+                                 sym, prev_regime, regime, REGIME_SKIP_CANDLES)
                     _last_regime[sym] = regime
 
                     # Log EVERY prediction to CSV (before filtering)
@@ -642,10 +654,9 @@ async def _auto_signal_job(app: Application):
                     if conf < active_min_conf:
                         filtered_out[sym] = f"low-conf ({conf:.0f}%)"
                         continue
-                    # If model says HOLD, convert to BUY/SELL based on direction
-                    if trade == "HOLD":
-                        trade = "BUY" if pred["suggested_direction"] == "UP" else "SELL"
-                        pred["suggested_trade"] = trade
+                    if trade == "HOLD" and conf < 42:
+                        filtered_out[sym] = "HOLD signal"
+                        continue
                     if sym in filtered_out:  # regime transition
                         continue
 
@@ -681,15 +692,29 @@ async def _auto_signal_job(app: Application):
                         filtered_out[sym] = f"split vote ({agree}/{total})"
                         continue
 
-                    # (Session hour is now soft — no hard block)
-
-                    current_dir = pred["suggested_direction"]
+                    # =========================================================
+                    # STRATEGY 3: Session Hour Window
+                    # =========================================================
+                    current_hour = now_utc.hour
+                    if current_hour in BLOCKED_HOURS_UTC:
+                        filtered_out[sym] = f"off-hours ({current_hour}:00 UTC)"
+                        continue
 
                     # =========================================================
-                    # STRATEGY 1: Multi-TF Confluence (reuse cached data)
+                    # STRATEGY 5: Consecutive Candle Confirmation
+                    # =========================================================
+                    current_dir = pred["suggested_direction"]
+                    prev_dir = _prev_directions.get(sym)
+                    _prev_directions[sym] = current_dir  # always update
+                    if prev_dir is not None and prev_dir != current_dir:
+                        filtered_out[sym] = f"direction flip ({prev_dir}->{current_dir})"
+                        continue
+
+                    # =========================================================
+                    # STRATEGY 1: Multi-TF Confluence
                     # =========================================================
                     try:
-                        data_mtf = _prefetched_data.get(sym, {})
+                        data_mtf = fetch_multi_timeframe(sym, 50)
                         confl = check_confluence(
                             m5_df=data_mtf.get('M5'),
                             m15_df=data_mtf.get('M15'),
@@ -706,11 +731,13 @@ async def _auto_signal_job(app: Application):
                         pred["confluence_score"] = 3  # benefit of doubt
 
                     # =========================================================
-                    # UPGRADE 2: Candle Pattern (info only, don't block)
+                    # UPGRADE 2: Candle Pattern Confirmation
                     # =========================================================
                     try:
                         cp = pattern_confirms(data.get('M5'), current_dir)
-                        pred["candle_pattern"] = cp.get("patterns", [])
+                        if not cp["confirmed"] and cp["patterns"]:
+                            filtered_out[sym] = cp["reason"]
+                            continue
                     except Exception as e:
                         log.debug("Candle pattern check error %s: %s", sym, e)
 
@@ -806,11 +833,10 @@ async def _auto_signal_job(app: Application):
 
                 msg = _format_combined_signal(sub_preds, filtered_out)
                 try:
-                    log.info("SENDING SIGNAL to chat %s: %d symbols [%s]",
-                             chat_id, len(sub_preds), ', '.join(sub_preds.keys()))
                     await bot.send_message(
                         chat_id=int(chat_id),
                         text=msg,
+                        parse_mode="Markdown",
                     )
                 except Exception as e:
                     log.error("Failed to send to %s: %s", chat_id, e)
