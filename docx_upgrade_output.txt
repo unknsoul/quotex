@@ -1,0 +1,125 @@
+
+QUOTEX-LORD v10
+UPGRADE STATUS REPORT
+Post-Audit Fix Verification  ·  March 2026
+
+
+⚠  MODEL MUST BE RETRAINED — config fixes alone do NOT update the live model
+
+1. OVERALL UPGRADE STATUS — QUICK VIEW
+
+
+2. CONFIRMED FIXES — WHAT IS NOW WORKING
+
+Gap 1 — Triple Barrier Labels Fixed ✅
+
+The most critical fix is confirmed. config.py now reads:
+
+
+
+Also confirmed: feature_engineering.py correctly reads these values from config via add_target_triple_barrier() which calls label_triple_barrier(df, tp_mult=TRIPLE_BARRIER_TP, sl_mult=TRIPLE_BARRIER_SL, max_bars=TRIPLE_BARRIER_MAX_BARS). The pipeline is correct — just needs a retrain run.
+
+
+
+Gap 3 — Signal Thresholds Raised ✅
+
+
+The critical meta=0.45 threshold for Trending regime is now 0.55 — meaning the system will only trade when the meta model says the primary signal is MORE likely right than wrong. This alone will reduce noise signals significantly.
+
+Gaps 4, 5, 7 — Filter Chain Now Correctly Blocks ✅
+
+Three filter gaps were confirmed fixed together:
+
+Confluence filter: benefit-of-doubt score += 1 lines removed for missing M15/H1 data. When both are missing, score=0 or 1, which fails min_score=2 → signal blocked.
+Candle pattern: condition changed from if not cp['confirmed'] and cp['patterns'] → now simply if not cp['confirmed']. Contradicting patterns block the signal even when no confirming patterns exist.
+All 3 exception handlers (confluence, candle, news) now call log.warning(), set filtered_out[sym], and continue — signals no longer auto-pass on errors.
+
+Gap 8 — Session Hours Now Correct ✅
+
+The get_session() function was fixed and verified:
+
+
+Gap 9 — Direction Flip Only Blocked in Ranging Regime ✅
+
+Strategy 5 now correctly allows trend reversals to pass in non-Ranging regimes:
+
+
+Gap 2 — Context Features Added ✅
+
+Two new features were added to feature_engineering.py and included in FEATURE_COLUMNS:
+
+
+
+
+3. PARTIAL FIXES — NEEDS STRENGTHENING
+
+Gap 6 — EMA Alignment Gate: Weak (2-EMA only) ⚠️
+
+
+Current implementation in predict_engine.py:
+
+
+Recommended fix — strengthen to full 4-EMA stack:
+
+
+Gap 12 — Regime Detection: EMA Stack Not Added ⚠️
+
+The predict_engine.py now uses a basic 2-EMA gate, but regime_detection.py's detect_regime() function was not upgraded. It still classifies regime using only ATR + ADX + EMA-50 slope — missing the full EMA stack alignment check.
+
+Why this matters: During a strong trend where EMA20 > EMA50 > EMA200 and price is above all, the regime detector may still return 'Ranging' if ADX is below 25 (which happens during steady trends that are not explosive). This causes the predict_engine to apply Ranging thresholds (0.59/0.55) instead of Trending (0.58/0.55) — a minor difference but also misclassifies the regime label passed to meta model.
+
+
+4. MISSING FIXES — STILL OPEN
+
+Gap 10 — Kelly Sizing 0.51 Floor Still Present ❌
+
+
+Current code:
+
+
+Required fix:
+
+
+Gap 11 — Online Learner Premature Blending Still Present ❌
+
+
+Current code:
+
+
+Required fix:
+
+
+Gap 13 — Backtest Still Not Run ❌
+
+
+The backtest_results.txt file shows the backtest script crashed with a numpy import error. This must be resolved before any future deployment. Minimum requirement: run backtest.py on the last 30 days of data after each retrain and confirm accuracy > 62% before going live.
+
+
+5. THE SINGLE MOST IMPORTANT NEXT STEP
+
+
+Why the current accuracy is still 52–57% despite the fixes:
+config.py changes to Triple Barrier settings have NO effect on the currently loaded model files (ensemble_models.pkl, meta_model.pkl). The model was already compiled and saved to disk.
+The higher signal thresholds (0.58/0.55) are now correctly rejecting many bad signals — so the system is sending fewer signals. But the ones that do pass are still coming from a model trained on inverted labels.
+The new features (momentum_in_trend, momentum_vs_ema) are computed correctly but the loaded model doesn't know about them — it was trained before they existed.
+
+Retrain command sequence:
+
+
+6. REMAINING TODO CHECKLIST
+
+Immediate (Do Before Next Live Session):
+Retrain model: python train_model.py --symbol EURUSD
+Run backtest.py and confirm OOS accuracy > 62% before going live
+
+Short-Term (This Week):
+Strengthen EMA gate: replace 2-EMA check with full 4-EMA stack in predict_engine.py (Gap 6)
+Fix Kelly floor: remove 0.51 min and add confidence < 60% zero-size rule (Gap 10)
+Fix online learner: raise threshold to 200 updates, lower max blend to 10% (Gap 11)
+Update triple_barrier_labeler.py DEFAULT constants (SL=1.5, max_bars=12) for clarity
+
+Medium-Term (Next Week):
+Add EMA stack alignment to detect_regime() in regime_detection.py (Gap 12)
+Add dynamic min_score logic to confluence_filter.py based on available TF count
+
+QUOTEX-LORD v10 — Upgrade Status Report  |  March 2026  |  Confidential — Internal Use Only

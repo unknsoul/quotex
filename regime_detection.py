@@ -40,9 +40,19 @@ def detect_regime(df: pd.DataFrame) -> str:
     if len(ema_slice) >= 2:
         slope = (ema_slice.iloc[-1] - ema_slice.iloc[0]) / (ema_slice.iloc[0] + 1e-10)
 
-    if adx_now > ADX_TRENDING_THRESHOLD and abs(slope) > 0.0001:
+    # Phase 3 Gap 12: 4-EMA Stack Alignment Check
+    ema_20 = latest.get("ema_20", 0)
+    ema_50 = latest.get("ema_50", 0)
+    ema_100 = latest.get("ema_100", 0)
+    ema_200 = latest.get("ema_200", 0)
+    
+    bull_stack = (ema_20 > ema_50) and (ema_50 > ema_100) and (ema_100 > ema_200)
+    bear_stack = (ema_20 < ema_50) and (ema_50 < ema_100) and (ema_100 < ema_200)
+    ema_aligned = bull_stack or bear_stack
+
+    if (adx_now > ADX_TRENDING_THRESHOLD and abs(slope) > 0.0001) or ema_aligned:
         return "Trending"
-    if adx_now < ADX_RANGING_THRESHOLD:
+    if adx_now < ADX_RANGING_THRESHOLD and not ema_aligned:
         return "Ranging"
 
     return "Ranging"

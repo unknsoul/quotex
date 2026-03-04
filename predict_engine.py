@@ -352,11 +352,11 @@ def predict(df, regime):
         meta_input = pd.DataFrame([meta_row])[meta_feat_cols]
         meta_rel = float(meta_model.predict_proba(meta_input.values)[0][1])
 
-        # Blend online learner prediction after 30+ updates (ramps to 20%)
-        if _online_learner.n_updates >= 30:
+        # Phase 3: Blend online learner prediction after 200+ updates (ramps to 10%)
+        if _online_learner.n_updates >= 200:
             try:
                 ol_pred     = _online_learner.predict(meta_row)
-                blend       = min(0.20, _online_learner.n_updates / 500)
+                blend       = min(0.10, _online_learner.n_updates / 2000)
                 meta_rel    = (1 - blend) * meta_rel + blend * float(ol_pred)
             except Exception as e:
                 log.debug('Online blend skipped: %s', e)
@@ -423,10 +423,14 @@ def predict(df, regime):
         adaptive_conf = _adaptive_confidence(confidence_pct)
 
         # Kelly criterion position sizing (quarter-Kelly for safety)
-        win_prob = max(min(green_p if green_p >= 0.5 else (1 - green_p), 0.99), 0.51)
-        kelly_full = 2 * win_prob - 1
-        kelly_quarter = max(0, kelly_full * 0.25)
-        kelly_pct = round(kelly_quarter * 100, 1)
+        # Phase 3: Remove 0.51 floor, restrict if confidence < 60
+        win_prob = min(green_p if green_p >= 0.5 else (1 - green_p), 0.99)
+        if confidence_pct < 60.0:
+            kelly_pct = 0.0
+        else:
+            kelly_full = 2 * win_prob - 1
+            kelly_quarter = max(0, kelly_full * 0.25)
+            kelly_pct = round(kelly_quarter * 100, 1)
 
         # Phase 3+4: Adaptive regime filter -- check if we should skip
         should_skip, skip_reason = _should_skip(regime, confidence_pct, df,
@@ -438,18 +442,20 @@ def predict(df, regime):
         else:
             thresholds = get_regime_thresholds(regime)
             
-            # Phase 1: EMA Alignment Hard Gate
+            # Phase 3: 4-EMA Stack Alignment Hard Gate
+            ema_20 = df["ema_20"].iloc[-1]
             ema_50 = df["ema_50"].iloc[-1]
+            ema_100 = df["ema_100"].iloc[-1]
             ema_200 = df["ema_200"].iloc[-1]
-            trend_is_up = ema_50 > ema_200
-            trend_is_down = ema_50 < ema_200
+            trend_is_up = (ema_20 > ema_50) and (ema_50 > ema_100) and (ema_100 > ema_200)
+            trend_is_down = (ema_20 < ema_50) and (ema_50 < ema_100) and (ema_100 < ema_200)
             
             if green_p >= thresholds["primary"] and meta_rel >= thresholds["meta"]:
                 trade = "BUY" if trend_is_up else "HOLD"
-                if trade == "HOLD": skip_reason = "EMA bearish alignment"
+                if trade == "HOLD": skip_reason = "EMA bearish/mixed alignment"
             elif green_p <= (1 - thresholds["primary"]) and meta_rel >= thresholds["meta"]:
                 trade = "SELL" if trend_is_down else "HOLD"
-                if trade == "HOLD": skip_reason = "EMA bullish alignment"
+                if trade == "HOLD": skip_reason = "EMA bullish/mixed alignment"
             else:
                 trade = "HOLD"
 

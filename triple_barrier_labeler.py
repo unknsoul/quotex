@@ -19,8 +19,8 @@ log = logging.getLogger("triple_barrier")
 
 # Defaults from V3 spec
 DEFAULT_TP_MULT = 1.5
-DEFAULT_SL_MULT = 1.0
-DEFAULT_MAX_BARS = 4
+DEFAULT_SL_MULT = 1.5
+DEFAULT_MAX_BARS = 12
 
 
 def label_triple_barrier(df, tp_mult=DEFAULT_TP_MULT, sl_mult=DEFAULT_SL_MULT,
