@@ -671,13 +671,10 @@ async def _auto_signal_job(app: Application):
                     trade = pred["suggested_trade"]
                     regime = pred.get("market_regime", "Unknown")
 
-                    # 3. Regime transition detection
+                    # 3. Regime transition detection (log only, don't block)
                     prev_regime = _last_regime.get(sym)
                     if prev_regime and regime != prev_regime:
-                        _regime_transition_skip[sym] = REGIME_SKIP_CANDLES
-                        filtered_out[sym] = f"regime changed {prev_regime}→{regime}"
-                        log.info("REGIME SHIFT %s: %s -> %s, pausing %d candles",
-                                 sym, prev_regime, regime, REGIME_SKIP_CANDLES)
+                        log.info("Regime shift %s: %s -> %s", sym, prev_regime, regime)
                     _last_regime[sym] = regime
 
                     # Log EVERY prediction to CSV (before filtering)
@@ -755,13 +752,11 @@ async def _auto_signal_job(app: Application):
                         pred["confluence_score"] = 3  # benefit of doubt
 
                     # =========================================================
-                    # UPGRADE 2: Candle Pattern Confirmation
+                    # UPGRADE 2: Candle Pattern (info only, don't block)
                     # =========================================================
                     try:
                         cp = pattern_confirms(data.get('M5'), current_dir)
-                        if not cp["confirmed"] and cp["patterns"]:
-                            filtered_out[sym] = cp["reason"]
-                            continue
+                        pred["candle_pattern"] = cp.get("patterns", [])
                     except Exception as e:
                         log.debug("Candle pattern check error %s: %s", sym, e)
 
