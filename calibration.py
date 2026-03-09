@@ -1,12 +1,17 @@
 """
-Calibration v3 — 5 seeded XGBoost + isotonic calibration.
+Calibration v4 — heterogeneous calibrated primary ensemble.
 
-Ensemble: 5 XGBoost models with different seeds and hyperparams.
-Each model is calibrated with isotonic regression on a held-out calibration slice.
+Ensemble: XGBoost + HistGradientBoosting + ExtraTrees + RandomForest.
+Each member is calibrated with isotonic regression on a held-out calibration slice.
 """
 
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
+from sklearn.ensemble import (
+    ExtraTreesClassifier,
+    HistGradientBoostingClassifier,
+    RandomForestClassifier,
+)
 import xgboost as xgb
 
 
@@ -42,66 +47,157 @@ def build_calibrated_model(base_model, X_val, y_val, name="model"):
     return CalibratedModel(base_model, iso, name=name)
 
 
+def _sample_weight(y, spw):
+    y_arr = np.asarray(y)
+    return np.where(y_arr == 1, float(spw), 1.0)
+
+
+def _time_decay_weights(n_samples, half_life_ratio=0.3):
+    """Exponential time-decay: recent samples weighted more heavily.
+    half_life_ratio=0.3 means the weight halves at 30% from the start."""
+    positions = np.linspace(0, 1, n_samples)
+    decay = np.exp(-np.log(2) * (1 - positions) / max(half_life_ratio, 0.01))
+    return decay / decay.mean()  # normalize so mean weight = 1.0
+
+
+def get_primary_model_specs():
+    """Primary production ensemble specs ordered by intended diversity."""
+    return [
+        {
+            "model_type": "xgb",
+            "name": "XGB_recent_fast",
+            "window_ratio": 0.45,
+            "params": {"max_depth": 3, "learning_rate": 0.015, "n_estimators": 280,
+                       "min_child_weight": 15, "reg_alpha": 0.5, "reg_lambda": 3.0,
+                       "gamma": 2.0, "subsample": 0.75, "colsample_bytree": 0.7},
+        },
+        {
+            "model_type": "xgb",
+            "name": "XGB_full_conservative",
+            "window_ratio": 1.0,
+            "params": {"max_depth": 4, "learning_rate": 0.008, "n_estimators": 350,
+                       "min_child_weight": 18, "reg_alpha": 1.0, "reg_lambda": 5.0,
+                       "gamma": 3.0, "subsample": 0.7, "colsample_bytree": 0.65},
+        },
+        {
+            "model_type": "hist_gb",
+            "name": "HistGB_full",
+            "window_ratio": 1.0,
+            "params": {"max_depth": 4, "learning_rate": 0.03, "max_iter": 280,
+                       "min_samples_leaf": 25, "l2_regularization": 0.5},
+        },
+        {
+            "model_type": "extra_trees",
+            "name": "ExtraTrees_structural",
+            "window_ratio": 1.0,
+            "params": {"n_estimators": 400, "max_depth": 6, "min_samples_leaf": 18},
+        },
+        {
+            "model_type": "random_forest",
+            "name": "RF_balanced_recent",
+            "window_ratio": 0.7,
+            "params": {"n_estimators": 350, "max_depth": 5, "min_samples_leaf": 20},
+        },
+    ]
+
+
+def fit_model_from_spec(spec, X_train, y_train, spw=1.0, seed=42):
+    """Fit a single heterogeneous ensemble member from a spec."""
+    params = spec.get("params", {})
+    model_type = spec["model_type"]
+    class_weights = _sample_weight(y_train, spw)
+    # Apply time-decay weighting: recent samples get higher weight
+    time_weights = _time_decay_weights(len(y_train), half_life_ratio=0.3)
+    weights = class_weights * time_weights
+
+    if model_type == "xgb":
+        model = xgb.XGBClassifier(
+            n_estimators=params.get("n_estimators", 280),
+            max_depth=params.get("max_depth", 4),
+            learning_rate=params.get("learning_rate", 0.015),
+            subsample=params.get("subsample", 0.75),
+            colsample_bytree=params.get("colsample_bytree", 0.7),
+            scale_pos_weight=1.0,  # handled via sample_weight
+            objective="binary:logistic",
+            eval_metric="logloss",
+            use_label_encoder=False,
+            random_state=seed,
+            verbosity=0,
+            min_child_weight=params.get("min_child_weight", 15),
+            reg_alpha=params.get("reg_alpha", 0.5),
+            reg_lambda=params.get("reg_lambda", 3.0),
+            gamma=params.get("gamma", 2.0),
+        )
+        model.fit(X_train, y_train, sample_weight=weights, verbose=False)
+        return model
+
+    if model_type == "hist_gb":
+        model = HistGradientBoostingClassifier(
+            max_depth=params.get("max_depth", 4),
+            learning_rate=params.get("learning_rate", 0.04),
+            max_iter=params.get("max_iter", 220),
+            min_samples_leaf=params.get("min_samples_leaf", 20),
+            l2_regularization=params.get("l2_regularization", 0.2),
+            random_state=seed,
+        )
+        model.fit(X_train, y_train, sample_weight=weights)
+        return model
+
+    if model_type == "extra_trees":
+        model = ExtraTreesClassifier(
+            n_estimators=params.get("n_estimators", 320),
+            max_depth=params.get("max_depth", 7),
+            min_samples_leaf=params.get("min_samples_leaf", 12),
+            class_weight="balanced_subsample",
+            random_state=seed,
+            n_jobs=-1,
+        )
+        model.fit(X_train, y_train, sample_weight=weights)
+        return model
+
+    if model_type == "random_forest":
+        model = RandomForestClassifier(
+            n_estimators=params.get("n_estimators", 280),
+            max_depth=params.get("max_depth", 6),
+            min_samples_leaf=params.get("min_samples_leaf", 14),
+            class_weight="balanced_subsample",
+            random_state=seed,
+            n_jobs=-1,
+        )
+        model.fit(X_train, y_train, sample_weight=weights)
+        return model
+
+    raise ValueError(f"Unsupported model type: {model_type}")
+
+
 def build_seeded_xgb_ensemble(X_train, y_train, X_cal, y_cal, spw=1.0,
                                xgb_params=None, seeds=None, temporal=True):
     """
-    Build a 5-model XGBoost ensemble with different seeds and hyperparams.
+    Build the production primary ensemble.
 
-    Each model uses a different temporal window of training data:
-      - Seed 1: depth=6, LR=0.03, 40% window (recent patterns)
-      - Seed 2: depth=4, LR=0.05, 70% window (balanced)
-      - Seed 3: depth=5, LR=0.05, 100% window (full history)
-      - Seed 4: depth=3, LR=0.08, 50% window (shallow, fast learner)
-      - Seed 5: depth=5, LR=0.03, 100% window (conservative)
-
-    Returns list of CalibratedModel.
+    The public function name is preserved for compatibility, but the ensemble
+    is now heterogeneous to reduce shared blind spots across model members.
     """
     if seeds is None:
         seeds = [42, 123, 456, 789, 1024]
-    if xgb_params is None:
-        xgb_params = {}
-
-    n_est = xgb_params.get("n_estimators", 400)
-    ss = xgb_params.get("subsample", 0.8)
-    cs = xgb_params.get("colsample_bytree", 0.8)
-
-    # Each model spec: (params, temporal_window_ratio)
-    # Heavily regularized to prevent overfitting on noisy M5 data
-    model_specs = [
-        ({"max_depth": 3, "learning_rate": 0.01, "n_estimators": 200}, 0.4),
-        ({"max_depth": 3, "learning_rate": 0.02, "n_estimators": 200}, 0.7),
-        ({"max_depth": 4, "learning_rate": 0.02, "n_estimators": 200}, 1.0),
-        ({"max_depth": 2, "learning_rate": 0.03, "n_estimators": 150}, 0.5),
-        ({"max_depth": 3, "learning_rate": 0.01, "n_estimators": 250}, 1.0),
-    ]
-
+    model_specs = get_primary_model_specs()
     if not temporal or len(X_train) <= 1000:
-        model_specs = [(p, 1.0) for p, _ in model_specs]
+        model_specs = [{**spec, "window_ratio": 1.0} for spec in model_specs]
 
     ensemble = []
-    for idx, (params, ratio) in enumerate(model_specs):
+    for idx, spec in enumerate(model_specs):
         seed = seeds[idx] if idx < len(seeds) else 42 + idx
 
         # Temporal windowing
         n_rows = len(X_train)
+        ratio = spec.get("window_ratio", 1.0)
         start = n_rows - int(n_rows * ratio)
         X_tr = X_train.iloc[start:]
         y_tr = y_train[start:]
         window_pct = int(ratio * 100)
 
-        model = xgb.XGBClassifier(
-            n_estimators=params.get("n_estimators", n_est),
-            max_depth=params["max_depth"],
-            learning_rate=params["learning_rate"],
-            subsample=ss, colsample_bytree=cs,
-            scale_pos_weight=spw,
-            objective="binary:logistic", eval_metric="logloss",
-            use_label_encoder=False, random_state=seed, verbosity=0,
-            min_child_weight=10, reg_alpha=1.0, reg_lambda=5.0,
-            gamma=1.0,
-        )
-        model.fit(X_tr, y_tr, verbose=False)
-        name = f"XGB_d{params['max_depth']}_lr{params['learning_rate']}_{window_pct}pct"
+        model = fit_model_from_spec(spec, X_tr, y_tr, spw=spw, seed=seed)
+        name = f"{spec['name']}_{window_pct}pct"
 
         cal = build_calibrated_model(model, X_cal, y_cal, name=name)
         ensemble.append(cal)

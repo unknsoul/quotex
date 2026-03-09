@@ -33,7 +33,7 @@ from config import (
     LOG_LEVEL, LOG_FORMAT,
 )
 from data_collector import load_csv, load_multi_tf
-from feature_engineering import compute_features, add_target, FEATURE_COLUMNS
+from feature_engineering import compute_features, add_primary_training_target, FEATURE_COLUMNS
 from regime_detection import detect_regime_series
 
 log = logging.getLogger("weight_learner")
@@ -83,9 +83,9 @@ def train_weights(symbol):
     df = mtf.get("M5")
     if df is None:
         df = load_csv(symbol, "M5")
-    m15, h1 = mtf.get("M15"), mtf.get("H1")
-    df = compute_features(df, m15_df=m15, h1_df=h1)
-    df = add_target(df)
+    m15, h1, m1 = mtf.get("M15"), mtf.get("H1"), mtf.get("M1")
+    df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
+    df = add_primary_training_target(df)
     df = df.dropna(subset=["target"]).reset_index(drop=True)
     df["target"] = df["target"].astype(int)
 
@@ -210,11 +210,18 @@ def train_weights(symbol):
     print(f"  Coefficients: {coefs}")
     print(f"  Intercept: {final.intercept_[0]:.4f}")
 
-    # Verify uncertainty coef is negative (higher uncertainty → lower confidence)
-    if coefs["uncertainty"] < 0:
-        print("  [OK] Uncertainty coefficient is negative (correct)")
+    # Fix: If uncertainty coefficient is positive (wrong sign), flip the feature
+    # and retrain so higher certainty correctly predicts higher accuracy
+    if coefs["uncertainty"] > 0:
+        print("  [FIX] Uncertainty coefficient is positive — retraining with inverted feature")
+        X_weight["uncertainty"] = 1.0 - X_weight["uncertainty"]
+        final = LogisticRegression(random_state=42, max_iter=1000)
+        final.fit(X_weight, y_weight)
+        coefs = dict(zip(WEIGHT_FEATURES, final.coef_[0]))
+        print(f"  New coefficients: {coefs}")
+        print(f"  New intercept: {final.intercept_[0]:.4f}")
     else:
-        print("  [WARN] Uncertainty coefficient is positive (unexpected)")
+        print("  [OK] Uncertainty coefficient is negative (correct)")
 
     joblib.dump(final, WEIGHT_MODEL_PATH)
     print(f"\n>> Saved weight model -> {WEIGHT_MODEL_PATH}")

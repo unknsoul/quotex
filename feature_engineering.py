@@ -18,6 +18,7 @@ from config import (
     VOLATILITY_ROLLING, MOMENTUM_ROLLING, RETURN_LOOKBACK,
     RANGE_POSITION_WINDOW, LIQUIDITY_SWEEP_WINDOW,
     VOLATILITY_ZSCORE_WINDOW, ATR_PERCENTILE_WINDOW,
+    TARGET_LOOKAHEAD,
     SESSION_ASIA, SESSION_LONDON, SESSION_NEW_YORK,
     LOG_LEVEL, LOG_FORMAT,
 )
@@ -91,6 +92,11 @@ FEATURE_COLUMNS = [
     "tick_vol_accel_1", "tick_vol_accel_2", "dollar_strength_proxy",
     # Phase 8 (Deep Microstructure M1)
     "trade_intensity", "cumulative_delta", "m1_absorption",
+    # Phase 9 (Accuracy Maximization)
+    "rsi_mean_reversion", "vol_contraction",
+    "momentum_quality_5", "momentum_quality_10",
+    "vwap_distance", "rejection_ratio",
+    "trend_exhaustion_10", "range_expansion", "bb_position",
 ]
 
 
@@ -123,8 +129,13 @@ def _atr(high, low, close, period):
 def _adx(high, low, close, period):
     plus_dm = high.diff()
     minus_dm = -low.diff()
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    # Standard DM: keep the larger positive move, zero out the other
+    both_neg = (plus_dm <= 0) & (minus_dm <= 0)
+    plus_bigger = plus_dm > minus_dm
+    plus_dm = plus_dm.where(plus_bigger & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where(~plus_bigger & (minus_dm > 0), 0.0)
+    plus_dm[both_neg] = 0.0
+    minus_dm[both_neg] = 0.0
     tr1 = high - low
     tr2 = (high - close.shift(1)).abs()
     tr3 = (low - close.shift(1)).abs()
@@ -229,11 +240,11 @@ def compute_htf_features(m5_df, m15_df=None, h1_df=None):
 
         h1_merge = h1[["time", "h1_trend_direction", "h1_ema_alignment", "h1_atr"]].copy()
         h1_merge = h1_merge.sort_values("time")
-        # Phase 4 FIX: shift H1 time forward by 1 hour to prevent leakage
-        # This ensures we only use COMPLETED H1 bars (not the one still forming)
-        h1_merge["time"] = h1_merge["time"] + pd.Timedelta(hours=1)
-        h1_merge = _normalize_time(h1_merge)  # re-normalize after Timedelta op
-        df = _normalize_time(df)  # ensure df time is also [ns, UTC]
+        # merge_asof direction="backward" already ensures we only use
+        # H1 bars whose timestamp <= M5 timestamp (i.e. completed bars).
+        # No time shift needed — shifting forward BREAKS the alignment.
+        h1_merge = _normalize_time(h1_merge)
+        df = _normalize_time(df)
         df = df.sort_values("time")
         df = pd.merge_asof(df, h1_merge, on="time", direction="backward")
     else:
@@ -252,10 +263,9 @@ def compute_htf_features(m5_df, m15_df=None, h1_df=None):
 
         m15_merge = m15[["time", "m15_momentum"]].copy()
         m15_merge = m15_merge.sort_values("time")
-        # Phase 4 FIX: shift M15 time forward by 15 min to prevent leakage
-        m15_merge["time"] = m15_merge["time"] + pd.Timedelta(minutes=15)
-        m15_merge = _normalize_time(m15_merge)  # re-normalize after Timedelta op
-        df = _normalize_time(df)  # ensure df time is also [ns, UTC]
+        # merge_asof direction="backward" already uses only completed M15 bars.
+        m15_merge = _normalize_time(m15_merge)
+        df = _normalize_time(df)
         df = pd.merge_asof(df, m15_merge, on="time", direction="backward")
     else:
         df["m15_momentum"] = 0.0
@@ -594,6 +604,49 @@ def compute_features(df, m15_df=None, h1_df=None, m1_df=None):
     else:
         df["minute_sin"] = 0.0
 
+    # --- Phase 9 (Accuracy Maximization Features) ---
+    
+    # 1. RSI mean-reversion signal: distance from 50 combined with recent change
+    rsi_dist = (df["rsi_14"] - 50) / 50  # normalized -1 to +1
+    rsi_chg = df["rsi_14"].diff(3).fillna(0)
+    df["rsi_mean_reversion"] = -rsi_dist * np.sign(rsi_chg)  # positive when reverting
+    
+    # 2. Volatility contraction/expansion ratio (narrow range = breakout pending)
+    atr_fast = _atr(df["high"], df["low"], df["close"], 5)
+    atr_slow = _atr(df["high"], df["low"], df["close"], 20)
+    df["vol_contraction"] = atr_fast / (atr_slow + 1e-10)
+    
+    # 3. Momentum quality: consistency of returns direction in window
+    ret_sign = (returns > 0).astype(float)
+    df["momentum_quality_5"] = ret_sign.rolling(5, min_periods=2).mean()  # 1.0 = all green
+    df["momentum_quality_10"] = ret_sign.rolling(10, min_periods=3).mean()
+    
+    # 4. Price distance from VWAP proxy (tick_volume weighted average)
+    if "tick_volume" in df.columns:
+        tv = df["tick_volume"].astype(float).replace(0, 1)
+        vwap = (c * tv).rolling(20, min_periods=5).sum() / tv.rolling(20, min_periods=5).sum()
+        df["vwap_distance"] = (c - vwap) / (atr_raw + 1e-10)
+    else:
+        df["vwap_distance"] = 0.0
+    
+    # 5. Candle rejection ratio: wick vs body tells conviction
+    total_wick = (h - pd.concat([o, c], axis=1).max(axis=1)) + (pd.concat([o, c], axis=1).min(axis=1) - l)
+    body = (c - o).abs()
+    df["rejection_ratio"] = total_wick / (body + total_wick + 1e-10)
+    
+    # 6. Trend exhaustion: how far has price moved relative to ATR in the window
+    df["trend_exhaustion_10"] = c.pct_change(10).abs() / (df["atr_14"] + 1e-10)
+    
+    # 7. High-low range relative to recent average (expanding/contracting range)
+    bar_range = h - l
+    avg_range = bar_range.rolling(20, min_periods=5).mean()
+    df["range_expansion"] = bar_range / (avg_range + 1e-10)
+    
+    # 8. Close position within Bollinger Bands (normalized -1 to +1)
+    bb_upper = bb_mid + BB_STD * bb_std
+    bb_lower = bb_mid - BB_STD * bb_std
+    df["bb_position"] = (c - bb_lower) / (bb_upper - bb_lower + 1e-10) * 2 - 1
+
     # Drop warmup
     warmup = max(EMA_200, BB_PERIOD, ATR_PERIOD, RSI_PERIOD, MACD_SLOW,
                  ADX_PERIOD, STOCH_K_PERIOD, ROLLING_STD_PERIOD,
@@ -656,6 +709,16 @@ def add_target_smoothed(df, lookahead=3):
     log.info("Smoothed target (lookahead=%d): %d valid (%d green, %d red, %.1f%% green)",
              lookahead, valid, ones, zeros, ones / valid * 100 if valid else 0)
     return df
+
+
+def add_primary_training_target(df):
+    """
+    Canonical primary target used across train/meta/weight/threshold stages.
+
+    Keeping a single label definition prevents silent OOF index drift between
+    the primary model and second-stage models.
+    """
+    return add_target_smoothed(df, lookahead=TARGET_LOOKAHEAD)
 
 
 def add_target_atr_filtered(df, threshold=None):

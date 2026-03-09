@@ -20,6 +20,29 @@ logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 REGIMES = ("Trending", "Ranging", "High_Volatility", "Low_Volatility")
 
 
+def get_trend_alignment(row: pd.Series) -> int:
+    """
+    Infer trend alignment from normalized EMA-distance features.
+
+    The feature set stores `(close - EMA) / close`, not raw EMA values.
+    For bullish structure the shortest EMA sits closest to price, so the
+    normalized distances are ordered `ema_20 < ema_50 < ema_200`.
+    The reverse ordering indicates bearish structure.
+    """
+    ema_20 = row.get("ema_20")
+    ema_50 = row.get("ema_50")
+    ema_200 = row.get("ema_200")
+
+    if pd.isna(ema_20) or pd.isna(ema_50) or pd.isna(ema_200):
+        return 0
+
+    if ema_20 < ema_50 < ema_200:
+        return 1
+    if ema_20 > ema_50 > ema_200:
+        return -1
+    return 0
+
+
 def detect_regime(df: pd.DataFrame) -> str:
     """Classify market regime from tail of DataFrame."""
     if len(df) < ATR_ROLLING_WINDOW:
@@ -40,15 +63,7 @@ def detect_regime(df: pd.DataFrame) -> str:
     if len(ema_slice) >= 2:
         slope = (ema_slice.iloc[-1] - ema_slice.iloc[0]) / (ema_slice.iloc[0] + 1e-10)
 
-    # Phase 3 Gap 12: 4-EMA Stack Alignment Check
-    ema_20 = latest.get("ema_20", 0)
-    ema_50 = latest.get("ema_50", 0)
-    ema_100 = latest.get("ema_100", 0)
-    ema_200 = latest.get("ema_200", 0)
-    
-    bull_stack = (ema_20 > ema_50) and (ema_50 > ema_100) and (ema_100 > ema_200)
-    bear_stack = (ema_20 < ema_50) and (ema_50 < ema_100) and (ema_100 < ema_200)
-    ema_aligned = bull_stack or bear_stack
+    ema_aligned = get_trend_alignment(latest) != 0
 
     if (adx_now > ADX_TRENDING_THRESHOLD and abs(slope) > 0.0001) or ema_aligned:
         return "Trending"

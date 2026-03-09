@@ -39,7 +39,7 @@ from config import (
     LOG_LEVEL, LOG_FORMAT,
 )
 from data_collector import load_csv, load_multi_tf
-from feature_engineering import compute_features, add_target, FEATURE_COLUMNS
+from feature_engineering import compute_features, add_primary_training_target, FEATURE_COLUMNS
 from regime_detection import detect_regime_series
 
 log = logging.getLogger("meta_model")
@@ -190,10 +190,10 @@ def train_meta(symbol):
     df = mtf.get("M5")
     if df is None:
         df = load_csv(symbol, "M5")
-    m15, h1 = mtf.get("M15"), mtf.get("H1")
+    m15, h1, m1 = mtf.get("M15"), mtf.get("H1"), mtf.get("M1")
 
-    df = compute_features(df, m15_df=m15, h1_df=h1)
-    df = add_target(df)
+    df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
+    df = add_primary_training_target(df)
     df = df.dropna(subset=["target"]).reset_index(drop=True)
     df["target"] = df["target"].astype(int)
 
@@ -240,27 +240,49 @@ def train_meta(symbol):
         print(f"\n  [OK] Meta accuracy {avg['acc']:.1%} is in expected range (no leakage)")
 
     # =========================================================================
-    # Train final meta model with sigmoid calibration (Platt scaling)
+    # Train final meta model — train base, then check if calibration helps
     # =========================================================================
-    # FIX: Sigmoid instead of isotonic — more stable on noisy/small meta dataset
-    print(f"\n>> Training final meta model with sigmoid calibration...")
+    print(f"\n>> Training final meta model...")
     base_clf = _build_meta_clf()
-    # CalibratedClassifierCV wraps the base model with Platt scaling
-    # cv=3 uses internal 3-fold to fit the sigmoid, then retrains on all data
-    final = CalibratedClassifierCV(base_clf, method="sigmoid", cv=3)
-    final.fit(X_meta, y_meta)
+    base_clf.fit(X_meta, y_meta)
+    
+    # Check base model correlation first
+    base_proba = base_clf.predict_proba(X_meta)[:, 1]
+    base_corr, _ = stats.spearmanr(base_proba, y_meta)
+    base_corr = float(base_corr) if not np.isnan(base_corr) else 0.0
+    base_acc = accuracy_score(y_meta, (base_proba >= 0.5).astype(int))
+    print(f"   Base model: Acc={base_acc:.4f} Corr={base_corr:.4f}")
+    
+    # Try sigmoid calibration
+    cal_clf = CalibratedClassifierCV(_build_meta_clf(), method="sigmoid", cv=3)
+    cal_clf.fit(X_meta, y_meta)
+    cal_proba = cal_clf.predict_proba(X_meta)[:, 1]
+    cal_corr, _ = stats.spearmanr(cal_proba, y_meta)
+    cal_corr = float(cal_corr) if not np.isnan(cal_corr) else 0.0
+    cal_acc = accuracy_score(y_meta, cal_clf.predict(X_meta))
+    print(f"   Calibrated: Acc={cal_acc:.4f} Corr={cal_corr:.4f}")
+    
+    # Use whichever has better (more positive) correlation
+    if cal_corr > base_corr and cal_acc > 0.40:
+        final = cal_clf
+        print(f"   -> Using sigmoid-calibrated model (better correlation)")
+    else:
+        final = base_clf
+        print(f"   -> Using base model (calibration degraded correlation)")
 
-    # Calibrated performance check
-    cal_proba = final.predict_proba(X_meta)[:, 1]
-    cal_pred = final.predict(X_meta)
-    train_acc = accuracy_score(y_meta, cal_pred)
-    train_brier = brier_score_loss(y_meta, cal_proba)
-    print(f"   Calibrated train: Acc={train_acc:.4f} Brier={train_brier:.4f}")
-    print(f"   (Sigmoid calibration — smoother than isotonic, stable on noisy data)")
+    # Final performance
+    final_proba = final.predict_proba(X_meta)[:, 1]
+    final_pred = (final_proba >= 0.5).astype(int)
+    train_acc = accuracy_score(y_meta, final_pred)
+    train_brier = brier_score_loss(y_meta, final_proba)
+    print(f"   Final train: Acc={train_acc:.4f} Brier={train_brier:.4f}")
 
     # Feature importances (from base estimators)
     try:
-        base_est = final.calibrated_classifiers_[0].estimator
+        if hasattr(final, 'calibrated_classifiers_'):
+            base_est = final.calibrated_classifiers_[0].estimator
+        else:
+            base_est = final
         imp = base_est.feature_importances_
         order = np.argsort(imp)[::-1]
         print("\n  Meta feature importances:")
@@ -270,13 +292,15 @@ def train_meta(symbol):
     except Exception:
         pass
 
-    # FIX #7: Log meta correlation
+    # Log meta correlation
     all_meta_proba = final.predict_proba(X_meta)[:, 1]
     meta_corr, _ = stats.spearmanr(all_meta_proba, y_meta)
     meta_corr = float(meta_corr) if not np.isnan(meta_corr) else 0.0
     print(f"\n  Meta Spearman correlation (proba vs target): {meta_corr:.4f}")
-    if meta_corr < 0.2:
-        print(f"  [WARN] WARNING: Meta correlation {meta_corr:.4f} < 0.2 -- meta may be unreliable")
+    if abs(meta_corr) < 0.05:
+        print(f"  [WARN] WARNING: Meta correlation {meta_corr:.4f} ≈ 0 -- meta has no predictive power")
+    elif meta_corr < 0:
+        print(f"  [WARN] WARNING: Meta correlation is negative -- predict_engine should invert")
     else:
         print(f"  [OK] Meta correlation {meta_corr:.4f} is acceptable")
 

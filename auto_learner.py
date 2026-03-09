@@ -37,6 +37,7 @@ from config import (
     DEFAULT_SYMBOL, MODEL_DIR, MODEL_BACKUP_DIR,
     ENSEMBLE_MODEL_PATH, META_MODEL_PATH, META_FEATURE_LIST_PATH,
     WEIGHT_MODEL_PATH, OOF_PREDICTIONS_PATH, FEATURE_LIST_PATH,
+    CONFIDENCE_THRESHOLDS_PATH, SELECTED_FEATURES_PATH,
     AUTO_RETRAIN_ACCURACY_TRIGGER, AUTO_RETRAIN_CORRELATION_TRIGGER,
     PREDICTION_LOG_CSV, DATA_BUFFER_SIZE,
     DRIFT_COSINE_THRESHOLD,
@@ -169,6 +170,7 @@ class PerformanceMonitor:
 MODEL_FILES = [
     ENSEMBLE_MODEL_PATH, META_MODEL_PATH, META_FEATURE_LIST_PATH,
     WEIGHT_MODEL_PATH, OOF_PREDICTIONS_PATH, FEATURE_LIST_PATH,
+    CONFIDENCE_THRESHOLDS_PATH, SELECTED_FEATURES_PATH,
 ]
 
 
@@ -242,10 +244,20 @@ def retrain(symbol, validate=True):
         import subprocess
         python = sys.executable
 
-        for script in ["train_model.py", "meta_model.py", "weight_learner.py"]:
-            log.info("Running %s...", script)
+        commands = [
+            [python, "train_model.py", "--symbol", symbol, "--all-features"],
+            [python, "feature_selector.py", "--symbol", symbol],
+            [python, "train_model.py", "--symbol", symbol],
+            [python, "meta_model.py", "--symbol", symbol],
+            [python, "weight_learner.py", "--symbol", symbol],
+            [python, "confidence_optimizer.py", "--symbol", symbol],
+        ]
+
+        for cmd in commands:
+            script = cmd[1]
+            log.info("Running %s...", " ".join(cmd[1:]))
             result = subprocess.run(
-                [python, script, "--symbol", symbol],
+                cmd,
                 capture_output=True, text=True, cwd=os.path.dirname(__file__),
             )
             if result.returncode != 0:
@@ -326,7 +338,7 @@ def retrain_lite(symbol, validate=True):
         python = sys.executable
 
         # Only retrain meta + weight (skip primary ensemble)
-        for script in ["meta_model.py", "weight_learner.py"]:
+        for script in ["meta_model.py", "weight_learner.py", "confidence_optimizer.py"]:
             log.info("Running %s...", script)
             result = subprocess.run(
                 [python, script, "--symbol", symbol],
@@ -378,20 +390,21 @@ def _evaluate_current_model(symbol):
     """Quick evaluation: run predictions on last 500 bars, return accuracy."""
     try:
         from data_collector import load_csv, load_multi_tf
-        from feature_engineering import compute_features, add_target, FEATURE_COLUMNS
+        from feature_engineering import compute_features, add_primary_training_target
         from calibration import CalibratedModel
 
         mtf = load_multi_tf(symbol)
         df = mtf.get("M5")
         if df is None:
             df = load_csv(symbol, "M5")
-        m15, h1 = mtf.get("M15"), mtf.get("H1")
-        df = compute_features(df, m15_df=m15, h1_df=h1)
-        df = add_target(df)
+        m15, h1, m1 = mtf.get("M15"), mtf.get("H1"), mtf.get("M1")
+        df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
+        df = add_primary_training_target(df)
         df = df.dropna(subset=["target"]).reset_index(drop=True)
 
         ensemble = joblib.load(ENSEMBLE_MODEL_PATH)
-        X = df[FEATURE_COLUMNS].tail(500)
+        feature_cols = joblib.load(FEATURE_LIST_PATH)
+        X = df[feature_cols].tail(500)
         y = df["target"].tail(500).astype(int).values
 
         all_p = np.array([m.predict_proba(X)[:, 1] for m in ensemble])

@@ -23,7 +23,12 @@ import xgboost as xgb
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score, roc_auc_score, brier_score_loss
 
-from calibration import CalibratedModel, build_seeded_xgb_ensemble
+from calibration import (
+    CalibratedModel,
+    build_seeded_xgb_ensemble,
+    get_primary_model_specs,
+    fit_model_from_spec,
+)
 
 from config import (
     MODEL_DIR, MODEL_PATH, FEATURE_LIST_PATH,
@@ -41,8 +46,7 @@ from config import (
 )
 from data_collector import load_csv, load_multi_tf
 from feature_engineering import (
-    compute_features, add_target_atr_filtered, add_target,
-    add_target_triple_barrier, add_target_smoothed, FEATURE_COLUMNS,
+    compute_features, add_primary_training_target, FEATURE_COLUMNS,
 )
 
 log = logging.getLogger("train_model")
@@ -67,7 +71,8 @@ def _generate_oof_predictions(X, y, spw, seeds, n_splits=OOF_INTERNAL_SPLITS):
     to prevent leakage through autocorrelated features.
     """
     n = len(y)
-    oof_all = np.full((len(seeds), n), np.nan)
+    model_specs = get_primary_model_specs()
+    oof_all = np.full((len(model_specs), n), np.nan)
     tscv = TimeSeriesSplit(n_splits=n_splits)
 
     for fold_idx, (tr_idx, te_idx) in enumerate(tscv.split(X)):
@@ -76,16 +81,9 @@ def _generate_oof_predictions(X, y, spw, seeds, n_splits=OOF_INTERNAL_SPLITS):
         if embargo > 0 and len(tr_idx) > embargo:
             tr_idx = tr_idx[:-embargo]
 
-        for s_idx, seed in enumerate(seeds):
-            clf = xgb.XGBClassifier(
-                n_estimators=XGB_N_ESTIMATORS, max_depth=XGB_MAX_DEPTH,
-                learning_rate=XGB_LEARNING_RATE, subsample=XGB_SUBSAMPLE,
-                colsample_bytree=XGB_COLSAMPLE_BYTREE, scale_pos_weight=spw,
-                objective="binary:logistic", eval_metric="logloss",
-                use_label_encoder=False, random_state=seed, verbosity=0,
-                min_child_weight=3, reg_alpha=0.1, reg_lambda=1.5,
-            )
-            clf.fit(X.iloc[tr_idx], y[tr_idx], verbose=False)
+        for s_idx, spec in enumerate(model_specs):
+            seed = seeds[s_idx] if s_idx < len(seeds) else 42 + s_idx
+            clf = fit_model_from_spec(spec, X.iloc[tr_idx], y[tr_idx], spw=spw, seed=seed)
             oof_all[s_idx, te_idx] = clf.predict_proba(X.iloc[te_idx])[:, 1]
 
     oof_mask = ~np.isnan(oof_all[0])
@@ -94,26 +92,26 @@ def _generate_oof_predictions(X, y, spw, seeds, n_splits=OOF_INTERNAL_SPLITS):
     return oof_mean, oof_all, oof_mask
 
 
-def train(symbol):
+def train(symbol, use_selected_features=True):
     print(f"\n>> Loading data for {symbol}...")
     mtf = load_multi_tf(symbol)
     df = mtf.get("M5")
     if df is None:
         df = load_csv(symbol, "M5")
-    m15, h1 = mtf.get("M15"), mtf.get("H1")
+    m15, h1, m1 = mtf.get("M15"), mtf.get("H1"), mtf.get("M1")
 
     print(f">> Computing {len(FEATURE_COLUMNS)} features...")
-    df = compute_features(df, m15_df=m15, h1_df=h1)
+    df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
 
     # Phase 10: Master Architecture smoothed target (15-min Trend Prediction)
-    print(">> Using Smoothed Target (lookahead=3) to filter M5 noise")
-    df_train = add_target_smoothed(df, lookahead=3)
+    print(">> Using canonical primary target for all training stages")
+    df_train = add_primary_training_target(df)
     df_train = df_train.dropna(subset=["target"]).reset_index(drop=True)
     df_train["target"] = df_train["target"].astype(int)
 
     # Phase 3: Use selected features if available
     use_features = list(FEATURE_COLUMNS)
-    if os.path.exists(SELECTED_FEATURES_PATH):
+    if use_selected_features and os.path.exists(SELECTED_FEATURES_PATH):
         selected = joblib.load(SELECTED_FEATURES_PATH)
         # Verify all selected features exist in FEATURE_COLUMNS
         valid = [f for f in selected if f in FEATURE_COLUMNS]
@@ -130,7 +128,7 @@ def train(symbol):
     n_green, n_red = int(y.sum()), len(y) - int(y.sum())
     spw = n_red / max(n_green, 1)
 
-    print(f"   ATR-filtered samples: {len(X)}")
+    print(f"   Training samples: {len(X)}")
     print(f"   Green: {n_green} ({n_green/len(y):.1%}), Red: {n_red} ({n_red/len(y):.1%})")
 
     # =========================================================================
@@ -262,8 +260,10 @@ def train(symbol):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default=DEFAULT_SYMBOL)
+    parser.add_argument("--all-features", action="store_true",
+                        help="Ignore selected_features.pkl and train on the full feature set")
     args = parser.parse_args()
-    train(args.symbol)
+    train(args.symbol, use_selected_features=not args.all_features)
 
 
 if __name__ == "__main__":

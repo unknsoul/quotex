@@ -49,13 +49,17 @@ def run_backtest(symbol: str = DEFAULT_SYMBOL, n_bars: int = 2000,
     print(f"{'='*65}\n")
 
     # Load full data
-    multi_data = load_multi_tf(symbol, source="csv")
+    multi_data = load_multi_tf(symbol)
     m5 = multi_data.get("M5")
     if m5 is None:
         print("ERROR: No M5 data found")
         return
 
-    df_full = compute_features(m5)
+    m15 = multi_data.get("M15")
+    h1 = multi_data.get("H1")
+    m1 = multi_data.get("M1")
+
+    df_full = compute_features(m5, m15_df=m15, h1_df=h1, m1_df=m1)
     if len(df_full) < n_bars + 100:
         n_bars = len(df_full) - 100
         print(f"  Adjusted bars to {n_bars} (data limit)")
@@ -73,7 +77,7 @@ def run_backtest(symbol: str = DEFAULT_SYMBOL, n_bars: int = 2000,
     print(f"  Testing bars {start_idx} to {len(df_full)-1}...")
     print(f"  {'='*60}")
 
-    for i in range(start_idx, len(df_full) - 1):  # -1 because we need next bar for result
+    for i in range(start_idx, len(df_full) - 3):  # -3 because we need 3 bars for smoothed target
         # Use only data up to this point
         df_window = df_full.iloc[:i+1].copy()
 
@@ -99,24 +103,22 @@ def run_backtest(symbol: str = DEFAULT_SYMBOL, n_bars: int = 2000,
 
             if pred.get("error"):
                 skip_reason = "error"
-            elif conf < min_confidence:
-                skip_reason = f"low-conf ({conf:.0f}%)"
             elif trade == "HOLD":
-                skip_reason = "HOLD"
-            elif pred_regime in blocked_regimes:
-                skip_reason = f"blocked regime ({pred_regime})"
-            elif ens_var > max_ensemble_var:
-                skip_reason = f"high variance ({ens_var:.4f})"
-            elif unanimity < min_unanimity:
-                skip_reason = f"split vote ({unanimity:.0%})"
+                skip_reason = pred.get("skip_reason", "HOLD")
 
             if skip_reason:
                 signals_skipped += 1
                 continue
 
-            # Check actual next candle
-            next_bar = df_full.iloc[i + 1]
-            actual_green = next_bar["close"] > next_bar["open"]
+            # Check actual result using smoothed 3-bar target (consistent with training)
+            # Majority vote over next 3 bars
+            green_count = 0
+            for k in range(1, 4):
+                if i + k < len(df_full):
+                    nbar = df_full.iloc[i + k]
+                    if nbar["close"] > nbar["open"]:
+                        green_count += 1
+            actual_green = green_count >= 2  # majority of 3 bars
             predicted_up = direction == "UP"
             correct = (predicted_up == actual_green)
 

@@ -1,7 +1,7 @@
 """
 API Server v4 — Ensemble prediction with uncertainty estimation.
 
-Always returns probabilities + uncertainty. Never skips.
+Always returns probabilities + uncertainty, with production trade gating.
 
 Run:
     uvicorn api_server:app --host 0.0.0.0 --port 8000
@@ -24,7 +24,7 @@ from config import (
 )
 from data_collector import fetch_multi_timeframe
 from feature_engineering import compute_features, FEATURE_COLUMNS
-from regime_detection import detect_regime, get_volatility_status
+from regime_detection import detect_regime, get_volatility_status, get_trend_alignment
 from predict_engine import predict, log_prediction
 from risk_filter import check_warnings
 from stability import ProbabilitySmoother, AccuracyTracker
@@ -83,9 +83,10 @@ def _get_spread(symbol):
 
 def _reason_summary(row, regime, result):
     parts = [f"Regime: {regime}"]
-    if row["ema_20"] > row["ema_50"] > row["ema_200"]:
+    alignment = get_trend_alignment(row)
+    if alignment > 0:
         parts.append("EMA bullish")
-    elif row["ema_20"] < row["ema_50"] < row["ema_200"]:
+    elif alignment < 0:
         parts.append("EMA bearish")
     else:
         parts.append("EMAs mixed")
@@ -98,6 +99,8 @@ def _reason_summary(row, regime, result):
     elif adx > 25: parts.append(f"Trend(ADX {adx:.0f})")
     parts.append(f"Conf:{result['final_confidence_percent']:.0f}%")
     parts.append(f"Unc:{result['uncertainty_percent']:.0f}%")
+    if result.get("skip_reason"):
+        parts.append(f"Gate:{result['skip_reason']}")
     if row.get("h1_ema_alignment") == 1: parts.append("H1 bullish")
     elif row.get("h1_ema_alignment") == -1: parts.append("H1 bearish")
     return "; ".join(parts)
@@ -114,7 +117,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Quant Stability Candle Forecast Engine",
     version="4.0.0",
-    description="Ensemble prediction with uncertainty estimation. Never skips.",
+    description="Ensemble prediction with uncertainty estimation and production trade gating.",
     lifespan=lifespan,
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])

@@ -41,9 +41,17 @@ from config import (
     REGIME_COOLDOWN_BARS, REGIME_ROLLING_ACCURACY_WINDOW,
     SESSION_FILTER_ENABLED, SESSION_CONFIDENCE_MULT,
     ENSEMBLE_VAR_SKIP_THRESHOLD, ENSEMBLE_VAR_FILTER_ENABLED,
+    PRODUCTION_SIGNAL_GATING_ENABLED, PRODUCTION_MIN_CONFIDENCE,
+    PRODUCTION_MIN_META_RELIABILITY, PRODUCTION_MIN_UNANIMITY,
+    PRODUCTION_MAX_UNCERTAINTY, PRODUCTION_MIN_QUALITY_SCORE,
+    PRODUCTION_CONFIDENCE_ALERT_PENALTY, PRODUCTION_REQUIRE_TREND_ALIGNMENT,
+    PRODUCTION_BLOCKED_REGIMES,
     LOG_LEVEL, LOG_FORMAT,
 )
-from regime_detection import get_regime_thresholds, regime_stability_score, get_session
+from regime_detection import (
+    get_regime_thresholds, regime_stability_score, get_session,
+    get_trend_alignment,
+)
 from calibration import CalibratedModel  # needed for joblib.load
 from online_learner import OnlineLearner
 
@@ -84,6 +92,10 @@ REGIME_ENCODING = {"Trending": 0, "Ranging": 1, "High_Volatility": 2, "Low_Volat
 def _binary_entropy(p):
     p = np.clip(p, 1e-10, 1 - 1e-10)
     return -(p * np.log2(p) + (1 - p) * np.log2(1 - p))
+
+
+def _direction_probability(green_p):
+    return green_p if green_p >= 0.5 else (1.0 - green_p)
 
 
 def set_retrain_flag(active):
@@ -291,6 +303,84 @@ def _should_skip(regime, confidence_pct, df, ensemble_variance=0.0):
     return False, ""
 
 
+def _quality_score(confidence_pct, meta_pct, unanimity, stability_score, uncertainty_pct, green_p):
+    edge_pct = abs(green_p - 0.5) * 200.0
+    # Rebalanced: emphasize primary edge and unanimity more, penalize uncertainty harder
+    return round(
+        0.30 * confidence_pct +
+        0.15 * meta_pct +
+        0.25 * (unanimity * 100.0) +
+        0.10 * (stability_score * 100.0) +
+        0.20 * edge_pct -
+        0.35 * uncertainty_pct,
+        2,
+    )
+
+
+def _apply_production_gate(df, regime, green_p, meta_rel, confidence_pct,
+                           adaptive_conf_pct, unanimity, uncertainty_pct,
+                           stability_score, conf_alert, ensemble_variance):
+    effective_conf = float(min(confidence_pct, adaptive_conf_pct))
+    if conf_alert:
+        effective_conf *= PRODUCTION_CONFIDENCE_ALERT_PENALTY
+
+    meta_pct = float(meta_rel * 100.0)
+    direction_prob = _direction_probability(green_p)
+    thresholds = get_regime_thresholds(regime)
+    quality_score = _quality_score(
+        effective_conf, meta_pct, unanimity, stability_score, uncertainty_pct, green_p
+    )
+
+    reasons = []
+    soft_failures = []
+    should_skip, skip_reason = _should_skip(
+        regime, effective_conf, df, ensemble_variance=ensemble_variance
+    )
+    if should_skip:
+        reasons.append(skip_reason)
+
+    if regime in PRODUCTION_BLOCKED_REGIMES:
+        reasons.append(f"Blocked regime ({regime})")
+    if effective_conf < PRODUCTION_MIN_CONFIDENCE:
+        reasons.append(f"Low confidence ({effective_conf:.0f}% < {PRODUCTION_MIN_CONFIDENCE:.0f}%)")
+    if meta_pct < max(PRODUCTION_MIN_META_RELIABILITY, thresholds["meta"] * 100.0):
+        soft_failures.append(
+            f"Meta weak ({meta_pct:.0f}% < {max(PRODUCTION_MIN_META_RELIABILITY, thresholds['meta'] * 100.0):.0f}%)"
+        )
+    primary_edge_floor = max(0.52, thresholds["primary"] - 0.04)
+    if direction_prob < primary_edge_floor:
+        soft_failures.append(
+            f"Primary edge weak ({direction_prob * 100:.0f}% < {primary_edge_floor * 100:.0f}%)"
+        )
+    if unanimity < PRODUCTION_MIN_UNANIMITY:
+        soft_failures.append(f"Split vote ({unanimity:.0%} < {PRODUCTION_MIN_UNANIMITY:.0%})")
+    if uncertainty_pct > PRODUCTION_MAX_UNCERTAINTY:
+        reasons.append(
+            f"High uncertainty ({uncertainty_pct:.0f}% > {PRODUCTION_MAX_UNCERTAINTY:.0f}%)"
+        )
+
+    if PRODUCTION_REQUIRE_TREND_ALIGNMENT:
+        trend_alignment = get_trend_alignment(df.iloc[-1])
+        trade_alignment = 1 if green_p >= 0.5 else -1
+        if trend_alignment != 0 and trend_alignment != trade_alignment:
+            trend_name = "bullish" if trend_alignment > 0 else "bearish"
+            soft_failures.append(f"Trend conflict ({trend_name} structure)")
+
+    if quality_score < PRODUCTION_MIN_QUALITY_SCORE:
+        reasons.append(
+            f"Quality score low ({quality_score:.1f} < {PRODUCTION_MIN_QUALITY_SCORE:.1f})"
+        )
+
+    if len(soft_failures) >= 3:
+        reasons.extend(soft_failures[:2])
+
+    if PRODUCTION_SIGNAL_GATING_ENABLED and reasons:
+        return "HOLD", "; ".join(reasons[:3]), round(effective_conf, 2), quality_score
+
+    trade = "BUY" if green_p >= 0.5 else "SELL"
+    return trade, "", round(effective_conf, 2), quality_score
+
+
 def predict(df, regime):
     """
     Generate prediction using cached models.
@@ -310,7 +400,7 @@ def predict(df, regime):
         with _model_lock:
             ensemble, feat_cols, meta_model, meta_feat_cols, weight_model = load_models()
 
-        row = df[feat_cols].iloc[-1].values.reshape(1, -1)
+        row = df[feat_cols].iloc[[-1]]
 
         # Ensemble predictions (V3: diverse multi-model ensemble)
         all_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
@@ -344,13 +434,19 @@ def predict(df, regime):
             _regime_duration_counter = 1
             _last_regime_name = regime
 
+        # FIX: Update direction history BEFORE building meta row
+        # so direction_streak uses current prediction, not stale one
+        _direction_history.append(1 if green_p >= 0.5 else 0)
+        if len(_direction_history) > 500:
+            _direction_history.pop(0)
+
         # Meta (sigmoid-calibrated model — calibration is internal)
         regime_enc = REGIME_ENCODING.get(regime, 1)
         meta_row = _build_meta_row(green_p, df.iloc[-1], regime_enc, variance,
                                    ensemble_disagreement=disagreement,
                                    regime_duration=_regime_duration_counter)
         meta_input = pd.DataFrame([meta_row])[meta_feat_cols]
-        meta_rel = float(meta_model.predict_proba(meta_input.values)[0][1])
+        meta_rel = float(meta_model.predict_proba(meta_input)[0][1])
 
         # Phase 3: Blend online learner prediction after 200+ updates (ramps to 10%)
         if _online_learner.n_updates >= 200:
@@ -405,11 +501,27 @@ def predict(df, regime):
         # Confidence reliability (rolling correlation)
         conf_reliability, conf_alert = get_confidence_reliability()
 
+        # Adaptive confidence (rolling calibration)
+        raw_confidence_pct = round(confidence * 100, 2)
+        adaptive_conf = _adaptive_confidence(raw_confidence_pct)
+        trade, skip_reason, confidence_pct, quality_score = _apply_production_gate(
+            df=df,
+            regime=regime,
+            green_p=green_p,
+            meta_rel=meta_rel,
+            confidence_pct=raw_confidence_pct,
+            adaptive_conf_pct=adaptive_conf,
+            unanimity=unanimity,
+            uncertainty_pct=uncertainty_pct,
+            stability_score=stability_score,
+            conf_alert=conf_alert,
+            ensemble_variance=variance,
+        )
+
         # Convert to percentages
         green_pct = round(green_p * 100, 2)
         red_pct = round(red_p * 100, 2)
         meta_pct = round(meta_rel * 100, 2)
-        confidence_pct = round(confidence * 100, 2)
         direction = "GREEN" if green_p >= 0.5 else "RED"
 
         if confidence_pct >= CONFIDENCE_HIGH_MIN:
@@ -419,31 +531,19 @@ def predict(df, regime):
         else:
             conf_level = "Low"
 
-        # Adaptive confidence (rolling calibration)
-        adaptive_conf = _adaptive_confidence(confidence_pct)
-
-        # Kelly criterion position sizing (quarter-Kelly for safety)
-        # Phase 3: Remove 0.51 floor, restrict if confidence < 60
-        win_prob = min(green_p if green_p >= 0.5 else (1 - green_p), 0.99)
-        if confidence_pct < 60.0:
+        # Kelly criterion position sizing (quarter-Kelly, binary options payoff)
+        win_prob = min(_direction_probability(green_p), 0.99)
+        payout_ratio = 0.80  # typical binary options payout: 80% on win
+        if trade == "HOLD" or confidence_pct < 60.0:
             kelly_pct = 0.0
         else:
-            kelly_full = 2 * win_prob - 1
+            # Kelly for asymmetric payoff: f = (p*b - q) / b
+            # where b = payout ratio, p = win prob, q = 1 - p
+            kelly_full = (win_prob * payout_ratio - (1 - win_prob)) / payout_ratio
             kelly_quarter = max(0, kelly_full * 0.25)
             kelly_pct = round(kelly_quarter * 100, 1)
 
-        # Phase 6 (Always-On High Frequency Override):
-        # We completely bypass the should_skip regime filters, confidence minimums, 
-        # and EMA alignment gates. The ML engine MUST provide a base directional
-        # bias for every single candle so Gemini can make the final Override decision.
-        should_skip = False
-        skip_reason = ""
-        trade = "BUY" if green_p >= 0.5 else "SELL"
-
-        # Update direction history for live parity
-        _direction_history.append(1 if green_p >= 0.5 else 0)
-        if len(_direction_history) > 500:
-            _direction_history.pop(0)
+        # Direction history already updated above (before meta row building)
 
         # Latency measurement
         latency_ms = round((time.perf_counter() - t_start) * 1000, 1)
@@ -465,19 +565,22 @@ def predict(df, regime):
             "ensemble_agree_count": agree_count,         # e.g. 6/7
             "ensemble_total": n_models,
             "suggested_trade": trade,
-            "suggested_direction": "UP" if green_p >= 0.5 else "DOWN",
+            "suggested_direction": "HOLD" if trade == "HOLD" else ("UP" if green_p >= 0.5 else "DOWN"),
             "error": None,
             "_meta_row": meta_row,
             "market_regime": regime,
             "regime_stability": round(stability_score, 2),
             "session": session,
             "skip_reason": skip_reason,
+            "quality_score": quality_score,
             "total_skips": _skip_count,
             "latency_ms": latency_ms,
         }
 
-        log.info("Pred: green=%.1f%% conf=%.1f%% session=%s regime_stab=%.2f trade=%s latency=%dms",
-                 green_pct, confidence_pct, session, stability_score, trade, latency_ms)
+        log.info(
+            "Pred: green=%.1f%% conf=%.1f%% quality=%.1f session=%s regime_stab=%.2f trade=%s latency=%dms",
+            green_pct, confidence_pct, quality_score, session, stability_score, trade, latency_ms,
+        )
         return result
 
     except Exception as e:

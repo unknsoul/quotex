@@ -19,11 +19,12 @@ from collections import defaultdict
 from config import (
     MODEL_DIR, OOF_PREDICTIONS_PATH, ENSEMBLE_MODEL_PATH,
     META_MODEL_PATH, META_FEATURE_LIST_PATH, WEIGHT_MODEL_PATH,
+    FEATURE_LIST_PATH,
     CONFIDENCE_THRESHOLDS_PATH,
     DEFAULT_SYMBOL, LOG_LEVEL, LOG_FORMAT,
 )
 from data_collector import load_csv, load_multi_tf
-from feature_engineering import compute_features, add_target, FEATURE_COLUMNS
+from feature_engineering import compute_features, add_primary_training_target
 from regime_detection import detect_regime, detect_regime_series, REGIMES
 
 
@@ -47,13 +48,14 @@ def optimize_thresholds(symbol=DEFAULT_SYMBOL):
     df = mtf.get("M5")
     if df is None:
         df = load_csv(symbol, "M5")
-    m15, h1 = mtf.get("M15"), mtf.get("H1")
-    df = compute_features(df, m15_df=m15, h1_df=h1)
-    df = add_target(df).dropna(subset=["target"]).reset_index(drop=True)
+    m15, h1, m1 = mtf.get("M15"), mtf.get("H1"), mtf.get("M1")
+    df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
+    df = add_primary_training_target(df).dropna(subset=["target"]).reset_index(drop=True)
     df["target"] = df["target"].astype(int)
 
     # Load models
     ensemble = joblib.load(ENSEMBLE_MODEL_PATH)
+    feature_cols = joblib.load(FEATURE_LIST_PATH)
     meta_model = joblib.load(META_MODEL_PATH)
     meta_features = joblib.load(META_FEATURE_LIST_PATH)
     weight_model = joblib.load(WEIGHT_MODEL_PATH)
@@ -70,7 +72,7 @@ def optimize_thresholds(symbol=DEFAULT_SYMBOL):
     print(f"\n>> Optimizing thresholds on {n - start_idx} bars (last 40%)\n")
 
     for i in range(start_idx, n):
-        row_feat = df[FEATURE_COLUMNS].iloc[[i]]
+        row_feat = df[feature_cols].iloc[[i]]
         regime = all_regimes.iloc[i] if i < len(all_regimes) else "Ranging"
 
         all_p = np.array([m.predict_proba(row_feat)[0][1] for m in ensemble])
@@ -82,9 +84,39 @@ def optimize_thresholds(symbol=DEFAULT_SYMBOL):
         actual = df["target"].iloc[i]
         correct = 1 if direction == actual else 0
 
-        # Simplified confidence (matches predict_engine logic)
+        # Use weight model for confidence (consistent with predict_engine)
         primary_str = abs(green_p - 0.5) * 2
-        confidence = primary_str * (1.0 - norm_var) * 100
+        regime_strength = float(df.iloc[i].get("adx_normalized", 0.25)) if "adx_normalized" in df.columns else 0.25
+
+        # Build meta features for this row
+        regime_enc = REGIME_ENCODING.get(regime, 1)
+        meta_row_data = {
+            "primary_green_prob": green_p,
+            "prob_distance_from_half": abs(green_p - 0.5),
+            "primary_entropy": float(_binary_entropy(green_p)),
+            "ensemble_variance": variance,
+            "ensemble_disagreement": float(all_p.max() - all_p.min()),
+            "regime_encoded": regime_enc,
+            "regime_duration": 1,
+            "atr_value": float(df.iloc[i].get("atr_14", 0)) if "atr_14" in df.columns else 0,
+            "volatility_zscore": float(df.iloc[i].get("volatility_zscore", 0)) if "volatility_zscore" in df.columns else 0,
+            "range_position": float(df.iloc[i].get("range_position", 0.5)) if "range_position" in df.columns else 0.5,
+            "body_percentile_rank": 0.5,
+            "direction_streak": 1,
+            "rolling_vol_percentile": 0.5,
+            "hour_sin": 0.0,
+        }
+        meta_input_df = pd.DataFrame([meta_row_data])[meta_features]
+        meta_rel = float(meta_model.predict_proba(meta_input_df)[0][1])
+
+        w_input = pd.DataFrame([{
+            "primary_strength": primary_str,
+            "meta_reliability": meta_rel,
+            "regime_strength": regime_strength,
+            "uncertainty": 1.0 - norm_var,
+        }])
+        weighted_score = float(weight_model.predict_proba(w_input)[:, 1][0])
+        confidence = weighted_score * (1.0 - norm_var) * 100
 
         results[regime].append((confidence, correct))
 
