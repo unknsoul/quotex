@@ -87,7 +87,7 @@ class BayesianThreshold:
             adjustment = 0.0
 
         threshold = BASE_MIN_CONFIDENCE + adjustment
-        return max(35.0, min(65.0, threshold))  # clamp
+        return max(35.0, min(55.0, threshold))  # v16.1: lowered max clamp from 65 to 55
 
     def update(self, symbol: str, regime: str, hour: int, was_correct: bool):
         """Bayesian update after observing an outcome."""

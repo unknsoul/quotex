@@ -1,5 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Central configuration - QUOTEX LORD v16 Accuracy Engine.
+"""Central configuration - QUOTEX LORD v16.1 Signal Volume + Accuracy.
+
+v16.1 signal volume upgrades:
+  - Lowered confidence gates (54→50%) for more signal throughput
+  - Unblocked Ranging regime (rely on model quality instead of blanket ban)
+  - Relaxed ensemble variance & unanimity (more signals pass)
+  - Raised signal caps (12/hr, 6/cycle) for higher volume
+  - Faster pair scoring refresh for reactive pair selection
+  - Symbol confidence adjustments neutralized (all → 1.0)
 
 v16 upgrades:
   - Learned Stacking Combiner (replaces simple averaging of ensemble)
@@ -119,8 +127,8 @@ META_BASE_THRESHOLD = 0.55
 
 # --- Adaptive Regime Filter (Phase 3) ---------------------------------------
 REGIME_FILTER_ENABLED = True
-REGIME_SKIP_ACCURACY_THRESHOLD = 0.55  # skip if rolling accuracy < 55%
-REGIME_COOLDOWN_BARS = 10              # bars to stay in cooldown after accuracy drop
+REGIME_SKIP_ACCURACY_THRESHOLD = 0.45  # v16.1: lowered — avoid excessive cooldowns
+REGIME_COOLDOWN_BARS = 5               # v16.1: shorter cooldown (was 10)
 REGIME_ROLLING_ACCURACY_WINDOW = 20    # rolling window for accuracy check
 SESSION_FILTER_ENABLED = False   # v13: All session restrictions removed — pure technical analysis
 # Session confidence multipliers — all set to 1.0 (no session penalty)
@@ -133,7 +141,7 @@ SESSION_CONFIDENCE_MULT = {
 }
 
 # --- Ensemble Variance Hard Filter (Phase 4) --------------------------------
-ENSEMBLE_VAR_SKIP_THRESHOLD = 0.045  # v14.1: relaxed for 7-model diverse ensemble
+ENSEMBLE_VAR_SKIP_THRESHOLD = 0.065  # v16.1: relaxed — StackingCombiner handles disagreement
 ENSEMBLE_VAR_FILTER_ENABLED = True
 
 # --- Slippage Modeling (Phase 4) --------------------------------------------
@@ -146,14 +154,14 @@ CONFIDENCE_MEDIUM_MIN = 60.0
 
 # --- Production Decision Gate -----------------------------------------------
 PRODUCTION_SIGNAL_GATING_ENABLED = True
-PRODUCTION_MIN_CONFIDENCE = 54.0       # v15: slightly higher with better model
-PRODUCTION_MIN_META_RELIABILITY = 50.0  # v15: raised — meta model more reliable
-PRODUCTION_MIN_UNANIMITY = 0.625        # v15: 5/8 models must agree (more members)
-PRODUCTION_MAX_UNCERTAINTY = 10.0        # v15: relaxed for larger ensemble
-PRODUCTION_MIN_QUALITY_SCORE = 35.0      # v15: slightly relaxed
+PRODUCTION_MIN_CONFIDENCE = 50.0       # v16.1: lowered for more throughput
+PRODUCTION_MIN_META_RELIABILITY = 45.0  # v16.1: relaxed — meta model confirmatory not blocking
+PRODUCTION_MIN_UNANIMITY = 0.55         # v16.1: 5/9 models (majority rule)
+PRODUCTION_MAX_UNCERTAINTY = 15.0        # v16.1: relaxed — let StackingCombiner handle variance
+PRODUCTION_MIN_QUALITY_SCORE = 28.0      # v16.1: lowered quality floor
 PRODUCTION_CONFIDENCE_ALERT_PENALTY = 0.95
 PRODUCTION_REQUIRE_TREND_ALIGNMENT = False
-PRODUCTION_BLOCKED_REGIMES = {"CHOPPY", "Ranging"}  # v14: Ranging=41% accuracy from 405 outcomes
+PRODUCTION_BLOCKED_REGIMES = {"CHOPPY"}  # v16.1: unblocked Ranging — v16 model trained on all regimes
 
 # --- Risk Warnings -----------------------------------------------------------
 MIN_ATR_CLOSE_RATIO = 0.00005   # lowered: M5 candles have smaller ATR
@@ -232,9 +240,9 @@ DATA_BUFFER_SIZE = 20000
 MODEL_BACKUP_DIR = os.path.join(BASE_DIR, "models", "backup")
 
 # --- Signal Validator --------------------------------------------------------
-SIGNAL_MIN_CONFIDENCE = 54.0          # v15: aligned with production gate
-SIGNAL_DUPLICATE_WINDOW_SEC = 300     # 5 min duplicate guard
-SIGNAL_MAX_PER_HOUR = 8              # raised from 6 to allow more signals
+SIGNAL_MIN_CONFIDENCE = 50.0          # v16.1: aligned with relaxed production gate
+SIGNAL_DUPLICATE_WINDOW_SEC = 180     # v16.1: 3 min duplicate guard (was 5 min)
+SIGNAL_MAX_PER_HOUR = 12             # v16.1: raised from 8 for higher volume
 SIGNAL_REQUIRE_MTF_ALIGNMENT = True   # block if multi-TF opposes direction
 SIGNAL_SOFT_CONFLUENCE_OVERRIDE_CONFIDENCE = 55.0
 SIGNAL_SOFT_CONFLUENCE_OVERRIDE_QUALITY = 65.0
@@ -293,15 +301,15 @@ V11_WEAK_HOUR_MIN_UNANIMITY = 0.50   # v13: Relaxed — no weak-hour extra unani
 # EURUSD (42.1%) and AUDUSD (42.3%) need higher thresholds
 # v15: Reset — new model trained on all 9 symbols, start fresh
 V11_SYMBOL_CONFIDENCE_ADJUSTMENTS = {
-    "USDJPY": 1.05,
-    "XAUUSD": 1.03,
-    "GBPUSD": 0.98,
-    "GBPJPY": 0.97,
-    "EURUSD": 0.95,
-    "AUDUSD": 0.95,
-    "USDCAD": 0.98,
-    "USDCHF": 0.98,
-    "NZDUSD": 0.97,
+    "USDJPY": 1.0,
+    "XAUUSD": 1.0,
+    "GBPUSD": 1.0,
+    "GBPJPY": 1.0,
+    "EURUSD": 1.0,
+    "AUDUSD": 1.0,
+    "USDCAD": 1.0,
+    "USDCHF": 1.0,
+    "NZDUSD": 1.0,
 }
 
 # --- v11: Symmetric Triple Barrier -------------------------------------------

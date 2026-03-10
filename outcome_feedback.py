@@ -19,8 +19,8 @@ STATE_PATH = os.path.join(os.path.dirname(__file__), "logs", "outcome_feedback_s
 
 # Defaults (from config/telegram_bot constants)
 DEFAULT_MIN_SCORE = 35.0
-DEFAULT_MIN_UNANIMITY = 0.667
-DEFAULT_MAX_VARIANCE = 0.055
+DEFAULT_MIN_UNANIMITY = 0.55
+DEFAULT_MAX_VARIANCE = 0.065
 
 
 class OutcomeFeedbackLoop:
@@ -71,19 +71,19 @@ class OutcomeFeedbackLoop:
         self.rolling_accuracy = wins / total if total > 0 else 0.5
         
         # Strategy: if accuracy is dropping, tighten thresholds; if high, relax slightly
-        if self.rolling_accuracy < 0.45:
-            # Losing streak — tighten all thresholds
-            self.min_signal_score = min(55.0, self.min_signal_score + 1.5)
-            self.min_unanimity = min(0.833, self.min_unanimity + 0.02)
-            self.max_variance = max(0.025, self.max_variance - 0.003)
+        if self.rolling_accuracy < 0.40:
+            # Losing streak — tighten modestly (v16.1: less aggressive)
+            self.min_signal_score = min(48.0, self.min_signal_score + 1.0)
+            self.min_unanimity = min(0.72, self.min_unanimity + 0.015)
+            self.max_variance = max(0.040, self.max_variance - 0.002)
             log.info("Feedback loop TIGHTENING: acc=%.1f%%, score>=%.0f, unan>=%.2f, var<=%.3f",
                      self.rolling_accuracy * 100, self.min_signal_score,
                      self.min_unanimity, self.max_variance)
-        elif self.rolling_accuracy > 0.58:
-            # Winning period — relax slightly to increase volume
-            self.min_signal_score = max(30.0, self.min_signal_score - 0.5)
-            self.min_unanimity = max(0.60, self.min_unanimity - 0.01)
-            self.max_variance = min(0.065, self.max_variance + 0.001)
+        elif self.rolling_accuracy > 0.55:
+            # Winning period — relax to increase volume
+            self.min_signal_score = max(25.0, self.min_signal_score - 0.8)
+            self.min_unanimity = max(0.50, self.min_unanimity - 0.015)
+            self.max_variance = min(0.075, self.max_variance + 0.002)
             log.info("Feedback loop RELAXING: acc=%.1f%%, score>=%.0f, unan>=%.2f, var<=%.3f",
                      self.rolling_accuracy * 100, self.min_signal_score,
                      self.min_unanimity, self.max_variance)

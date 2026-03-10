@@ -94,7 +94,7 @@ class DispatchModel:
         return float(self._sigmoid(z))
 
     def should_dispatch(self, pred: dict, symbol: str = "",
-                        min_win_prob: float = 0.48) -> tuple:
+                        min_win_prob: float = 0.44) -> tuple:  # v16.1: lowered from 0.48
         """Return (should_send, win_probability, reason)."""
         wp = self.predict_win_probability(pred, symbol)
         if self.n_updates < MIN_TRAINING_SAMPLES:

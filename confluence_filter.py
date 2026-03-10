@@ -197,14 +197,14 @@ def check_confluence(m5_df, m15_df=None, h1_df=None,
         h1_dir_check = directions.get("H1", "NEUTRAL")
         if h1_dir_check != "NEUTRAL" and h1_dir_check != predicted_direction and h1_dir_check != "N/A":
             _, h1_opp_conf = _tf_direction_v2(h1_df, lookback=2, tf_name="H1")
-            if h1_opp_conf >= 0.65:
-                # Strong H1 opposition — still block (like old hard gate)
+            if h1_opp_conf >= 0.80:
+                # v16.1: Only block on very strong H1 opposition (was 0.65)
                 h1_hard_gate_pass = False
                 h1_penalty = 0.40
                 passed = False
-            elif h1_opp_conf >= 0.45:
+            elif h1_opp_conf >= 0.55:
                 # Moderate H1 opposition — heavy penalty but allow if M5+M15 strong
-                h1_penalty = 0.25
+                h1_penalty = 0.20
                 weighted_score *= (1.0 - h1_penalty)
                 scaled_score = min(3.0, weighted_score * 3.0 / 2.0)
                 # Re-check pass with reduced score

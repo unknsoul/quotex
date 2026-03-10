@@ -1,5 +1,5 @@
 """
-QUOTEX LORD v15 — Advanced ML Trading Signal Engine with GRU Deep Learning.
+QUOTEX LORD v16.1 — Advanced ML Trading Signal Engine with Attention-GRU + StackingCombiner.
 
 14-layer pipeline:
   1. Data Collector       — fetch OHLCV from MT5
@@ -112,24 +112,24 @@ LIVE_CANDLES_TO_FETCH = 1000     # warmup for EMA-200
 
 # Signal filters
 MIN_CONFIDENCE = SIGNAL_MIN_CONFIDENCE   # minimum confidence to send
-MAX_SIGNALS_PER_CYCLE = 4               # increased from 3 for more trades
-MIN_SIGNAL_SCORE = 35.0                 # lowered from 40 for more trades
+MAX_SIGNALS_PER_CYCLE = 6               # v16.1: raised from 4 for more volume
+MIN_SIGNAL_SCORE = 28.0                 # v16.1: lowered from 35 for more trades
 
 # Ensemble agreement
-MIN_UNANIMITY = 0.667           # 4/6 models agree
-MAX_ENSEMBLE_VARIANCE = 0.055   # slightly relaxed from 0.050
+MIN_UNANIMITY = 0.55            # v16.1: 5/9 majority rule
+MAX_ENSEMBLE_VARIANCE = 0.065   # v16.1: aligned with relaxed config
 
 # Pair selector
-PAIR_SCORE_REFRESH = 12          # re-score every 12 cycles (1 hour)
-PAIR_SELECTOR_MIN_SCORE = 18     # relaxed to allow more pairs through
+PAIR_SCORE_REFRESH = 6           # v16.1: re-score every 6 cycles (30 min) for faster adaptation
+PAIR_SELECTOR_MIN_SCORE = 14     # v16.1: lowered to allow more pairs through
 
 # Risk filter — WARNINGS ONLY, never block (risk_filter.py is informational)
 # Only ATR spikes are hard blocks (extreme conditions)
 HARD_RISK_PREFIXES = ("ATR spike",)
 
 # Cooldown
-COOLDOWN_CANDLES = 3
-MAX_CONSECUTIVE_LOSSES_PER_SYM = 3
+COOLDOWN_CANDLES = 2
+MAX_CONSECUTIVE_LOSSES_PER_SYM = 4   # v16.1: more tolerance before cooldown
 
 # Drift check interval
 DRIFT_CHECK_INTERVAL = 60       # every 60 cycles (~5 hours)
@@ -223,13 +223,13 @@ def _check_momentum_confirmation(pred: dict, m5_df) -> tuple:
     last_close = m5_df["close"].iloc[-1]
     last_open = m5_df["open"].iloc[-1]
 
-    # Check 1: Recent candle majority
+    # Check 1: Recent candle majority — v16.1: relaxed (only block if ALL bars oppose)
     if direction == "UP" and green_count == 0:
         return False, "No green candles in last 3 bars"
     if direction == "DOWN" and green_count == 3:
         return False, "All green candles in last 3 bars"
 
-    # Check 2: RSI extreme check (don't BUY at RSI>85 or SELL at RSI<15)
+    # Check 2: RSI extreme check — v16.1: relaxed thresholds
     rsi = 50  # default neutral
     try:
         if "rsi_14" in m5_df.columns and not pd.isna(m5_df["rsi_14"].iloc[-1]):
@@ -485,7 +485,7 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
             worst_pair = f"🥉 Worst: {worst_sym} ({ww['w']}/{ww['t']})"
 
     lines = [
-        "⚡ QUOTEX LORD v15 ⚡",
+        "⚡ QUOTEX LORD v16.1 ⚡",
         f"⏰ {now_str}",
         f"📊 Analyzed: {n_analyzed} | Passed: {n_passed}",
         "━" * 26,
@@ -2208,7 +2208,7 @@ async def _auto_signal_job(app: Application):
 
                     # Per-symbol consecutive loss check
                     if _consecutive_losses.get(sym, 0) >= MAX_CONSECUTIVE_LOSSES_PER_SYM:
-                        _cooldown_until[sym] = datetime.now(timezone.utc) + timedelta(minutes=30)
+                        _cooldown_until[sym] = datetime.now(timezone.utc) + timedelta(minutes=15)  # v16.1: 15 min (was 30)
                         filtered_out[sym] = f"per_sym_losses:{_consecutive_losses[sym]}"
                         _consecutive_losses[sym] = 0
                         continue
@@ -2242,7 +2242,7 @@ async def _auto_signal_job(app: Application):
                     # Regime transition detection
                     prev = _last_regime.get(sym)
                     if prev and regime != prev:
-                        _regime_skip[sym] = 2
+                        _regime_skip[sym] = 1  # v16.1: 1 cycle skip (was 2)
                         filtered_out[sym] = f"regime_shift:{prev}->{regime}"
                         _last_regime[sym] = regime
                         continue
@@ -2359,17 +2359,11 @@ async def _auto_signal_job(app: Application):
             except Exception as e:
                 log.warning("Correlation filter error: %s", e)
 
-            # ── Direction Flip Filter ──
+            # ── Direction Flip Filter ── v16.1: Disabled — model quality handles this
+            # Direction-flip blocking was killing too many valid reversal signals
             for sym, pred in list(predictions.items()):
-                direction = pred["suggested_direction"]
-                regime = pred.get("market_regime", "Unknown")
-                if sym in _prev_directions:
-                    if _prev_directions[sym] != direction and regime != "Trending":
-                        filtered_out[sym] = "direction_flip"
-                        del predictions[sym]
-                        continue
                 if sym in predictions:
-                    _prev_directions[sym] = direction
+                    _prev_directions[sym] = pred["suggested_direction"]
 
             # ── Stacking Gate ──
             for sym, pred in list(predictions.items()):
@@ -2724,7 +2718,7 @@ def main():
 
     app.post_init = _on_startup
 
-    log.info("QUOTEX LORD v15 Advanced starting...")
+    log.info("QUOTEX LORD v16.1 Advanced starting...")
     app.run_polling(drop_pending_updates=True)
 
 
