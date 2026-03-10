@@ -1,7 +1,13 @@
+# -*- coding: utf-8 -*-
 """
-Predict Engine — v11.1 Production-safe, strategy-enhanced.
+Predict Engine — v11 Advanced Production Pipeline.
 
-v11.1 upgrades:
+v11 upgrades (full plan):
+  - Same-Candle Detector (SC-1 to SC-5): stale/frozen candle detection
+  - 9-Strategy Signal Engine: parallel evaluation with composite scoring
+  - 12-Pattern Candlestick Overlay: confirm/contradict scoring
+  - Staleness Tracker: crossover signal decay
+  - CHOPPY regime signal suspension
   - Hour-strategy confidence scaling (replaces hour blocking)
   - Anti-streak engine: prevents directional collapse
   - Candle quality filter: detects stale/repetitive candles
@@ -55,11 +61,18 @@ from config import (
     V11_EXHAUSTION_ENABLED, V11_EXHAUSTION_SKIP_THRESHOLD,
     V11_EXHAUSTION_PENALTY_START,
     V11_SYMBOL_CONFIDENCE_ADJUSTMENTS,
+    V11_SAME_CANDLE_ENABLED, V11_STRATEGY_ENGINE_ENABLED,
+    V11_STALENESS_ENABLED, V11_PATTERN_OVERLAY_ENABLED,
+    V11_CHOPPY_REGIME_SUSPEND,
 )
 from candle_quality import candle_quality_score, candle_freshness_score
 from anti_streak import apply_streak_correction, get_streak_engine
 from momentum_exhaust import compute_exhaustion_score
 from session_filter import get_hour_strategy, get_hour_confidence_multiplier
+from same_candle_detector import detect_same_candle
+from strategy_scorer import score_strategies, get_regime_weight_overrides
+from staleness_tracker import track_crossover_staleness
+from candle_patterns import compute_pattern_score_adjustment
 from regime_detection import (
     get_regime_thresholds, regime_stability_score, get_session,
     get_trend_alignment,
@@ -543,11 +556,28 @@ def predict(df, regime):
         conf_reliability, conf_alert = get_confidence_reliability()
 
         # ═══════════════════════════════════════════════════════════
-        # ═══ v11: NEW FILTERS (anti-streak, candle quality, exhaustion, hour/symbol gating)
+        # ═══ v11: NEW FILTERS (same-candle, strategy engine, staleness, patterns,
+        # ═══     anti-streak, candle quality, exhaustion, hour/symbol gating)
         # ═══════════════════════════════════════════════════════════
         
         v11_skip_reasons = []
         predicted_dir = "UP" if green_p >= 0.5 else "DOWN"
+        
+        # v11 Layer 0: Same-Candle Detector (SC-1 to SC-5) ─── GATE
+        sc_info = {"should_skip": False, "flags": [], "confidence_penalty": 1.0, "details": "clear"}
+        if V11_SAME_CANDLE_ENABLED:
+            try:
+                sc_info = detect_same_candle(df)
+                if sc_info["should_skip"]:
+                    v11_skip_reasons.append(f"Same-candle: {sc_info['details']}")
+                elif sc_info["confidence_penalty"] < 1.0:
+                    confidence *= sc_info["confidence_penalty"]
+            except Exception as e:
+                log.debug("Same-candle detector failed: %s", e)
+        
+        # v11 Layer 0b: CHOPPY Regime Suspension
+        if V11_CHOPPY_REGIME_SUSPEND and regime == "CHOPPY":
+            v11_skip_reasons.append("CHOPPY regime — all signals suspended")
         
         # v11.1 Layer 1: Hour-Strategy Confidence Scaling (replaces hour blocking)
         hour_val = None
@@ -619,6 +649,52 @@ def predict(df, regime):
         # v11 Layer 5: Symbol-Specific Confidence Adjustment
         # Applied later in telegram_bot when symbol is known, but if df has symbol info:
         # (This is handled in the result dict for the caller to apply)
+        
+        # v11 Layer 6: Strategy Engine (9 parallel strategies)
+        strategy_result = {"signal_valid": True, "composite_score": 0, "composite_direction": "NEUTRAL",
+                          "strategies_agreeing": 0, "details": "", "per_strategy": {}}
+        if V11_STRATEGY_ENGINE_ENABLED and not v11_skip_reasons:
+            try:
+                # Determine H1 direction from confluence
+                h1_dir = "NEUTRAL"
+                regime_weights = get_regime_weight_overrides(regime.upper().replace(" ", "_"))
+                strategy_result = score_strategies(
+                    df, h1_direction=h1_dir, regime=regime, regime_weights=regime_weights
+                )
+                # Strategy validation acts as confirmation — not a hard gate
+                # but reduces confidence if strategies disagree with ML
+                if strategy_result["composite_direction"] != "NEUTRAL":
+                    if strategy_result["composite_direction"] != predicted_dir:
+                        # Strategy engine disagrees with ML — reduce confidence
+                        confidence *= 0.90
+                    elif strategy_result["signal_valid"]:
+                        # Strategy engine confirms ML with strong agreement — boost
+                        confidence *= 1.05
+            except Exception as e:
+                log.debug("Strategy engine failed: %s", e)
+        
+        # v11 Layer 7: Staleness Tracker (crossover signal decay)
+        staleness_info = {"overall_freshness": 0.5, "is_fresh": True}
+        if V11_STALENESS_ENABLED and not v11_skip_reasons:
+            try:
+                staleness_info = track_crossover_staleness(df)
+                if staleness_info["overall_freshness"] < 0.3 and not staleness_info["is_fresh"]:
+                    confidence *= 0.92  # slight penalty for stale crossovers
+            except Exception as e:
+                log.debug("Staleness tracker failed: %s", e)
+        
+        # v11 Layer 8: Candlestick Pattern Overlay (12 patterns)
+        pattern_info = {"adjustment": 0, "patterns": [], "suppressed": False,
+                       "momentum_exhaustion": False, "details": ""}
+        if V11_PATTERN_OVERLAY_ENABLED and not v11_skip_reasons:
+            try:
+                pattern_info = compute_pattern_score_adjustment(df, predicted_dir)
+                # Apply as confidence adjustment (scaled from ±20 score to ±2% confidence)
+                if pattern_info["adjustment"] != 0:
+                    conf_adj = pattern_info["adjustment"] / 1000.0  # ±0.02 max
+                    confidence *= (1.0 + conf_adj)
+            except Exception as e:
+                log.debug("Pattern overlay failed: %s", e)
         
         # ═══ END v11 FILTERS ═══════════════════════════════════════
 
@@ -740,6 +816,17 @@ def predict(df, regime):
             "streak_length": get_streak_engine().current_streak_len if V11_ANTI_STREAK_ENABLED else 0,
             "hour_quality": hour_strategy.get("quality", "normal"),
             "hour_multiplier": hour_strategy.get("multiplier", 1.0),
+            # v11 advanced fields
+            "same_candle_flags": sc_info.get("flags", []),
+            "same_candle_details": sc_info.get("details", "clear"),
+            "strategy_result": strategy_result,
+            "strategy_composite": strategy_result.get("composite_score", 0),
+            "strategies_agreeing": strategy_result.get("strategies_agreeing", 0),
+            "strategy_direction": strategy_result.get("composite_direction", "NEUTRAL"),
+            "staleness_freshness": staleness_info.get("overall_freshness", 0.5),
+            "pattern_adjustment": pattern_info.get("adjustment", 0),
+            "pattern_names": pattern_info.get("patterns", []),
+            "pattern_suppressed": pattern_info.get("suppressed", False),
         }
 
         log.info(
@@ -782,6 +869,17 @@ def _safe_fallback(reason="unknown"):
         "streak_length": 0,
         "hour_quality": "unknown",
         "hour_multiplier": 1.0,
+        # v11 advanced fields
+        "same_candle_flags": [],
+        "same_candle_details": "fallback",
+        "strategy_result": {},
+        "strategy_composite": 0,
+        "strategies_agreeing": 0,
+        "strategy_direction": "NEUTRAL",
+        "staleness_freshness": 0.5,
+        "pattern_adjustment": 0,
+        "pattern_names": [],
+        "pattern_suppressed": False,
     }
 
 def update_prediction_history(green_p, was_correct, confidence=0.5):

@@ -1,5 +1,5 @@
 """
-QUOTEX LORD v11.1 — Strategy-Enhanced ML Trading Signal Engine.
+QUOTEX LORD v11 — Advanced 21-Layer ML Trading Signal Engine.
 
 14-layer pipeline:
   1. Data Collector       — fetch OHLCV from MT5
@@ -124,7 +124,7 @@ MAX_CONSECUTIVE_LOSSES_PER_SYM = 3
 # Drift check interval
 DRIFT_CHECK_INTERVAL = 60       # every 60 cycles (~5 hours)
 
-# Trading hours (UTC) — v11.1: ALL hours tradeable, confidence scaling handles quality
+# Trading hours (UTC) — v11 Advanced: ALL hours tradeable, confidence scaling handles quality
 # No hours are blocked; weak hours get penalized via session_filter.HOUR_CONFIDENCE_MULT
 ALL_TRADING_HOURS_UTC = set(range(24))
 
@@ -470,7 +470,7 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
             worst_pair = f"🥉 Worst: {worst_sym} ({ww['w']}/{ww['t']})"
 
     lines = [
-        "⚡ QUOTEX LORD v11.1 ⚡",
+        "⚡ QUOTEX LORD v11 ⚡",
         f"⏰ {now_str}",
         f"📊 Analyzed: {n_analyzed} | Passed: {n_passed}",
         "━" * 26,
@@ -556,6 +556,22 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
             lines.append("   🟢 Prime Trading Hour")
         elif hour_quality in ("weak", "poor"):
             lines.append(f"   🟡 {hour_quality.title()} Hour (extra confirmation)")
+        # v11: Same-candle warning
+        sc_flags = pred.get("same_candle_flags", [])
+        if sc_flags:
+            lines.append(f"   ⚠️ Candle: {', '.join(sc_flags)}")
+        # v11: Strategy engine breakdown
+        strat_agree = pred.get("strategies_agreeing", 0)
+        strat_comp = pred.get("strategy_composite", 0)
+        strat_dir = pred.get("strategy_direction", "NEUTRAL")
+        if strat_agree > 0:
+            lines.append(f"   🎯 Strategies: {strat_agree}/8 {strat_dir} (score: {strat_comp:.0f})")
+        # v11: Pattern overlay
+        patterns = pred.get("pattern_names", [])
+        pat_adj = pred.get("pattern_adjustment", 0)
+        if patterns:
+            pat_icon = "🟢" if pat_adj > 0 else "🔴" if pat_adj < 0 else "⚪"
+            lines.append(f"   {pat_icon} Patterns: {', '.join(patterns[:3])} ({pat_adj:+d})")
         if reasons:
             lines.append(f"   💡 {reasons}")
         lines.append(f"   ⏱ Expires: {expiry_str} UTC ({countdown_min}m {countdown_rem}s)")
@@ -566,7 +582,7 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
 
     lines.append("")
     lines.append("━" * 26)
-    lines.append(f"🛡 v11.1: Strategy-Scaled | Anti-Streak | All-Hour Trading")
+    lines.append("🛡 v11: 9-Strategy | 12-Pattern | Same-Candle Guard")
 
     # Session accuracy
     if today_outcomes:
@@ -1057,9 +1073,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _save_subscribers()
 
     text = (
-        "⚡ QUOTEX LORD v11.1 ⚡\n\n"
-        "Strategy-Enhanced ML signal engine.\n"
-        "All-hour trading with smart confidence scaling.\n\n"
+        "⚡ QUOTEX LORD v11 Advanced ⚡\n\n"
+        "9-Strategy | 12-Pattern | Same-Candle Guard\n"
+        "21-layer ML pipeline with smart confidence scaling.\n\n"
         f"📊 Symbols: {', '.join(SYMBOLS)}\n"
         f"⏱ Timeframe: M5 (5-minute candles)\n"
         f"🤖 6 ML models + meta-model ensemble\n"
@@ -1491,7 +1507,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "back":
         await query.edit_message_text(
-            "⚡ QUOTEX LORD v11.1 ⚡\n\nUse the menu below.",
+            "⚡ QUOTEX LORD v11 Advanced ⚡\n\nUse the menu below.",
             reply_markup=_main_menu(chat_id),
         )
 
@@ -1651,24 +1667,29 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "info":
         text = (
-            "⚡ QUOTEX LORD v11.1 ⚡\n\n"
-            "18-layer ML pipeline:\n"
-            "  6 model ensemble + isotonic calibration\n"
+            "⚡ QUOTEX LORD v11 Advanced ⚡\n\n"
+            "21-layer ML pipeline:\n"
+            "  ✅ Same-Candle Detector (SC-1 to SC-5)\n"
+            "  ✅ 9-Strategy Signal Engine (parallel)\n"
+            "  ✅ 12 Candlestick Pattern Overlay\n"
+            "  ✅ Crossover Staleness Tracker\n"
+            "  ✅ 6 model ensemble + isotonic calibration\n"
             "  (XGB×2 + HistGBM + ExtraTrees + RF + CatBoost)\n"
-            "  HistGBM meta-model (reliability)\n"
-            "  Logistic weight learner (confidence)\n"
-            "  Symmetric triple barrier (TP=1.5×ATR, SL=1.0×ATR)\n"
-            "  Multi-TF confluence (M5/M15/H1)\n"
-            "  Anti-Streak Engine (prevents directional collapse)\n"
-            "  Candle Quality Filter (detects stale candles)\n"
-            "  Momentum Exhaustion Detector\n"
-            "  🆕 Hour-Strategy Scaling (no blocking, smart scaling)\n"
-            "  🆕 Weak-Hour Extra Confirmation\n"
-            "  Symbol Confidence Adjustments\n"
-            "  Signal validator + quality filter\n"
-            "  Circuit breaker (5 losses / 8% DD)\n"
-            "  Online learning (SGD/PA)\n"
-            "  Feature drift detection (PSI/KS)\n\n"
+            "  ✅ HistGBM meta-model (reliability)\n"
+            "  ✅ Logistic weight learner (confidence)\n"
+            "  ✅ Symmetric triple barrier (TP=1.5×ATR, SL=1.0×ATR)\n"
+            "  ✅ Multi-TF confluence + H1 hard gate\n"
+            "  ✅ CHOPPY regime suspension\n"
+            "  ✅ Anti-Streak Engine\n"
+            "  ✅ Candle Quality Filter\n"
+            "  ✅ Momentum Exhaustion Detector\n"
+            "  ✅ Hour-Strategy Scaling (no blocking)\n"
+            "  ✅ Martingale MM (capped step 3)\n"
+            "  ✅ Symbol Confidence Adjustments\n"
+            "  ✅ Signal validator + quality filter\n"
+            "  ✅ Circuit breaker (5 losses / 8% DD)\n"
+            "  ✅ Online learning (SGD/PA)\n"
+            "  ✅ Feature drift detection (PSI/KS)\n\n"
             f"Features: {len(FEATURE_COLUMNS)} forward-safe\n"
             f"Symbols: {len(SYMBOLS)}\n"
             "Quality over quantity."
@@ -2060,7 +2081,7 @@ async def _auto_signal_job(app: Application):
                 await asyncio.sleep(1800)
                 continue
 
-            # v11.1: No hour blocking — all hours tradeable via confidence scaling
+            # v11 Advanced: No hour blocking — all hours tradeable via confidence scaling
 
             # ── LAYER 13: Drift Detection (periodic) ──
             _candle_count += 1
@@ -2531,7 +2552,7 @@ async def _retrain_check_job(app: Application):
 # =============================================================================
 
 def main():
-    """Initialize and start the v11.1 bot."""
+    """Initialize and start the v11 Advanced bot."""
     if not TELEGRAM_BOT_TOKEN:
         log.error("TELEGRAM_BOT_TOKEN not set. Exiting.")
         sys.exit(1)
@@ -2590,7 +2611,7 @@ def main():
     app.add_handler(CallbackQueryHandler(_handle_callback))
 
     async def _on_startup(app_ref: Application):
-        log.info("Telegram bot starting (v11.1)...")
+        log.info("Telegram bot starting (v11 Advanced)...")
 
         # Start background tasks
         asyncio.create_task(_auto_signal_job(app_ref))
@@ -2602,7 +2623,7 @@ def main():
 
     app.post_init = _on_startup
 
-    log.info("QUOTEX LORD v11.1 starting...")
+    log.info("QUOTEX LORD v11 Advanced starting...")
     app.run_polling(drop_pending_updates=True)
 
 

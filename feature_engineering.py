@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Feature Engineering v7 — volume imbalance + TF agreement + pattern sequences.
 
@@ -122,6 +123,12 @@ FEATURE_COLUMNS = [
     "hour_quality_score",          # Data-driven hour quality (0.80-1.06)
     "hour_volatility_interaction", # Hour quality × volatility
     "hour_momentum_interaction",   # Hour quality × momentum
+    # v11 Advanced: Strategy & Pattern Features
+    "same_candle_score",           # Same-candle detector composite (0=stale, 1=clear)
+    "crossover_staleness",         # Crossover signal freshness (0=none, 1=fresh)
+    "pattern_score",               # Candlestick pattern score (-20 to +20 scaled to 0-1)
+    "strategy_agreement",          # Fraction of 8 strategies agreeing (0-1)
+    "strategy_composite",          # Composite strategy score (0-100 scaled to 0-1)
 ]
 
 
@@ -870,6 +877,58 @@ def compute_features(df, m15_df=None, h1_df=None, m1_df=None):
     df["hour_quality_score"] = hour_q
     df["hour_volatility_interaction"] = hour_q * df["volatility_zscore"]
     df["hour_momentum_interaction"] = hour_q * df["momentum_rolling_5"]
+
+    # v11 Advanced: Strategy & Pattern Features (computed statistically)
+    # Same-candle score: composite staleness indicator
+    # Uses candle_freshness + candle_body_quality + range_vs_avg
+    sc_fresh = df["candle_freshness"].fillna(0.5)
+    sc_body_q = df["candle_body_quality"].fillna(0.5)
+    sc_range_norm = df["candle_range_vs_avg"].clip(0.2, 3.0) / 3.0
+    df["same_candle_score"] = (sc_fresh * 0.4 + sc_body_q * 0.3 + sc_range_norm * 0.3).clip(0, 1)
+
+    # Crossover staleness: detect if MACD/SMA crossovers are fresh
+    macd_vals = df["macd"].values
+    macd_sig = df["macd_signal"].values
+    sma_20 = close.rolling(20, min_periods=10).mean().values
+    sma_50 = close.rolling(50, min_periods=25).mean().values
+    # Simple proxy: abs change in MACD cross gap (larger change = fresher cross)
+    macd_gap = np.abs(macd_vals - macd_sig)
+    macd_gap_change = pd.Series(macd_gap).diff().abs().fillna(0).values
+    sma_gap = np.abs(sma_20 - sma_50)
+    sma_gap_change = pd.Series(sma_gap).diff().abs().fillna(0).values
+    # Normalize to 0-1 range using percentile rank within rolling window
+    mg_series = pd.Series(macd_gap_change)
+    sg_series = pd.Series(sma_gap_change)
+    mg_rank = mg_series.rolling(50, min_periods=10).apply(lambda x: (x.iloc[-1] >= x).mean(), raw=False).fillna(0.5)
+    sg_rank = sg_series.rolling(50, min_periods=10).apply(lambda x: (x.iloc[-1] >= x).mean(), raw=False).fillna(0.5)
+    df["crossover_staleness"] = ((mg_rank + sg_rank) / 2).clip(0, 1).values
+
+    # Pattern score: use existing pattern-related features as proxy
+    # Combine pin_bar_score, hammer_score, engulfing_score into normalized pattern signal
+    ps = df.get("pin_bar_score", pd.Series(0, index=df.index)).fillna(0)
+    hs = df.get("hammer_score", pd.Series(0, index=df.index)).fillna(0)
+    es = df.get("engulfing_score", pd.Series(0, index=df.index)).fillna(0)
+    raw_pattern = (ps + hs + es).clip(-3, 3)
+    df["pattern_score"] = ((raw_pattern + 3) / 6).clip(0, 1)  # scale -3..+3 to 0..1
+
+    # Strategy agreement: proxy from multi-indicator agreement
+    # RSI direction, MACD direction, EMA slope direction agreement
+    rsi_bull = (df["rsi_14"] < 50).astype(float)
+    macd_bull = (df["macd"] > df["macd_signal"]).astype(float)
+    ema_bull = (df["ema_slope"] > 0).astype(float)
+    stoch_bull = (df["stoch_k"] < 50).astype(float)
+    mom_bull = (df["momentum_rolling_5"] > 0).astype(float)
+    agreement_raw = (rsi_bull + macd_bull + ema_bull + stoch_bull + mom_bull) / 5.0
+    # Convert to agreement score: 0.5 = no agreement, 0/1 = full agreement
+    df["strategy_agreement"] = (2 * (agreement_raw - 0.5).abs()).clip(0, 1)
+
+    # Strategy composite: weighted agreement × confidence factors
+    df["strategy_composite"] = (
+        df["strategy_agreement"] * 0.4 +
+        df["same_candle_score"] * 0.2 +
+        df["crossover_staleness"] * 0.2 +
+        df["pattern_score"] * 0.2
+    ).clip(0, 1)
 
     # Drop warmup
     warmup = max(EMA_200, BB_PERIOD, ATR_PERIOD, RSI_PERIOD, MACD_SLOW,

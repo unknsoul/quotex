@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # regime_classifier.py — Market regime detection for model routing
 # Called at the start of every candle prediction cycle.
 # Output used by: dynamic_ensemble, Gate 4, predict_engine model selector.
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 # ── Config ──────────────────────────────────────────────────────────────────
 ADX_TREND_THRESHOLD  = 25.0   # ADX > 25 = trending
 ADX_RANGE_THRESHOLD  = 20.0   # ADX < 20 = ranging
+ADX_CHOPPY_THRESHOLD = 15.0   # ADX < 15 + alternating candles = choppy
 ATR_HIGH_VOL_PCT     = 80.0   # ATR percentile > 80 = high volatility
 ATR_LOW_VOL_PCT      = 30.0   # ATR percentile < 30 = low volatility
 REGIME_LOOKBACK      = 500    # bars for percentile computation
@@ -16,7 +18,7 @@ TRANSITION_LOOKBACK  = 3      # if regime changed in last N bars = TRANSITION
 
 @dataclass
 class RegimeResult:
-    regime:     str    # TREND | RANGE | HIGH_VOL | TRANSITION
+    regime:     str    # TREND | RANGE | HIGH_VOL | CHOPPY | TRANSITION
     confidence: float  # 0.0–1.0 (used in Gate 4)
     adx:        float
     atr_pct:    float  # ATR percentile vs lookback
@@ -36,6 +38,23 @@ def compute_adx(high, low, close, period=14) -> float:
     dim   = smooth(minus) / (smooth(tr) + 1e-10)
     adx_v = pd.Series(abs(dip-dim)/(dip+dim+1e-10)).ewm(span=period, adjust=False).mean().values
     return float(adx_v[-1] * 100)
+
+
+def _detect_chop(df: pd.DataFrame, window: int = 6) -> bool:
+    """
+    Detect choppy market: alternating candle colors (BGBGBG or GBGBGB).
+    Returns True if recent candles alternate direction frequently.
+    """
+    if df is None or len(df) < window:
+        return False
+    try:
+        recent = df.tail(window)
+        colors = (recent["close"].values > recent["open"].values)
+        alternations = sum(1 for i in range(1, len(colors)) if colors[i] != colors[i - 1])
+        # If 80%+ of transitions are alternating, it's choppy
+        return alternations >= (window - 2)
+    except Exception:
+        return False
 
 
 def classify_regime(df: pd.DataFrame) -> RegimeResult:
@@ -86,6 +105,9 @@ def classify_regime(df: pd.DataFrame) -> RegimeResult:
     elif adx <= ADX_RANGE_THRESHOLD and atr_pct_rank < 50:
         regime = "RANGE"
         confidence = min(1.0, (ADX_RANGE_THRESHOLD - adx) / 10 + 0.60)
+    elif adx < ADX_CHOPPY_THRESHOLD and _detect_chop(df):
+        regime = "CHOPPY"
+        confidence = min(1.0, (ADX_CHOPPY_THRESHOLD - adx) / 10 + 0.55)
     else:
         regime = "TRANSITION"
         confidence = 0.45

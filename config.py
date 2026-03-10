@@ -1,13 +1,19 @@
-"""
-Central configuration — QUOTEX LORD v11 Production Engine.
+# -*- coding: utf-8 -*-
+"""Central configuration - QUOTEX LORD v11 Advanced Production Engine.
 
 v11 upgrades:
+  - 9 Strategy Signal Engine (parallel evaluation)
+  - Same-Candle / Stale Candle Detector (SC-1 to SC-5)
+  - Staleness Tracker (crossover signal decay)
+  - 12 Candlestick Pattern Overlay
+  - CHOPPY regime detection + signal suspension
   - Anti-streak engine (prevents directional collapse)
   - Candle quality filter (detects stale/repetitive candles)
   - Momentum exhaustion detector
   - Symmetric triple barrier labeling (fixes bullish bias)
-  - Hour gating (blocks worst-performing hours)
+  - Hour-strategy confidence scaling (no blocking)
   - Symbol-specific confidence adjustments
+  - Martingale money management (capped at step 3)
   - Data-driven from 418 outcome analysis
 """
 
@@ -150,7 +156,7 @@ PRODUCTION_MAX_UNCERTAINTY = 10.0
 PRODUCTION_MIN_QUALITY_SCORE = 30.0
 PRODUCTION_CONFIDENCE_ALERT_PENALTY = 0.95
 PRODUCTION_REQUIRE_TREND_ALIGNMENT = False
-PRODUCTION_BLOCKED_REGIMES = set()  # v10: no blanket regime blocks; risk filter handles edge cases
+PRODUCTION_BLOCKED_REGIMES = {"CHOPPY"}  # v11: suspend signals in choppy regime
 
 # --- Risk Warnings -----------------------------------------------------------
 MIN_ATR_CLOSE_RATIO = 0.00005   # lowered: M5 candles have smaller ATR
@@ -302,3 +308,30 @@ V11_SYMBOL_CONFIDENCE_ADJUSTMENTS = {
 
 # --- v11: Symmetric Triple Barrier -------------------------------------------
 V11_TRIPLE_BARRIER_SYMMETRIC = True  # Use symmetric TP/SL checking (fixes bias)
+
+# --- v11: Same-Candle Detector (SC-1 to SC-5) --------------------------------
+V11_SAME_CANDLE_ENABLED = True
+V11_SAME_CANDLE_ACTION = "SKIP_SIGNAL"  # SKIP_SIGNAL or REDUCE_CONFIDENCE
+
+# --- v11: Strategy Engine (9 parallel strategies) ----------------------------
+V11_STRATEGY_ENGINE_ENABLED = True
+V11_MIN_STRATEGIES_AGREEING = 4   # at least 4 strategies must agree
+V11_MIN_COMPOSITE_SCORE = 62      # minimum composite strategy score
+V11_CHOPPY_REGIME_SUSPEND = True  # suspend all signals in CHOPPY regime
+
+# --- v11: Staleness Tracker (crossover decay) --------------------------------
+V11_STALENESS_ENABLED = True
+V11_STALENESS_FRESH_BARS = 1      # crossover within 1 bar = fresh
+V11_STALENESS_STALE_BARS = 3      # beyond 3 bars = noise
+
+# --- v11: Martingale Money Management ----------------------------------------
+MARTINGALE_ENABLED = False         # disabled by default for safety
+MARTINGALE_MAX_STEP = 3
+MARTINGALE_MIN_SIGNAL_SCORE = 70   # only on high-confidence signals
+MARTINGALE_DAILY_DD_PAUSE = 8.0    # pause if daily drawdown > 8%
+
+# --- v11: Candlestick Pattern Overlay ----------------------------------------
+V11_PATTERN_OVERLAY_ENABLED = True
+V11_PATTERN_CONFIRM_BONUS = 10     # +10 to composite when pattern confirms
+V11_PATTERN_CONTRADICT_PENALTY = 15  # -15 when pattern contradicts
+V11_PATTERN_MAX_BONUS = 20          # cap at ±20 for multiple patterns

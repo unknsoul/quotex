@@ -1,5 +1,6 @@
+# -*- coding: utf-8 -*-
 """
-Multi-Timeframe Confluence Filter — v2 (Accuracy-Optimized).
+Multi-Timeframe Confluence Filter — v11 (Pipeline Stage 5).
 
 Improved confluence logic:
   1. Weighted TF voting — H1 counts more than M5
@@ -7,11 +8,16 @@ Improved confluence logic:
   3. Partial-pass scoring — strong H1 alignment can override weak M5
   4. EMA hierarchy check — proper trend structure (EMA20 > EMA50 > EMA200)
   5. Momentum magnitude — not just direction, but strength
+  6. v11: Explicit H1 hard gate — blocks counter-trend M5 entries
+  7. v11: EMA hierarchy bonus (+0.10)
+  8. v11: RSI per-TF thresholds
+  9. v11: Confluence pass threshold = 0.60
 
 Returns:
     confluence_score  : 0.0–3.0 (weighted score, not just count)
     confluence_pass   : True if weighted score >= threshold
     tf_directions     : dict of directions per TF
+    h1_hard_gate_pass : True if H1 does not contradict
 """
 
 import logging
@@ -182,17 +188,40 @@ def check_confluence(m5_df, m15_df=None, h1_df=None,
     passed = weighted_score >= weighted_threshold
 
     # Special case: if H1 strongly opposes, fail even if M5+M15 agree
+    # v11: Explicit H1 hard gate — counter-trend M5 entries blocked
+    h1_hard_gate_pass = True
     if h1_df is not None and len(h1_df) >= 20:
         h1_dir_check = directions.get("H1", "NEUTRAL")
         if h1_dir_check != "NEUTRAL" and h1_dir_check != predicted_direction and h1_dir_check != "N/A":
-            # H1 opposes — need very strong M5+M15 to override
-            if raw_count < 2:
-                passed = False
+            # H1 opposes — hard block
+            h1_hard_gate_pass = False
+            passed = False
+
+    # v11: EMA hierarchy bonus (+0.10 to confluence score)
+    ema_hierarchy_bonus = 0.0
+    try:
+        if m5_df is not None and len(m5_df) >= 200:
+            c = m5_df["close"]
+            e20 = c.ewm(span=20, min_periods=10).mean().iloc[-1]
+            e50 = c.ewm(span=50, min_periods=25).mean().iloc[-1]
+            e200 = c.ewm(span=200, min_periods=100).mean().iloc[-1]
+            if predicted_direction == "UP" and e20 > e50 > e200:
+                ema_hierarchy_bonus = 0.10
+            elif predicted_direction == "DOWN" and e20 < e50 < e200:
+                ema_hierarchy_bonus = 0.10
+            if ema_hierarchy_bonus > 0:
+                weighted_score += ema_hierarchy_bonus
+                scaled_score = min(3.0, weighted_score * 3.0 / 2.0)
+    except Exception:
+        pass
 
     if not passed:
         opposing = [f"{tf}={d}" for tf, d in directions.items()
                     if d != predicted_direction and d != "N/A" and d != "NEUTRAL"]
-        reason = f"TF conflict: {', '.join(opposing)} vs pred={predicted_direction}"
+        if not h1_hard_gate_pass:
+            reason = f"H1 hard gate: H1={directions.get('H1')} vs pred={predicted_direction}"
+        else:
+            reason = f"TF conflict: {', '.join(opposing)} vs pred={predicted_direction}"
     else:
         reason = f"Confluence {scaled_score:.1f}/3 OK (weighted)"
 
@@ -201,4 +230,6 @@ def check_confluence(m5_df, m15_df=None, h1_df=None,
         "confluence_pass": passed,
         "tf_directions": directions,
         "reason": reason,
+        "h1_hard_gate_pass": h1_hard_gate_pass,
+        "ema_hierarchy_bonus": round(ema_hierarchy_bonus, 2),
     }
