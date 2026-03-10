@@ -32,9 +32,12 @@ def check_warnings(df, current_spread=0):
 
     # High spread warning
     if "spread" in df.columns and current_spread > 0:
-        p90 = np.percentile(df["spread"].dropna().values[-500:], SPREAD_PERCENTILE)
-        if current_spread > p90:
-            warnings.append(f"High spread: {current_spread} > P{SPREAD_PERCENTILE}={p90:.1f}")
+        spread_vals = df["spread"].dropna().values[-500:]
+        spread_vals = spread_vals[spread_vals > 0]  # ignore zero-spread rows
+        if len(spread_vals) > 10:
+            p90 = np.percentile(spread_vals, SPREAD_PERCENTILE)
+            if p90 > 0 and current_spread > p90:
+                warnings.append(f"High spread: {current_spread} > P{SPREAD_PERCENTILE}={p90:.1f}")
 
     # ATR spike warning
     if len(df) >= ATR_ROLLING_WINDOW:

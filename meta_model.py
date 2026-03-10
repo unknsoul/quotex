@@ -23,7 +23,7 @@ import logging
 import numpy as np
 import pandas as pd
 import joblib
-from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score, roc_auc_score, brier_score_loss
@@ -33,7 +33,7 @@ from config import (
     MODEL_DIR, META_MODEL_PATH, META_FEATURE_LIST_PATH,
     OOF_PREDICTIONS_PATH, DEFAULT_SYMBOL,
     META_N_ESTIMATORS, META_MAX_DEPTH, META_LEARNING_RATE,
-    META_SUBSAMPLE,
+    META_SUBSAMPLE, META_NUM_LEAVES,
     TIMESERIES_SPLITS, ATR_PERCENTILE_WINDOW,
     CALIBRATION_SPLIT_RATIO,
     LOG_LEVEL, LOG_FORMAT,
@@ -91,11 +91,11 @@ def _direction_streak(proba):
 
 
 def _build_meta_clf():
-    return GradientBoostingClassifier(
-        n_estimators=META_N_ESTIMATORS,
+    return HistGradientBoostingClassifier(
+        max_iter=META_N_ESTIMATORS,
         max_depth=META_MAX_DEPTH,
         learning_rate=META_LEARNING_RATE,
-        subsample=META_SUBSAMPLE,
+        max_leaf_nodes=META_NUM_LEAVES,
         random_state=42,
     )
 

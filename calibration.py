@@ -1,7 +1,7 @@
 """
-Calibration v4 — heterogeneous calibrated primary ensemble.
+Calibration v5 — heterogeneous calibrated primary ensemble.
 
-Ensemble: XGBoost + HistGradientBoosting + ExtraTrees + RandomForest.
+Ensemble: XGBoost + HistGradientBoosting + ExtraTrees + RandomForest + CatBoost.
 Each member is calibrated with isotonic regression on a held-out calibration slice.
 """
 
@@ -13,6 +13,12 @@ from sklearn.ensemble import (
     RandomForestClassifier,
 )
 import xgboost as xgb
+
+try:
+    from catboost import CatBoostClassifier
+    _HAS_CATBOOST = True
+except ImportError:
+    _HAS_CATBOOST = False
 
 
 class CalibratedModel:
@@ -62,7 +68,7 @@ def _time_decay_weights(n_samples, half_life_ratio=0.3):
 
 def get_primary_model_specs():
     """Primary production ensemble specs ordered by intended diversity."""
-    return [
+    specs = [
         {
             "model_type": "xgb",
             "name": "XGB_recent_fast",
@@ -99,6 +105,16 @@ def get_primary_model_specs():
             "params": {"n_estimators": 350, "max_depth": 5, "min_samples_leaf": 20},
         },
     ]
+    # Add CatBoost only if installed
+    if _HAS_CATBOOST:
+        specs.append({
+            "model_type": "catboost",
+            "name": "CatBoost_conservative",
+            "window_ratio": 1.0,
+            "params": {"depth": 4, "learning_rate": 0.03, "iterations": 300,
+                       "l2_leaf_reg": 3.0, "min_data_in_leaf": 20},
+        })
+    return specs
 
 
 def fit_model_from_spec(spec, X_train, y_train, spw=1.0, seed=42):
@@ -163,6 +179,20 @@ def fit_model_from_spec(spec, X_train, y_train, spw=1.0, seed=42):
             class_weight="balanced_subsample",
             random_state=seed,
             n_jobs=-1,
+        )
+        model.fit(X_train, y_train, sample_weight=weights)
+        return model
+
+    if model_type == "catboost" and _HAS_CATBOOST:
+        model = CatBoostClassifier(
+            depth=params.get("depth", 4),
+            learning_rate=params.get("learning_rate", 0.03),
+            iterations=params.get("iterations", 300),
+            l2_leaf_reg=params.get("l2_leaf_reg", 3.0),
+            min_data_in_leaf=params.get("min_data_in_leaf", 20),
+            random_seed=seed,
+            verbose=0,
+            allow_writing_files=False,
         )
         model.fit(X_train, y_train, sample_weight=weights)
         return model

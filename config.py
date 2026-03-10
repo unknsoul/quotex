@@ -1,7 +1,8 @@
 """
-Central configuration — Production-Ready Adaptive Candle Probability Engine.
+Central configuration — QUOTEX LORD v10 Production Engine.
 
-Leakage-free pipeline: 5 seeded XGBoost + isotonic calibration + OOF meta/weight.
+14-layer pipeline: 5-model ensemble + HistGBM meta + logistic weight learner.
+Triple barrier labels (TP=1.5×ATR, SL=1.0×ATR, max_bars=4).
 """
 
 import os
@@ -45,7 +46,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # --- Data Settings -----------------------------------------------------------
 DEFAULT_SYMBOL = "EURUSD"
-CANDLES_TO_FETCH = 50000  # v8: expanded from 15K for better generalization
+SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"]
+CANDLES_TO_FETCH = 50000
 MTF_TIMEFRAMES = ["M5", "M15", "H1"]
 TRAINING_SYMBOLS = ["EURUSD"]  # multi-symbol joint training pool
 
@@ -83,10 +85,10 @@ TARGET_ATR_THRESHOLD = 0.3  # only train on moves > 0.3 * ATR
 
 # --- Target Generation (Phase 10: Master Architecture) ----------------------
 TARGET_LOOKAHEAD = 3        # Predict smoothed 3 candles
-TRIPLE_BARRIER_ENABLED = True  # Enabled for S-Tier Binary Options positioning
-TRIPLE_BARRIER_TP = 1.5
-TRIPLE_BARRIER_SL = 1.5
-TRIPLE_BARRIER_MAX_BARS = 12      # max bars before time barrier (60 min at M5)
+TRIPLE_BARRIER_ENABLED = True
+TRIPLE_BARRIER_TP = 1.5   # Take Profit = 1.5 × ATR
+TRIPLE_BARRIER_SL = 1.0   # Stop Loss  = 1.0 × ATR (asymmetric: tighter SL)
+TRIPLE_BARRIER_MAX_BARS = 4  # max 4 candles (20 min at M5)
 
 # --- Regime Detection --------------------------------------------------------
 ADX_TRENDING_THRESHOLD = 25
@@ -134,17 +136,17 @@ CONFIDENCE_MEDIUM_MIN = 60.0
 
 # --- Production Decision Gate -----------------------------------------------
 PRODUCTION_SIGNAL_GATING_ENABLED = True
-PRODUCTION_MIN_CONFIDENCE = 60.0
+PRODUCTION_MIN_CONFIDENCE = 48.0
 PRODUCTION_MIN_META_RELIABILITY = 48.0
-PRODUCTION_MIN_UNANIMITY = 1.00
+PRODUCTION_MIN_UNANIMITY = 0.60
 PRODUCTION_MAX_UNCERTAINTY = 8.0
-PRODUCTION_MIN_QUALITY_SCORE = 45.0
+PRODUCTION_MIN_QUALITY_SCORE = 35.0
 PRODUCTION_CONFIDENCE_ALERT_PENALTY = 0.95
 PRODUCTION_REQUIRE_TREND_ALIGNMENT = False
-PRODUCTION_BLOCKED_REGIMES = {"Ranging"}
+PRODUCTION_BLOCKED_REGIMES = set()  # v10: no blanket regime blocks; risk filter handles edge cases
 
 # --- Risk Warnings -----------------------------------------------------------
-MIN_ATR_CLOSE_RATIO = 0.0003
+MIN_ATR_CLOSE_RATIO = 0.00005   # lowered: M5 candles have smaller ATR
 SPREAD_PERCENTILE = 90
 ATR_SPIKE_MULTIPLIER = 3.0
 
@@ -205,8 +207,50 @@ LOG_FORMAT = "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_SEND_BEFORE_CLOSE_SEC = 15  # start processing 15s early, signal arrives ~5s before close
 
+# --- v10 Validation Quality Gates -------------------------------------------
+VALIDATION_MAX_BRIER = 0.22
+VALIDATION_MIN_WF_ACCURACY = 0.60
+VALIDATION_MIN_HIGH_CONF_ACC = 0.75
+VALIDATION_MIN_PROFIT_FACTOR = 1.4
+VALIDATION_MAX_DRAWDOWN = 0.20
+
 # --- Auto-Learning -----------------------------------------------------------
 AUTO_RETRAIN_ACCURACY_TRIGGER = 0.52
 AUTO_RETRAIN_CORRELATION_TRIGGER = 0.1
 DATA_BUFFER_SIZE = 20000
 MODEL_BACKUP_DIR = os.path.join(BASE_DIR, "models", "backup")
+
+# --- Signal Validator --------------------------------------------------------
+SIGNAL_MIN_CONFIDENCE = 52.0          # realistic minimum for current model accuracy
+SIGNAL_DUPLICATE_WINDOW_SEC = 300     # 5 min duplicate guard
+SIGNAL_MAX_PER_HOUR = 6              # max signals per hour
+SIGNAL_REQUIRE_MTF_ALIGNMENT = True   # block if multi-TF opposes direction
+
+# --- Session Filter ----------------------------------------------------------
+SESSION_HOURS = {
+    "Asian":    list(range(0, 8)),
+    "London":   list(range(8, 16)),
+    "New_York": list(range(13, 21)),
+    "Overlap":  list(range(13, 16)),
+    "Off":      list(range(21, 24)),
+}
+SESSION_QUALITY_SCORES = {
+    "Overlap":  1.0,
+    "London":   0.95,
+    "New_York": 0.90,
+    "Asian":    0.65,
+    "Off":      0.40,
+}
+# Sessions to block entirely per symbol (data-driven)
+SESSION_BLOCK_MAP = {
+    "EURUSD": ["Off"],
+    "GBPUSD": ["Asian", "Off"],
+    "USDJPY": ["Off"],
+    "AUDUSD": ["Off"],
+    "USDCAD": ["Off"],
+    "USDCHF": ["Asian", "Off"],
+}
+
+# --- Performance Dashboard ---------------------------------------------------
+DASHBOARD_DIR = os.path.join(LOG_DIR, "dashboards")
+DASHBOARD_ROLLING_WINDOW = 50    # trades for rolling metrics

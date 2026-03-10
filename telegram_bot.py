@@ -1,283 +1,345 @@
 """
-Telegram Bot v3 — Auto-signal mode + interactive menu.
+QUOTEX LORD v10 — Production-Grade ML Trading Signal Engine.
 
-Auto-Signal: Automatically sends predictions to all subscribers
-5 seconds before every M5 candle close. No request needed.
-
-Features:
-    - Auto-signal every 5 minutes (subscribe to start)
-    - Interactive button menu
-    - Multi-symbol support
-    - Win/loss tracking with actual outcomes
-    - Daily performance summary
-    - Position sizing via Kelly criterion
-
-Usage:
-    set TELEGRAM_BOT_TOKEN=<your_token>
-    python telegram_bot.py
+14-layer pipeline:
+  1. Data Collector       — fetch OHLCV from MT5
+  2. Data Cleaner         — fill gaps, clip outliers, validate
+  3. Feature Engineering  — 66 forward-safe features
+  4. Label Generation     — triple barrier (training only)
+  5. Primary Ensemble     — 5 seeded XGBoost + isotonic calibration
+  6. Meta Model           — HistGBM reliability predictor
+  7. Weight Learner       — logistic confidence scaler
+  8. Regime Detection     — Trending/Ranging/High_Vol/Low_Vol
+  9. Risk Filter          — multi-stage risk assessment
+ 10. Prediction Output    — BUY / SELL / SKIP
+ 11. Signal Delivery      — Telegram dispatch
+ 12. Circuit Breaker      — 5 losses or 8% drawdown halt
+ 13. Drift Detection      — PSI + KS test
+ 14. Online Learning      — SGD/PA continuous adaptation
 """
 
+# =============================================================================
+#  Imports
+# =============================================================================
 import asyncio
+import csv
 import json
-import os
 import logging
-import math
-from datetime import datetime, timezone, timedelta
+import os
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import MetaTrader5 as mt5
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, ContextTypes,
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
 )
 
 from config import (
-    DEFAULT_SYMBOL, CANDLES_TO_FETCH,
-    MT5_PATH, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER,
-    TELEGRAM_BOT_TOKEN, TELEGRAM_SEND_BEFORE_CLOSE_SEC,
-    LOG_LEVEL, LOG_FORMAT, LOG_DIR, ADMIN_CHAT_ID,
+    BASE_DIR,
+    LOG_DIR,
+    MODEL_DIR,
+    SYMBOLS,
+    DEFAULT_SYMBOL,
+    CANDLES_TO_FETCH,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_SEND_BEFORE_CLOSE_SEC,
+    MT5_PATH,
+    MT5_LOGIN,
+    MT5_PASSWORD,
+    MT5_SERVER,
+    ADMIN_CHAT_ID,
+    PRODUCTION_MIN_CONFIDENCE,
+    PRODUCTION_MIN_META_RELIABILITY,
+    PRODUCTION_MIN_UNANIMITY,
+    PRODUCTION_MAX_UNCERTAINTY,
+    PRODUCTION_BLOCKED_REGIMES,
+    ENSEMBLE_VAR_SKIP_THRESHOLD,
+    SESSION_CONFIDENCE_MULT,
+    AUTO_RETRAIN_ACCURACY_TRIGGER,
+    AUTO_RETRAIN_CORRELATION_TRIGGER,
+    SIGNAL_MIN_CONFIDENCE,
+    LOG_LEVEL,
+    LOG_FORMAT,
 )
 from data_collector import fetch_multi_timeframe
-from feature_engineering import compute_features, FEATURE_COLUMNS
-from regime_detection import detect_regime
-from predict_engine import (
-    predict, load_models, log_prediction,
-    verify_candle_closed, update_prediction_history, update_online_learner,
-    set_retrain_flag, reload_models
-)
-from stacking_model import StackingGatekeeper
-from adaptive_threshold import AdaptiveThreshold
-from gemini_filter import verify_signal
-from news_sentiment import fetch_live_news
+from data_cleaner import clean_data
+from feature_engineering import compute_features
+from predict_engine import predict, load_models, log_prediction, verify_candle_closed
+from regime_detection import detect_regime, get_session
 from risk_filter import check_warnings
-from circuit_breaker import CircuitBreaker
-from pair_selector import score_pair
 from confluence_filter import check_confluence
-from signal_ranker import rank_and_select, compute_signal_score
 from correlation_filter import check_correlation
-from candle_patterns import pattern_confirms
-from news_filter import check_news_filter
-import threading
+from signal_ranker import rank_and_select, compute_signal_score, update_symbol_stats
+from pair_selector import score_pair
+from circuit_breaker import CircuitBreaker
+from online_learner import OnlineLearner
+from adaptive_threshold import AdaptiveThreshold
+from kelly_sizing import DrawdownAwareKelly
 from stability import AccuracyTracker, ConfidenceCorrelationTracker
-from production_state import (
-    record_startup, record_prediction, record_error,
-    get_state_summary,
-)
+from production_state import record_startup, record_prediction, record_error
+from stacking_model import StackingGatekeeper
+from signal_validator import validate_signal
+from signal_db import SignalDB
+from performance_dashboard import generate_dashboard, format_dashboard_text
 
-log = logging.getLogger("telegram_bot")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
+log = logging.getLogger("telegram_bot")
 
-# Initialize adaptive threshold and stacking gatekeeper
-_adaptive_thresh = AdaptiveThreshold()
-_stacker = StackingGatekeeper()
+# =============================================================================
+#  Constants
+# =============================================================================
 
-_tracker = AccuracyTracker()
-_conf_tracker = ConfidenceCorrelationTracker()
+# Candle fetch sizes
+LIVE_CANDLES_TO_FETCH = 1000     # warmup for EMA-200
 
-# Supported symbols (6 pairs)
-SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "GBPJPY", "AUDUSD"]
+# Signal filters
+MIN_CONFIDENCE = SIGNAL_MIN_CONFIDENCE   # minimum confidence to send
+MAX_SIGNALS_PER_CYCLE = 3
+MIN_SIGNAL_SCORE = 40.0
 
-# Subscriber storage
-SUBS_FILE = os.path.join(LOG_DIR, "subscribers.json")
-SIGNAL_CSV = os.path.join(LOG_DIR, "signal_outcomes.csv")
-PREDICTION_CSV = os.path.join(LOG_DIR, "all_predictions.csv")
-_subscribers = {}  # {chat_id: {"symbols": [...], "active": True, "mode": "all"|"high"}}
-_last_predictions = {}  # {symbol: {pred_dict, timestamp}}
-_signal_history = []  # [{symbol, direction, confidence, timestamp, result}]
-_outcome_results = []  # [{symbol, predicted, actual, correct, confidence, time}]
-_consecutive_losses = {}  # {symbol: int}
-_cooldown_until = {}  # {symbol: datetime}
-_last_regime = {}  # {symbol: regime_name} — for transition detection
-_regime_transition_skip = {}  # {symbol: int} — candles to skip
+# Ensemble agreement
+MIN_UNANIMITY = 0.667           # 4/6 models agree
+MAX_ENSEMBLE_VARIANCE = 0.050
 
-# Signal quality thresholds (DATA-DRIVEN: tuned from 130 signal history)
-# Confidence <42% has 45.8% win rate (losing!) vs >=42% has 70.7%
-MIN_CONFIDENCE_FILTER = 42.0   # raised from 35 — kills the losing 38-42% tier
-HIGH_CONF_THRESHOLD = 45.0     # for "high" mode subscribers
+# Pair selector
+PAIR_SCORE_REFRESH = 12          # re-score every 12 cycles (1 hour)
+PAIR_SELECTOR_MIN_SCORE = 18     # relaxed to allow more pairs through
+
+# Risk filter — WARNINGS ONLY, never block (risk_filter.py is informational)
+# Only ATR spikes are hard blocks (extreme conditions)
+HARD_RISK_PREFIXES = ("ATR spike",)
+
+# Cooldown
 COOLDOWN_CANDLES = 3
-MAX_CONSECUTIVE_LOSSES = 2     # tightened from 3 — faster cooldown per symbol
-REGIME_SKIP_CANDLES = 2  # skip after regime transition
+MAX_CONSECUTIVE_LOSSES_PER_SYM = 3
 
-# Regimes to block entirely (win rate < 50% in historical data)
-BLOCKED_REGIMES = {"High_Volatility"}  # 47.8% win rate = losing
+# Drift check interval
+DRIFT_CHECK_INTERVAL = 60       # every 60 cycles (~5 hours)
 
-# Symbols to block (consistently underperforming)
-BLOCKED_SYMBOLS = {"AUDUSD"}  # 43.8% win rate over 16 signals
+# Profitable trading hours (UTC) — expanded for global coverage
+PROFITABLE_HOURS_UTC = {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
+BLOCKED_HOURS_UTC = set(range(24)) - PROFITABLE_HOURS_UTC
 
-# Ensemble disagreement threshold — skip when models disagree too much
-MAX_ENSEMBLE_VARIANCE = 0.035  # skip if variance > this (models arguing)
-MIN_UNANIMITY = 0.857          # Strategy 2: require 6/7 models to agree (85.7%)
+# State files
+SUBSCRIBERS_JSON = os.path.join(LOG_DIR, "subscribers.json")
+SENT_SIGNALS_CSV = os.path.join(LOG_DIR, "sent_signals.csv")
+OUTCOMES_CSV = os.path.join(LOG_DIR, "signal_outcomes.csv")
+PENDING_JSON = os.path.join(LOG_DIR, "pending_signals.json")
+ALL_PREDICTIONS_CSV = os.path.join(LOG_DIR, "all_predictions.csv")
 
-# Strategy 3: Trading session windows (UTC hours that are profitable)
-# 14:00 UTC = 76.7% WR, 16:00 = 60%. Block 15:00 (47.5%) and 19:00 (40%)
-PROFITABLE_HOURS_UTC = {7, 8, 9, 10, 11, 12, 13, 14, 16, 17}  # allowed hours
-BLOCKED_HOURS_UTC = {15, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4, 5, 6}  # blocked
+# =============================================================================
+#  State
+# =============================================================================
+_subscribers: dict = {}            # {chat_id_str: {active, symbols, mode, ...}}
+_cb = CircuitBreaker()             # circuit breaker
+_online = OnlineLearner()          # online learner
+_adaptive = AdaptiveThreshold()    # adaptive threshold
+_kelly = DrawdownAwareKelly()      # position sizing
+_accuracy = AccuracyTracker()      # rolling accuracy
+_conf_corr = ConfidenceCorrelationTracker()  # conf-accuracy correlation
+_stacker = StackingGatekeeper()    # stacking gate
+_signal_db = SignalDB()            # SQLite signal database
 
-# Strategy 4: Max signals per cycle
-MAX_SIGNALS_PER_CYCLE = 2     # only send top 2 ranked signals
-MIN_SIGNAL_SCORE = 50.0       # minimum composite score to qualify
+_pair_scores: dict = {}            # {symbol: score}
+_pair_counter = 0                  # cycles since last pair score
+_consecutive_losses: dict = {}     # {symbol: int}
+_cooldown_until: dict = {}         # {symbol: datetime}
+_last_regime: dict = {}            # {symbol: regime_str}
+_regime_skip: dict = {}            # {symbol: candles_to_skip}
+_prev_directions: dict = {}        # {symbol: last_direction}
+_candle_count = 0                  # total candle counter for drift
+_outcome_results: list = []        # in-memory outcome cache
+_win_streaks: dict = {}            # {symbol: streak (+win, -loss)}
+_total_streak = 0                  # overall win/loss streak
+_peak_accuracy = 0.0               # best session accuracy seen
+_cycle_messages: dict = {}         # {cycle_key: {text, msg_ids, sig_ids, results}}
 
-# Strategy 5: Consecutive candle confirmation
-_prev_directions = {}  # {symbol: last_predicted_direction}
+# Per-symbol adaptive confidence thresholds (learns from outcomes)
+_symbol_min_confidence: dict = {}  # {symbol: float} - dynamic min confidence per symbol
 
-# Circuit breaker instance (tightened: 3 losses instead of 5)
-_cb = CircuitBreaker(max_losses=3, max_drawdown_pct=6.0, cooldown_min=30)
-_cb_just_reset = False   # one-time 'trading resumed' message flag
+# =============================================================================
+#  Accuracy-Boosting Helpers
+# =============================================================================
 
-# Pair selector and drift monitor state
-_candle_count = 0
-DRIFT_CHECK_INTERVAL = 100
+def _update_symbol_confidence(symbol: str, was_correct: bool, confidence: float):
+    """
+    Adapt per-symbol minimum confidence threshold based on outcomes.
+    If a symbol is losing, raise the threshold; if winning, lower slightly.
+    """
+    current = _symbol_min_confidence.get(symbol, MIN_CONFIDENCE)
+    if was_correct:
+        # Winning: slightly lower threshold (allow more signals)
+        new_thresh = current - 0.5
+    else:
+        # Losing: raise threshold (be more selective)
+        new_thresh = current + 1.5
+    # Clamp to reasonable range
+    _symbol_min_confidence[symbol] = max(MIN_CONFIDENCE, min(75.0, new_thresh))
 
-_pair_scores = {}
-_pair_score_counter = 0
-PAIR_SCORE_REFRESH = 500
+
+def _check_momentum_confirmation(pred: dict, m5_df) -> tuple:
+    """
+    Verify signal direction with immediate price action momentum.
+    Returns (passed: bool, reason: str)
+    
+    Checks:
+      1. Last 3 candles majority agrees with direction
+      2. RSI not extreme-overbought for BUY or extreme-oversold for SELL
+      3. Current candle body supports direction
+    """
+    if m5_df is None or len(m5_df) < 5:
+        return True, "No data for momentum check"
+
+    direction = pred.get("suggested_direction", "HOLD")
+    if direction == "HOLD":
+        return True, ""
+
+    recent = m5_df.tail(3)
+    green_count = (recent["close"] > recent["open"]).sum()
+    last_close = m5_df["close"].iloc[-1]
+    last_open = m5_df["open"].iloc[-1]
+
+    # Check 1: Recent candle majority
+    if direction == "UP" and green_count == 0:
+        return False, "No green candles in last 3 bars"
+    if direction == "DOWN" and green_count == 3:
+        return False, "All green candles in last 3 bars"
+
+    # Check 2: RSI extreme check (don't BUY at RSI>85 or SELL at RSI<15)
+    rsi = 50  # default neutral
+    try:
+        if "rsi_14" in m5_df.columns and not pd.isna(m5_df["rsi_14"].iloc[-1]):
+            rsi = float(m5_df["rsi_14"].iloc[-1])
+        else:
+            # Compute RSI from close prices
+            delta = m5_df["close"].diff()
+            gains = delta.clip(lower=0).rolling(14).mean()
+            losses = (-delta.clip(upper=0)).rolling(14).mean()
+            last_gain = gains.iloc[-1] if not pd.isna(gains.iloc[-1]) else 0
+            last_loss = losses.iloc[-1] if not pd.isna(losses.iloc[-1]) else 0
+            if last_loss > 1e-10:
+                rs = last_gain / last_loss
+                rsi = 100 - (100 / (1 + rs))
+            elif last_gain > 0:
+                rsi = 100
+    except Exception:
+        rsi = 50  # fallback
+
+    if direction == "UP" and rsi > 85:
+        return False, f"RSI extreme overbought ({rsi:.0f})"
+    if direction == "DOWN" and rsi < 15:
+        return False, f"RSI extreme oversold ({rsi:.0f})"
+
+    return True, "Momentum confirmed"
+
+
+def _check_candle_pattern_quality(m5_df, direction: str) -> float:
+    """
+    Return a 0-1 score of how well recent candle patterns support the direction.
+    Used as a signal quality multiplier.
+    """
+    if m5_df is None or len(m5_df) < 5:
+        return 0.5
+
+    score = 0.5  # neutral baseline
+    recent = m5_df.tail(5)
+    c = recent["close"].values
+    o = recent["open"].values
+    h = recent["high"].values
+    l = recent["low"].values
+
+    # Body size of last candle (strong body = conviction)
+    last_range = h[-1] - l[-1] + 1e-10
+    last_body = abs(c[-1] - o[-1])
+    body_ratio = last_body / last_range
+
+    # Direction alignment: last candle green for UP, red for DOWN
+    last_green = c[-1] > o[-1]
+    if (direction == "UP" and last_green) or (direction == "DOWN" and not last_green):
+        score += 0.15 + 0.10 * body_ratio  # bigger body = more confidence
+
+    # Multi-bar momentum: 3 of 5 bars in direction
+    greens = sum(1 for i in range(len(c)) if c[i] > o[i])
+    if direction == "UP" and greens >= 3:
+        score += 0.10
+    elif direction == "DOWN" and greens <= 2:
+        score += 0.10
+
+    # No extreme wicks against direction (rejection)
+    upper_wick = h[-1] - max(c[-1], o[-1])
+    lower_wick = min(c[-1], o[-1]) - l[-1]
+    if direction == "UP" and upper_wick > last_body * 2:
+        score -= 0.15  # heavy upper wick = selling pressure
+    if direction == "DOWN" and lower_wick > last_body * 2:
+        score -= 0.15  # heavy lower wick = buying pressure
+
+    return max(0.0, min(1.0, score))
 
 
 # =============================================================================
-#  Subscriber Persistence
+#  Initialization
 # =============================================================================
 
-def _load_subscribers():
-    global _subscribers
-    if os.path.exists(SUBS_FILE):
-        try:
-            with open(SUBS_FILE, "r") as f:
-                _subscribers = json.load(f)
-            log.info("Loaded %d subscribers.", len(_subscribers))
-        except Exception:
-            _subscribers = {}
-
-
-def _save_subscribers():
-    os.makedirs(os.path.dirname(SUBS_FILE), exist_ok=True)
-    with open(SUBS_FILE, "w") as f:
-        json.dump(_subscribers, f)
-
-
-def _load_today_from_csv():
-    """Load today's signals and outcomes from CSV on startup."""
-    global _signal_history, _outcome_results
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    import csv
-
-    # Load outcomes
-    if os.path.exists(SIGNAL_CSV):
-        try:
-            with open(SIGNAL_CSV, "r") as f:
-                for row in csv.DictReader(f):
-                    if row.get("timestamp", "").startswith(today):
-                        _outcome_results.append({
-                            "symbol": row.get("symbol", ""),
-                            "predicted": row.get("predicted", ""),
-                            "actual": row.get("actual", ""),
-                            "correct": row.get("correct", "False") == "True",
-                            "confidence": float(row.get("confidence", 0)),
-                            "time": row.get("timestamp", ""),
-                        })
-            log.info("Loaded %d outcomes from CSV.", len(_outcome_results))
-        except Exception as e:
-            log.warning("CSV outcomes load failed: %s", e)
-
-    # Load predictions/signals
-    if os.path.exists(PREDICTION_CSV):
-        try:
-            with open(PREDICTION_CSV, "r") as f:
-                for row in csv.DictReader(f):
-                    if row.get("timestamp", "").startswith(today):
-                        _signal_history.append({
-                            "symbol": row.get("symbol", ""),
-                            "direction": row.get("direction", ""),
-                            "confidence": float(row.get("confidence", 0)),
-                            "kelly": float(row.get("kelly", 0)),
-                            "trade": row.get("trade", ""),
-                            "regime": row.get("regime", ""),
-                            "time": row.get("timestamp", ""),
-                        })
-            log.info("Loaded %d signals from CSV.", len(_signal_history))
-        except Exception as e:
-            log.warning("CSV signals load failed: %s", e)
-
-
-# =============================================================================
-#  MT5 Helpers
-# =============================================================================
-
-def _connect_mt5():
+def _ensure_mt5():
+    """Connect to MT5 terminal."""
+    if mt5.terminal_info() is not None:
+        return True
     kwargs = {}
-    if MT5_PATH: kwargs["path"] = MT5_PATH
-    if MT5_LOGIN: kwargs["login"] = MT5_LOGIN
-    if MT5_PASSWORD: kwargs["password"] = MT5_PASSWORD
-    if MT5_SERVER: kwargs["server"] = MT5_SERVER
+    if MT5_PATH:
+        kwargs["path"] = MT5_PATH
+    if MT5_LOGIN:
+        kwargs["login"] = MT5_LOGIN
+    if MT5_PASSWORD:
+        kwargs["password"] = MT5_PASSWORD
+    if MT5_SERVER:
+        kwargs["server"] = MT5_SERVER
     if not mt5.initialize(**kwargs):
-        log.error("MT5 init failed: %s", mt5.last_error())
+        log.error("MT5 initialization failed: %s", mt5.last_error())
         return False
     log.info("MT5 connected.")
     return True
 
 
-def _get_server_time():
-    """Get current time — always use system UTC clock for reliability."""
-    return datetime.now(timezone.utc)
+def _load_subscribers():
+    global _subscribers
+    try:
+        if os.path.exists(SUBSCRIBERS_JSON):
+            with open(SUBSCRIBERS_JSON, "r") as f:
+                _subscribers = json.load(f)
+            log.info("Loaded %d subscribers.", len(_subscribers))
+    except Exception as e:
+        log.warning("Failed to load subscribers: %s", e)
+        _subscribers = {}
 
 
-def _next_m5_close_time(server_time: datetime) -> datetime:
-    minute = server_time.minute
-    next_bar_minute = (math.ceil((minute + 1) / 5)) * 5
-    if next_bar_minute >= 60:
-        close_time = server_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    else:
-        close_time = server_time.replace(minute=next_bar_minute, second=0, microsecond=0)
-    return close_time
+def _save_subscribers():
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(SUBSCRIBERS_JSON, "w") as f:
+            json.dump(_subscribers, f, indent=2)
+    except Exception as e:
+        log.warning("Failed to save subscribers: %s", e)
 
 
-def _validate_symbol(symbol: str) -> bool:
-    info = mt5.symbol_info(symbol)
-    return info is not None
-
-
-def _get_spread(symbol: str) -> float:
-    info = mt5.symbol_info(symbol)
-    return float(info.spread) if info else 0.0
-
-
-def _is_market_open() -> bool:
-    """Check if forex market is open (not weekend, MT5 has fresh data)."""
-    now = datetime.now(timezone.utc)
-    # Forex closes Friday ~22:00 UTC, opens Sunday ~22:00 UTC
-    if now.weekday() == 5:  # Saturday — always closed
-        return False
-    if now.weekday() == 6 and now.hour < 22:  # Sunday before 22:00
-        return False
-    if now.weekday() == 4 and now.hour >= 22:  # Friday after 22:00
-        return False
-    # Check if MT5 has recent tick
-    tick = mt5.symbol_info_tick(DEFAULT_SYMBOL)
-    if tick is None:
-        return False
-    tick_age = now.timestamp() - tick.time
-    return tick_age < 600  # stale if >10 min
-
-
-def _market_closed_msg() -> str:
-    """Friendly message when market is closed."""
-    now = datetime.now(timezone.utc)
-    ist = now + timedelta(hours=5, minutes=30)
-    # Next Monday 00:05 UTC
-    days_to_mon = (7 - now.weekday()) % 7
-    if days_to_mon == 0:
-        days_to_mon = 7
-    next_open = (now + timedelta(days=days_to_mon)).replace(
-        hour=0, minute=5, second=0, microsecond=0
-    )
-    hours_left = (next_open - now).total_seconds() / 3600
-    return (
-        "🔒 *Market Closed*\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Forex market is closed for the weekend.\n\n"
-        f"📅 Opens: *Monday ~00:05 UTC*\n"
-        f"🇮🇳 IST: *~05:35 Monday*\n"
-        f"⏳ In: *~{hours_left:.0f} hours*\n\n"
-        "💡 _Auto-signals will resume automatically._"
-    )
+def _load_outcomes():
+    """Load historical outcomes for accuracy tracking."""
+    global _outcome_results
+    try:
+        if os.path.exists(OUTCOMES_CSV):
+            import pandas as pd
+            df = pd.read_csv(OUTCOMES_CSV, on_bad_lines="skip")
+            _outcome_results = df.to_dict("records")
+            log.info("Loaded %d outcomes from CSV.", len(_outcome_results))
+    except Exception as e:
+        log.warning("Failed to load outcomes: %s", e)
 
 
 # =============================================================================
@@ -285,16 +347,28 @@ def _market_closed_msg() -> str:
 # =============================================================================
 
 def _run_prediction(symbol: str) -> dict:
-    data = fetch_multi_timeframe(symbol, CANDLES_TO_FETCH)
+    """
+    Execute the full prediction pipeline for a single symbol.
+
+    Layers exercised: 1 (data), 2 (clean), 3 (features), 5-7 (models), 8 (regime).
+    """
+    if not _ensure_mt5():
+        raise RuntimeError("MT5 unavailable")
+
+    data = fetch_multi_timeframe(symbol, min(CANDLES_TO_FETCH, LIVE_CANDLES_TO_FETCH))
     df = data.get("M5")
     if df is None or len(df) == 0:
+        if not _ensure_mt5():
+            raise RuntimeError(f"No M5 data for {symbol}")
+        data = fetch_multi_timeframe(symbol, min(CANDLES_TO_FETCH, LIVE_CANDLES_TO_FETCH))
+        df = data.get("M5")
+    if df is None or len(df) == 0:
         raise RuntimeError(f"No M5 data for {symbol}")
-    m15, h1 = data.get("M15"), data.get("H1")
-    m1 = data.get("M1")
 
+    m15, h1, m1 = data.get("M15"), data.get("H1"), data.get("M1")
     df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
     if df.empty:
-        raise RuntimeError("Not enough data for features.")
+        raise RuntimeError("Feature computation failed.")
 
     if not verify_candle_closed(df):
         df = df.iloc[:-1]
@@ -309,322 +383,1329 @@ def _run_prediction(symbol: str) -> dict:
     now = datetime.now(timezone.utc)
     log_prediction(symbol, regime, result, risk_warnings=risk_warnings, timestamp=now)
 
-    return {
-        "symbol": symbol,
-        "regime": regime,
-        "risk_warnings": risk_warnings,
-        **result,
-    }
+    return {"symbol": symbol, "regime": regime, "risk_warnings": risk_warnings, **result}
+
+
+def _get_spread(symbol: str) -> float:
+    """Get current spread from MT5."""
+    try:
+        tick = mt5.symbol_info_tick(symbol)
+        if tick:
+            return tick.ask - tick.bid
+    except Exception:
+        pass
+    return 0.0
+
+
+def _has_hard_risk(warnings: list) -> tuple:
+    """Check if any hard risk warning should block the signal."""
+    for w in warnings:
+        for prefix in HARD_RISK_PREFIXES:
+            if w.startswith(prefix):
+                return True, w
+    return False, ""
+
+
+def _check_confluence(symbol: str, direction: str) -> dict:
+    """Layer 9: Multi-TF confluence check. Also returns fetched M5 data."""
+    try:
+        data = fetch_multi_timeframe(symbol, 100)
+        result = check_confluence(
+            data.get("M5"), data.get("M15"), data.get("H1"),
+            predicted_direction=direction, min_score=2,
+        )
+        result["_m5_df"] = data.get("M5")
+        return result
+    except Exception:
+        return {"confluence_score": 3, "confluence_pass": True, "_m5_df": None}
 
 
 # =============================================================================
-#  Keyboard Builders
+#  Signal Formatting
 # =============================================================================
 
-def _main_menu_keyboard(chat_id=None):
-    is_subscribed = str(chat_id) in _subscribers and _subscribers[str(chat_id)].get("active", False)
-    sub_btn = ("🔴 Stop Signals", "unsub") if is_subscribed else ("🟢 Start Auto-Signal", "sub")
-
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(sub_btn[0], callback_data=sub_btn[1])],
-        [InlineKeyboardButton("🔮 Predict Now", callback_data="predict_now"),
-         InlineKeyboardButton("⏳ Next Candle", callback_data="predict_next")],
-        [InlineKeyboardButton("📊 Status", callback_data="status"),
-         InlineKeyboardButton("🌊 Regime", callback_data="regime")],
-        [InlineKeyboardButton("📈 Multi-Symbol", callback_data="multi_symbol"),
-         InlineKeyboardButton("ℹ️ Model Info", callback_data="model_info")],
-        [InlineKeyboardButton("💰 Position Guide", callback_data="position_guide"),
-         InlineKeyboardButton("📜 Today's Signals", callback_data="today_signals")],
-        [InlineKeyboardButton("🎯 Results", callback_data="today_results"),
-         InlineKeyboardButton("🏭 Prod State", callback_data="prod_state")],
-    ])
-
-
-def _symbol_keyboard(action_prefix="predict"):
-    buttons = []
-    row = []
-    for sym in SYMBOLS:
-        row.append(InlineKeyboardButton(sym, callback_data=f"{action_prefix}_{sym}"))
-        if len(row) == 3:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    buttons.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="menu")])
-    return InlineKeyboardMarkup(buttons)
-
-
-def _sub_symbol_keyboard():
-    """Symbol selection for auto-signal subscription."""
-    buttons = []
-    row = []
-    for sym in SYMBOLS:
-        row.append(InlineKeyboardButton(f"✅ {sym}", callback_data=f"sub_{sym}"))
-        if len(row) == 3:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    buttons.append([InlineKeyboardButton("📊 All Symbols", callback_data="sub_ALL")])
-    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="menu")])
-    return InlineKeyboardMarkup(buttons)
-
-
-def _alert_mode_keyboard():
-    """Choose signal filter mode."""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📡 All Signals", callback_data="mode_all")],
-        [InlineKeyboardButton("🎯 High-Conf Only (≥70%)", callback_data="mode_high")],
-        [InlineKeyboardButton("🔙 Back", callback_data="menu")],
-    ])
-
-
-def _back_keyboard(chat_id=None):
-    is_sub = str(chat_id) in _subscribers and _subscribers[str(chat_id)].get("active", False)
-    row = [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
-    if not is_sub:
-        row.append(InlineKeyboardButton("🟢 Start Signals", callback_data="sub"))
-    row.append(InlineKeyboardButton("🔮 Predict", callback_data="predict_now"))
-    return InlineKeyboardMarkup([row])
-
-
-# =============================================================================
-#  Message Formatters
-# =============================================================================
-
-def _format_prediction(pred: dict, is_auto=False) -> str:
-    """Format a single prediction — V3 industry-grade format."""
-    direction = "🟢 UP" if pred["suggested_direction"] == "UP" else "🔴 DOWN"
-    arrow = "⬆" if pred["suggested_direction"] == "UP" else "⬇"
-    conf = pred["final_confidence_percent"]
-    green = pred["green_probability_percent"]
-    kelly = pred.get("kelly_fraction_percent", 0.0)
-    regime_raw = pred.get("market_regime", "Unknown")
-    regime_clean = regime_raw.replace("_", " ")
-    trade = str(pred["suggested_trade"]).replace("_", " ")
-    latency = pred.get("latency_ms", -1)
-    uncertainty = pred.get("uncertainty_percent", 0)
-    meta_rel = pred.get("meta_reliability_percent", 0)
-    session = pred.get("session", "Off")
-    stability = pred.get("regime_stability", 0)
-    adaptive_conf = pred.get("adaptive_confidence_percent", conf)
-    variance = pred.get("ensemble_variance", 0)
-
-    regime_emoji = {"Trending": "📈", "Ranging": "↔️",
-                   "High_Volatility": "🔥", "Low_Volatility": "❄️"}.get(regime_raw, "❓")
-    session_emoji = {"London": "🇬🇧", "Overlap": "🌐", "Asian": "🌏", "Off": "💤"}.get(session, "")
-
-    # Confidence bar
-    filled = int(conf / 10)
-    bar = "█" * filled + "░" * (10 - filled)
-
-    # Position size
-    if kelly > 3: size = "🟢 STRONG"
-    elif kelly > 2: size = "🟡 MEDIUM"
-    elif kelly > 1: size = "🟠 LIGHT"
-    else: size = "⚪ SKIP"
-
+def _format_auto_signal(predictions: dict, filtered: dict) -> str:
+    """
+    Format emoji-rich signal message per v10+ spec.
+    """
     now_utc = datetime.now(timezone.utc)
-    ist = now_utc + timedelta(hours=5, minutes=30)
-    time_str = f"{now_utc.strftime('%H:%M')} UTC │ {ist.strftime('%H:%M')} IST"
+    now_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
 
-    header = "🤖 AUTO-SIGNAL" if is_auto else "🔮 PREDICTION"
+    # Next M5 close time (expiry)
+    minute = now_utc.minute
+    next_close_min = ((minute // 5) + 1) * 5
+    if next_close_min >= 60:
+        expiry_time = now_utc.replace(second=0, microsecond=0) + timedelta(hours=1)
+        expiry_time = expiry_time.replace(minute=next_close_min - 60)
+    else:
+        expiry_time = now_utc.replace(minute=next_close_min, second=0, microsecond=0)
+    expiry_str = expiry_time.strftime("%H:%M")
+    countdown_sec = max(0, int((expiry_time - now_utc).total_seconds()))
+    countdown_min = countdown_sec // 60
+    countdown_rem = countdown_sec % 60
 
-    return (
-        f"*{header}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{direction} *{pred['symbol']}* M5 {arrow}\n\n"
-        f"📊 Probability: *{green:.1f}%*\n"
-        f"🎯 Confidence:  `[{bar}]` *{conf:.0f}%*\n"
-        f"🧠 Meta Trust:  *{meta_rel:.0f}%*\n"
-        f"📉 Uncertainty: *{uncertainty:.1f}%*\n\n"
-        f"⏳ Expiry: *5 MINUTES (1 CANDLE)*\n"
-        f"{regime_emoji} Regime: *{regime_clean}* (stab: {stability:.0%})\n"
-        f"{session_emoji} Session: *{session}*\n"
-        f"💰 Kelly: *{kelly:.1f}%* │ Size: {size}\n"
-        f"💡 Action: *{trade}*\n\n"
-        f"⏱ {time_str} │ {latency:.0f}ms"
-    )
-
-
-def _format_combined_signal(predictions: dict, filtered: dict) -> str:
-    """V3 industry-grade combined signal message with all metrics."""
-    now_utc = datetime.now(timezone.utc)
-    ist = now_utc + timedelta(hours=5, minutes=30)
-    time_str = f"{now_utc.strftime('%H:%M')} UTC │ {ist.strftime('%H:%M')} IST"
-
-    # Win rate from recent outcomes
-    recent = _outcome_results[-20:] if _outcome_results else []
-    total_r = len(recent)
-    wins_r = sum(1 for r in recent if r["correct"])
-    wr_pct = f"{wins_r/total_r*100:.0f}%" if total_r > 0 else "—"
-    wr_str = f"{wins_r}/{total_r} ({wr_pct})" if total_r > 0 else "No data"
+    n_analyzed = len(predictions) + len(filtered)
+    n_passed = len(predictions)
 
     lines = [
-        f"🤖 *QUOTEX LORD V3*",
-        f"⏱ {time_str}",
-        f"━━━━━━━━━━━━━━━━━━━━━━━",
+        "⚡ QUOTEX LORD v10+ ⚡",
+        f"⏰ {now_str}",
+        f"📊 Analyzed: {n_analyzed} | Passed: {n_passed}",
+        "━" * 26,
     ]
 
     for sym, pred in sorted(predictions.items()):
-        d = "🟢" if pred["suggested_direction"] == "UP" else "🔴"
-        arrow = "⬆" if pred["suggested_direction"] == "UP" else "⬇"
-        conf = pred["final_confidence_percent"]
-        green = pred["green_probability_percent"]
-        kelly = pred.get("kelly_fraction_percent", 0.0)
-        trade = str(pred["suggested_trade"]).replace("_", " ")
-        regime_raw = pred.get("market_regime", "")
-        regime_clean = regime_raw.replace("_", " ")
-        meta_rel = pred.get("meta_reliability_percent", 0)
+        direction = pred.get("suggested_direction", "HOLD")
+        if direction == "UP":
+            arrow = "🟢 BUY ⬆"
+        elif direction == "DOWN":
+            arrow = "🔴 SELL ⬇"
+        else:
+            arrow = "⚪ SKIP"
+
+        conf = pred.get("final_confidence_percent", 0)
+        green = pred.get("green_probability_percent", 50)
+        meta = pred.get("meta_reliability_percent", 50)
         uncertainty = pred.get("uncertainty_percent", 0)
-        session = pred.get("session", "")
-        stability = pred.get("regime_stability", 0)
-        r_e = {"Trending": "📈", "Ranging": "↔️",
-               "High_Volatility": "🔥", "Low_Volatility": "❄️"}.get(regime_raw, "")
-        s_e = {"London": "🇬🇧", "Overlap": "🌐", "Asian": "🌏", "Off": "💤"}.get(session, "")
+        regime = pred.get("market_regime", "Unknown").replace("_", " ")
+        session = pred.get("session", "Unknown")
+        kelly_pct = pred.get("kelly_fraction_percent", 0)
+        agree = pred.get("ensemble_agree_count", "?")
+        total_m = pred.get("ensemble_total", 5)
+        quality = pred.get("quality_score", 0)
+        strength = pred.get("signal_strength", "—")
+        reasons = pred.get("reason_chain", "")
 
-        # Position size from Kelly
-        if kelly > 3: size = "🟢 STRONG"
-        elif kelly > 2: size = "🟡 MEDIUM"
-        elif kelly > 1: size = "🟠 LIGHT"
-        else: size = "⚪ MIN"
+        # Confidence bar visualization
+        conf_bars = int(conf / 10)
+        conf_bar = "█" * conf_bars + "░" * (10 - conf_bars)
 
-        # Confidence bar
-        filled = int(conf / 10)
-        bar = "█" * filled + "░" * (10 - filled)
+        # Win streak indicator
+        streak_text = ""
+        sym_streak = _win_streaks.get(sym, 0)
+        if sym_streak >= 3:
+            streak_text = f" 🔥{sym_streak}"
+        elif sym_streak <= -2:
+            streak_text = f" ❄️{abs(sym_streak)}"
 
-        direction_text = "UP" if pred["suggested_direction"] == "UP" else "DOWN"
-        lines.append(f"\n{d} {arrow} *{sym}* - {direction_text}")
-        lines.append(f"⏳ *EXPIRY*: 5 Min (1 Candle)")
-        lines.append(f"📊 Prob: {green:.1f}% │ Conf: {conf:.0f}%")
-        lines.append(f"🧠 Meta: {meta_rel:.0f}% │ Unc: {uncertainty:.1f}%")
-        lines.append(f"{r_e} {regime_clean} (stab: {stability:.0%}) │ {s_e} {session}")
-        lines.append(f"💰 Kelly: {kelly:.1f}% │ Size: {size}")
-        lines.append(f"💡 *{trade}*")
-
-
-    # Footer
-    lines.append(f"\n━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🎯 Recent: *{wr_str}*")
-    lines.append(f"🏗 V3 Engine │ 14 Layers │ 65 Features")
+        lines.append("")
+        lines.append(f"{arrow}  {sym} M5{streak_text}")
+        lines.append(f"   [{conf_bar}] {conf:.0f}%")
+        lines.append(f"   📈 Prob: {green:.1f}% | Meta: {meta:.0f}%")
+        lines.append(f"   🎯 Models: {agree}/{total_m} | Strength: {strength}")
+        lines.append(f"   🌊 {regime} | {session}")
+        if quality > 0:
+            lines.append(f"   ⭐ Quality: {quality:.0f}/100")
+        if reasons:
+            lines.append(f"   💡 {reasons}")
+        lines.append(f"   ⏱ Expires: {expiry_str} UTC ({countdown_min}m {countdown_rem}s)")
 
     if filtered:
-        reasons = [f"{s}({str(r).replace('_', '-')})" for s, r in filtered.items()]
-        lines.append(f"⏭ Filtered: {', '.join(reasons[:3])}")
+        reasons_list = [f"{s}({r[:20]})" for s, r in list(filtered.items())[:5]]
+        lines.append(f"\n🚫 Filtered: {', '.join(reasons_list)}")
+
+    lines.append("")
+    lines.append("━" * 26)
+    lines.append(f"🛡 14-Layer Filter | Quality First")
+
+    # Session accuracy
+    if _outcome_results:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_outcomes = [r for r in _outcome_results if r.get("timestamp", "").startswith(today)]
+        if today_outcomes:
+            wins = sum(1 for r in today_outcomes if r.get("correct"))
+            total = len(today_outcomes)
+            pct = wins / total * 100
+            trend = "📈" if pct >= 60 else "📉" if pct < 50 else "➡️"
+            lines.append(f"{trend} Session: {wins}/{total} ({pct:.0f}%)")
+
+    return "\n".join(lines)
+
+
+def _format_prediction_single(pred: dict) -> str:
+    """Format a single manual prediction request."""
+    sym = pred.get("symbol", "?")
+    direction = pred.get("suggested_direction", "HOLD")
+    if direction == "UP":
+        arrow = "🟢 BUY ⬆"
+    elif direction == "DOWN":
+        arrow = "🔴 SELL ⬇"
+    else:
+        arrow = "⚪ SKIP"
+
+    conf = pred.get("final_confidence_percent", 0)
+    green = pred.get("green_probability_percent", 50)
+    meta = pred.get("meta_reliability_percent", 50)
+    uncertainty = pred.get("uncertainty_percent", 0)
+    regime = pred.get("market_regime", "Unknown").replace("_", " ")
+    session = pred.get("session", "Unknown")
+    kelly = pred.get("kelly_fraction_percent", 0)
+    trade = pred.get("suggested_trade", "HOLD")
+    strength = pred.get("signal_strength", "—")
+    reasons = pred.get("reason_chain", "")
+    risk_warnings = pred.get("risk_warnings", [])
+
+    lines = [
+        f"{arrow}  {sym} M5",
+        "",
+        f"Probability: {green:.1f}%",
+        f"Confidence: {conf:.0f}%",
+        f"Meta Trust: {meta:.0f}%",
+        f"Strength: {strength}",
+        "",
+        f"Regime: {regime} | {session}",
+        f"Kelly: {kelly:.1f}%",
+    ]
+    if reasons:
+        lines.append(f"💡 {reasons}")
+    if risk_warnings:
+        lines.append(f"⚠️ {', '.join(risk_warnings[:3])}")
 
     return "\n".join(lines)
 
 
 # =============================================================================
-#  Auto-Signal Background Job
+#  Signal Outcome Tracking
+# =============================================================================
+
+_pending_signals: dict = {}  # {signal_id: {symbol, direction, price, time, ...}}
+
+
+def _record_sent_signal(symbol: str, pred: dict, chat_ids: list):
+    """Record a sent signal for outcome tracking."""
+    signal_id = f"{symbol}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    direction = pred.get("suggested_direction", "HOLD")
+    conf = pred.get("final_confidence_percent", 0)
+    kelly = pred.get("kelly_fraction_percent", 0)
+    regime = pred.get("market_regime", "Unknown")
+    session = pred.get("session", "Unknown")
+
+    # Get entry price
+    try:
+        tick = mt5.symbol_info_tick(symbol)
+        price = tick.bid if tick else 0
+    except Exception:
+        price = 0
+
+    entry = {
+        "signal_id": signal_id,
+        "symbol": symbol,
+        "direction": direction,
+        "confidence": conf,
+        "kelly": kelly,
+        "regime": regime,
+        "session": session,
+        "price": price,
+        "time": datetime.now(timezone.utc).isoformat(),
+        "chat_ids": chat_ids,
+    }
+    _pending_signals[signal_id] = entry
+
+    # Persist pending
+    try:
+        with open(PENDING_JSON, "w") as f:
+            json.dump(_pending_signals, f, indent=2, default=str)
+    except Exception:
+        pass
+
+    # Log to CSV
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        exists = os.path.exists(SENT_SIGNALS_CSV)
+        with open(SENT_SIGNALS_CSV, "a", newline="") as f:
+            w = csv.writer(f)
+            if not exists:
+                w.writerow(["timestamp", "signal_id", "symbol", "direction", "confidence", "kelly", "regime", "price"])
+            w.writerow([entry["time"], signal_id, symbol, direction, f"{conf:.1f}", f"{kelly:.1f}", regime, f"{price:.5f}"])
+    except Exception:
+        pass
+
+    return signal_id
+
+
+async def _resolve_pending_signals(bot: Bot):
+    """
+    Check pending signals, record outcomes, and EDIT original messages with results.
+    Called each cycle to reconcile 5-min-old signals.
+    """
+    if not _pending_signals:
+        return
+
+    now = datetime.now(timezone.utc)
+    resolved = []
+
+    for sig_id, entry in list(_pending_signals.items()):
+        sig_time = datetime.fromisoformat(entry["time"])
+        elapsed = (now - sig_time).total_seconds()
+        if elapsed < 300:  # wait 5 minutes
+            continue
+
+        symbol = entry["symbol"]
+        direction = entry["direction"]
+        entry_price = entry["price"]
+
+        # Get current price
+        try:
+            tick = mt5.symbol_info_tick(symbol)
+            current_price = tick.bid if tick else 0
+        except Exception:
+            current_price = 0
+
+        if entry_price <= 0 or current_price <= 0:
+            resolved.append(sig_id)
+            continue
+
+        # Determine outcome
+        price_change = current_price - entry_price
+        # Treat near-zero change as inconclusive (skip, don't count as loss)
+        pip_size = 0.01 if "JPY" in symbol else 0.0001
+        if abs(price_change) < pip_size * 0.5:
+            # Record as DRAW for cycle message editing
+            for ck, cm in _cycle_messages.items():
+                if sig_id in cm["sig_ids"]:
+                    cm["results"][sig_id] = {
+                        "symbol": symbol,
+                        "direction": direction,
+                        "correct": None,  # draw
+                        "entry_price": entry_price,
+                        "exit_price": current_price,
+                    }
+                    break
+            resolved.append(sig_id)
+            continue
+        if direction == "UP":
+            actual = "UP" if price_change > 0 else "DOWN"
+        elif direction == "DOWN":
+            actual = "DOWN" if price_change < 0 else "UP"
+        else:
+            resolved.append(sig_id)
+            continue
+
+        correct = (direction == actual)
+
+        outcome = {
+            "timestamp": entry["time"],
+            "symbol": symbol,
+            "predicted": direction,
+            "actual": actual,
+            "correct": correct,
+            "green_prob": entry.get("confidence", 50),
+            "confidence": entry.get("confidence", 50),
+            "kelly": entry.get("kelly", 0),
+            "regime": entry.get("regime", "Unknown"),
+            "session": entry.get("session", "Unknown"),
+            "latency_ms": elapsed * 1000 / 300,
+        }
+
+        # Write to CSV
+        try:
+            exists = os.path.exists(OUTCOMES_CSV)
+            with open(OUTCOMES_CSV, "a", newline="") as f:
+                w = csv.writer(f)
+                if not exists:
+                    w.writerow(list(outcome.keys()))
+                w.writerow(list(outcome.values()))
+        except Exception as e:
+            log.warning("Failed to write outcome: %s", e)
+
+        _outcome_results.append(outcome)
+
+        # Update signal_db outcome
+        db_id = entry.get("db_id")
+        if db_id:
+            try:
+                _signal_db.update_outcome(db_id, correct)
+            except Exception:
+                pass
+
+        # Update trackers
+        _accuracy.record(correct)
+        _conf_corr.record(entry.get("confidence", 50), correct)
+
+        # v2: Update signal ranker per-symbol stats + adaptive thresholds
+        update_symbol_stats(symbol, correct)
+        _update_symbol_confidence(symbol, correct, entry.get("confidence", 50))
+
+        # Update stacking gatekeeper with outcome
+        try:
+            _stacker.update(entry, correct)
+        except Exception:
+            pass
+
+        # Circuit breaker
+        _cb.check(was_win=correct)
+
+        # Per-symbol loss tracking + win streak tracking
+        if correct:
+            _consecutive_losses[symbol] = 0
+            _win_streaks[symbol] = max(1, _win_streaks.get(symbol, 0) + 1) if _win_streaks.get(symbol, 0) >= 0 else 1
+        else:
+            _consecutive_losses[symbol] = _consecutive_losses.get(symbol, 0) + 1
+            _win_streaks[symbol] = min(-1, _win_streaks.get(symbol, 0) - 1) if _win_streaks.get(symbol, 0) <= 0 else -1
+
+        # Overall streak tracking
+        global _total_streak
+        if correct:
+            _total_streak = max(1, _total_streak + 1) if _total_streak >= 0 else 1
+        else:
+            _total_streak = min(-1, _total_streak - 1) if _total_streak <= 0 else -1
+
+        # Kelly
+        _kelly.update(correct)
+
+        # Track result for cycle message editing
+        for ck, cm in _cycle_messages.items():
+            if sig_id in cm["sig_ids"]:
+                cm["results"][sig_id] = {
+                    "symbol": symbol,
+                    "direction": direction,
+                    "correct": correct,
+                    "entry_price": entry_price,
+                    "exit_price": current_price,
+                }
+                break
+
+        log.info("Outcome %s %s: predicted=%s actual=%s correct=%s",
+                 sig_id, symbol, direction, actual, correct)
+        resolved.append(sig_id)
+
+    for sig_id in resolved:
+        _pending_signals.pop(sig_id, None)
+
+    # Edit messages for fully resolved cycles
+    cycles_done = []
+    for ck, cm in list(_cycle_messages.items()):
+        if cm["sig_ids"] and len(cm["results"]) >= len(cm["sig_ids"]):
+            new_text = _build_result_text(cm["text"], cm["results"])
+            for cid, mid in cm["msg_ids"].items():
+                await _safe_edit(bot, cid, mid, new_text)
+            cycles_done.append(ck)
+            log.info("Edited signal message for cycle %s with results.", ck)
+
+    # Clean up old cycles (> 30 min unresolved)
+    for ck in list(_cycle_messages.keys()):
+        try:
+            ct = datetime.strptime(ck, "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+            if (now - ct).total_seconds() > 1800:
+                cycles_done.append(ck)
+        except Exception:
+            pass
+
+    for ck in set(cycles_done):
+        _cycle_messages.pop(ck, None)
+
+    # Persist remaining pending
+    if resolved:
+        try:
+            with open(PENDING_JSON, "w") as f:
+                json.dump(_pending_signals, f, indent=2, default=str)
+        except Exception:
+            pass
+
+
+def _log_all_predictions(symbol: str, pred: dict):
+    """Log every prediction (before filtering) for analysis."""
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        exists = os.path.exists(ALL_PREDICTIONS_CSV)
+        with open(ALL_PREDICTIONS_CSV, "a", newline="") as f:
+            w = csv.writer(f)
+            if not exists:
+                w.writerow(["timestamp", "symbol", "direction", "confidence", "green_prob",
+                            "meta_reliability", "uncertainty", "kelly", "regime", "trade"])
+            w.writerow([
+                datetime.now(timezone.utc).isoformat(),
+                symbol,
+                pred.get("suggested_direction", ""),
+                f"{pred.get('final_confidence_percent', 0):.1f}",
+                f"{pred.get('green_probability_percent', 0):.1f}",
+                f"{pred.get('meta_reliability_percent', 0):.1f}",
+                f"{pred.get('uncertainty_percent', 0):.1f}",
+                f"{pred.get('kelly_fraction_percent', 0):.1f}",
+                pred.get("market_regime", ""),
+                pred.get("suggested_trade", ""),
+            ])
+    except Exception:
+        pass
+
+
+# =============================================================================
+#  Broadcast Helper
+# =============================================================================
+
+async def _safe_send(bot: Bot, chat_id, text: str, parse_mode="Markdown") -> int:
+    """Send message with error handling. Returns message_id or 0."""
+    try:
+        msg = await bot.send_message(chat_id=int(chat_id), text=text, parse_mode=parse_mode)
+        return msg.message_id
+    except Exception as e:
+        log.warning("Send failed to %s: %s", chat_id, e)
+        try:
+            msg = await bot.send_message(chat_id=int(chat_id), text=text)
+            return msg.message_id
+        except Exception:
+            return 0
+
+
+async def _safe_edit(bot: Bot, chat_id, message_id: int, text: str, parse_mode="Markdown"):
+    """Edit message with error handling."""
+    try:
+        await bot.edit_message_text(
+            chat_id=int(chat_id), message_id=message_id,
+            text=text, parse_mode=parse_mode,
+        )
+    except Exception as e:
+        log.warning("Edit failed for %s/%s: %s", chat_id, message_id, e)
+        try:
+            await bot.edit_message_text(
+                chat_id=int(chat_id), message_id=message_id, text=text,
+            )
+        except Exception:
+            pass
+
+
+def _build_result_text(original_text: str, results: dict) -> str:
+    """Rebuild signal message with WIN/LOSS results appended."""
+    wins = sum(1 for r in results.values() if r.get("correct") is True)
+    draws = sum(1 for r in results.values() if r.get("correct") is None)
+    total = len(results)
+
+    # Remove expiry/countdown lines from original
+    edited_lines = []
+    for line in original_text.split("\n"):
+        if "\u23f1 Expires:" in line or "\u23f1 Exp:" in line:
+            continue
+        edited_lines.append(line)
+
+    result_lines = [
+        "",
+        "\u2501" * 26,
+        "\U0001f4ca RESULT",
+        "",
+    ]
+
+    for sig_id, r in results.items():
+        correct = r.get("correct")
+        if correct is True:
+            icon = "\u2705 WIN"
+        elif correct is None:
+            icon = "\u27a1\ufe0f DRAW"
+        else:
+            icon = "\u274c LOSS"
+        sym = r.get("symbol", "?")
+        direction = r.get("direction", "?")
+        entry_p = r.get("entry_price", 0)
+        exit_p = r.get("exit_price", 0)
+        diff = exit_p - entry_p
+        if "JPY" in sym:
+            diff_fmt = f"{diff:+.3f}"
+        elif sym == "XAUUSD":
+            diff_fmt = f"{diff:+.2f}"
+        else:
+            diff_fmt = f"{diff:+.5f}"
+        result_lines.append(f"{icon} | {sym} {direction}")
+        result_lines.append(f"   \U0001f4cd {entry_p} \u2192 {exit_p} ({diff_fmt})")
+
+    if total > 0:
+        scored = total - draws
+        pct = wins / scored * 100 if scored > 0 else 0
+        emoji = "\U0001f3c6" if pct >= 60 else "\U0001f4c9"
+        losses = scored - wins
+        draw_text = f" / {draws}D" if draws > 0 else ""
+        result_lines.append(f"\n{emoji} Cycle: {wins}W / {losses}L{draw_text} ({pct:.0f}%)")
+
+    return "\n".join(edited_lines) + "\n" + "\n".join(result_lines)
+
+
+async def _broadcast(bot: Bot, text: str, symbol_filter: str = None):
+    """Broadcast to all active subscribers."""
+    for cid, info in _subscribers.items():
+        if not info.get("active", False):
+            continue
+        if symbol_filter:
+            syms = info.get("symbols", SYMBOLS)
+            if symbol_filter not in syms:
+                continue
+        await _safe_send(bot, cid, text)
+
+
+# =============================================================================
+#  Command Handlers
+# =============================================================================
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Welcome message with menu."""
+    chat_id = str(update.effective_chat.id)
+    if chat_id not in _subscribers:
+        _subscribers[chat_id] = {"active": False, "symbols": SYMBOLS, "mode": "all"}
+        _save_subscribers()
+
+    text = (
+        "QUOTEX LORD v10\n\n"
+        "Production-grade ML signal engine.\n"
+        "14-layer pipeline with calibrated probability.\n\n"
+        f"Symbols: {', '.join(SYMBOLS)}\n"
+        f"Timeframe: M5\n\n"
+        "Use the menu below to get started."
+    )
+    await update.message.reply_text(text, reply_markup=_main_menu(chat_id))
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "📋 Commands:\n\n"
+        "/start — Main menu\n"
+        "/predict — Predict single symbol\n"
+        "/scan — Multi-symbol scan\n"
+        "/today — Today's signals & status\n"
+        "/results — Today's results\n"
+        "/stats — Advanced statistics\n"
+        "/audit — Signal audit trail\n"
+        "/leaderboard — Pair rankings\n"
+        "/dashboard — Performance dashboard\n"
+        "/status — System status\n"
+        "/help — This message"
+    )
+    await update.message.reply_text(text)
+
+
+async def cmd_predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick predict via command."""
+    await update.message.reply_text("Select symbol:", reply_markup=_symbol_keyboard("predict"))
+
+
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Multi-symbol scan via command."""
+    msg = await update.message.reply_text("Scanning all symbols...")
+    results = []
+    for sym in SYMBOLS:
+        try:
+            pred = _run_prediction(sym)
+            results.append(_format_prediction_single(pred))
+        except Exception as e:
+            results.append(f"Error {sym}: {e}")
+    text = "\n━━━━━━━━━━━━━━\n".join(results)
+    await _safe_send(update.message.chat.bot, str(update.effective_chat.id),
+                     f"Multi-Symbol Scan\n\n{text}")
+
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = _get_status_text()
+    await update.message.reply_text(text)
+
+
+async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = _get_results_text()
+    await update.message.reply_text(text)
+
+
+async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show all signals sent today with status."""
+    text = _get_today_signals_text()
+    await update.message.reply_text(text)
+
+
+async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate and send performance dashboard."""
+    try:
+        report = generate_dashboard(_signal_db)
+        text = format_dashboard_text(report)
+    except Exception as e:
+        text = f"Dashboard error: {e}"
+    await update.message.reply_text(text)
+
+
+async def cmd_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Full signal audit trail — last 20 signals with full details."""
+    try:
+        signals = _signal_db.get_recent_signals(n=20)
+        if not signals:
+            await update.message.reply_text("📋 No signals recorded yet.")
+            return
+
+        lines = ["📋 Signal Audit Trail (last 20)\n"]
+        for s in signals:
+            # s = (id, timestamp, symbol, direction, probability, confidence, regime, outcome, was_correct, pnl)
+            ts = str(s[1])[:16] if s[1] else "?"
+            sym = s[2] or "?"
+            d = s[3] or "?"
+            conf = s[5] or 0
+            regime = s[6] or "?"
+            outcome = s[7] or "pending"
+            was_correct = s[8]
+            icon = "✅" if was_correct == 1 else "❌" if was_correct == 0 else "⏳"
+            lines.append(f"{icon} {ts} {sym} {d} C:{conf:.0f}% [{regime}]")
+
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"Audit error: {e}")
+
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Advanced performance statistics."""
+    try:
+        lines = ["📊 Advanced Statistics\n"]
+
+        # Overall stats
+        total = len(_outcome_results)
+        if total > 0:
+            wins = sum(1 for r in _outcome_results if r.get("correct"))
+            losses = total - wins
+            accuracy = wins / total * 100
+
+            # Win/Loss streaks
+            max_win_streak = 0
+            max_loss_streak = 0
+            current_streak = 0
+            for r in _outcome_results:
+                if r.get("correct"):
+                    current_streak = max(1, current_streak + 1) if current_streak > 0 else 1
+                else:
+                    current_streak = min(-1, current_streak - 1) if current_streak < 0 else -1
+                max_win_streak = max(max_win_streak, current_streak)
+                max_loss_streak = min(max_loss_streak, current_streak)
+
+            lines.append(f"Total Signals: {total}")
+            lines.append(f"Record: {wins}W / {losses}L ({accuracy:.1f}%)")
+            lines.append(f"Best Win Streak: {max_win_streak}")
+            lines.append(f"Worst Loss Streak: {abs(max_loss_streak)}")
+            lines.append(f"Current Streak: {_total_streak}")
+
+            # Per-symbol breakdown
+            lines.append("\n📈 Per Symbol:")
+            sym_stats = {}
+            for r in _outcome_results:
+                s = r.get("symbol", "?")
+                if s not in sym_stats:
+                    sym_stats[s] = {"w": 0, "l": 0}
+                if r.get("correct"):
+                    sym_stats[s]["w"] += 1
+                else:
+                    sym_stats[s]["l"] += 1
+
+            for s, v in sorted(sym_stats.items(), key=lambda x: -(x[1]["w"] / max(1, x[1]["w"] + x[1]["l"]))):
+                t = v["w"] + v["l"]
+                pct = v["w"] / t * 100 if t > 0 else 0
+                bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
+                lines.append(f"  {s}: [{bar}] {v['w']}/{t} ({pct:.0f}%)")
+
+            # Per-session breakdown
+            lines.append("\n🕐 Per Session:")
+            sess_stats = {}
+            for r in _outcome_results:
+                sess = r.get("session", "Unknown")
+                if sess not in sess_stats:
+                    sess_stats[sess] = {"w": 0, "l": 0}
+                if r.get("correct"):
+                    sess_stats[sess]["w"] += 1
+                else:
+                    sess_stats[sess]["l"] += 1
+
+            for sess, v in sorted(sess_stats.items()):
+                t = v["w"] + v["l"]
+                pct = v["w"] / t * 100 if t > 0 else 0
+                lines.append(f"  {sess}: {v['w']}/{t} ({pct:.0f}%)")
+
+            # Per-regime breakdown
+            lines.append("\n🌊 Per Regime:")
+            reg_stats = {}
+            for r in _outcome_results:
+                reg = r.get("regime", "Unknown")
+                if reg not in reg_stats:
+                    reg_stats[reg] = {"w": 0, "l": 0}
+                if r.get("correct"):
+                    reg_stats[reg]["w"] += 1
+                else:
+                    reg_stats[reg]["l"] += 1
+
+            for reg, v in sorted(reg_stats.items()):
+                t = v["w"] + v["l"]
+                pct = v["w"] / t * 100 if t > 0 else 0
+                lines.append(f"  {reg}: {v['w']}/{t} ({pct:.0f}%)")
+
+        else:
+            lines.append("No outcomes recorded yet.")
+
+        # System health
+        lines.append(f"\n🔧 System Health:")
+        lines.append(f"Circuit Breaker: {'🔴 HALTED' if _cb.is_halted else '🟢 OK'}")
+        lines.append(f"Consecutive Losses: {_cb.consecutive_losses}")
+
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"Stats error: {e}")
+
+
+async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pair leaderboard — best performing symbols."""
+    lines = ["🏆 Pair Leaderboard\n"]
+
+    if not _pair_scores:
+        lines.append("No pair scores available yet.")
+    else:
+        for sym, score in sorted(_pair_scores.items(), key=lambda x: -x[1]):
+            stars = "⭐" * (score // 5)
+            lines.append(f"  {sym}: {score}/30 {stars}")
+
+    # Win streaks per symbol
+    if _win_streaks:
+        lines.append("\n🔥 Streaks:")
+        for sym, streak in sorted(_win_streaks.items(), key=lambda x: -x[1]):
+            icon = "🔥" if streak > 0 else "❄️"
+            lines.append(f"  {sym}: {icon} {streak}")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+def _main_menu(chat_id=None):
+    cid = str(chat_id) if chat_id else None
+    is_sub = cid and cid in _subscribers and _subscribers[cid].get("active", False)
+    sub_label = "⬛ Stop Signals" if is_sub else "▶️ Start Signals"
+    sub_data = "unsub" if is_sub else "sub"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(sub_label, callback_data=sub_data)],
+        [InlineKeyboardButton("🔮 Predict", callback_data="predict_now"),
+         InlineKeyboardButton("📱 Scan All", callback_data="scan")],
+        [InlineKeyboardButton("📡 Today", callback_data="today"),
+         InlineKeyboardButton("📊 Results", callback_data="results")],
+        [InlineKeyboardButton("⚙️ Status", callback_data="status"),
+         InlineKeyboardButton("📊 Dashboard", callback_data="dashboard")],
+        [InlineKeyboardButton("📈 Stats", callback_data="stats"),
+         InlineKeyboardButton("📋 Audit", callback_data="audit")],
+        [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard"),
+         InlineKeyboardButton("📜 History", callback_data="history")],
+        [InlineKeyboardButton("ℹ️ Info", callback_data="info")],
+    ])
+
+
+def _symbol_keyboard(prefix="predict"):
+    buttons = []
+    row = []
+    for sym in SYMBOLS:
+        row.append(InlineKeyboardButton(sym, callback_data=f"{prefix}_{sym}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("◀ Back", callback_data="back")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle all inline button callbacks."""
+    query = update.callback_query
+    await query.answer()
+    chat_id = str(query.message.chat_id)
+    data = query.data
+
+    if data == "sub":
+        if chat_id not in _subscribers:
+            _subscribers[chat_id] = {"active": True, "symbols": SYMBOLS, "mode": "all"}
+        else:
+            _subscribers[chat_id]["active"] = True
+        _save_subscribers()
+        await query.edit_message_text(
+            "✅ Subscribed to auto-signals.\n\n"
+            f"Symbols: {', '.join(SYMBOLS)}\n"
+            "Signals sent every 5 minutes during profitable hours.",
+            reply_markup=_main_menu(chat_id),
+        )
+
+    elif data == "unsub":
+        if chat_id in _subscribers:
+            _subscribers[chat_id]["active"] = False
+            _save_subscribers()
+        await query.edit_message_text(
+            "⏹ Unsubscribed. Signals stopped.",
+            reply_markup=_main_menu(chat_id),
+        )
+
+    elif data == "back":
+        await query.edit_message_text(
+            "⚡ QUOTEX LORD v10+ ⚡\n\nUse the menu below.",
+            reply_markup=_main_menu(chat_id),
+        )
+
+    elif data == "predict_now":
+        await query.edit_message_text("Select symbol:", reply_markup=_symbol_keyboard("predict"))
+
+    elif data.startswith("predict_"):
+        sym = data.replace("predict_", "")
+        if sym in SYMBOLS:
+            await query.edit_message_text(f"Predicting {sym}...")
+            try:
+                pred = _run_prediction(sym)
+                text = _format_prediction_single(pred)
+                await _safe_send(query.message.chat.bot, chat_id, text)
+            except Exception as e:
+                await _safe_send(query.message.chat.bot, chat_id, f"Prediction failed: {e}")
+
+    elif data == "scan":
+        await query.edit_message_text("Scanning all symbols...")
+        results = []
+        for sym in SYMBOLS:
+            try:
+                pred = _run_prediction(sym)
+                results.append(_format_prediction_single(pred))
+            except Exception as e:
+                results.append(f"Error {sym}: {e}")
+        text = "\n━━━━━━━━━━━━━━\n".join(results)
+        await _safe_send(query.message.chat.bot, chat_id, f"Multi-Symbol Scan\n\n{text}")
+
+    elif data == "status":
+        text = _get_status_text()
+        await query.edit_message_text(text, reply_markup=_main_menu(chat_id))
+
+    elif data == "results":
+        text = _get_results_text()
+        await query.edit_message_text(text, reply_markup=_main_menu(chat_id))
+
+    elif data == "today":
+        text = _get_today_signals_text()
+        await query.edit_message_text(text, reply_markup=_main_menu(chat_id))
+
+    elif data == "history":
+        text = _get_history_text()
+        await query.edit_message_text(text, reply_markup=_main_menu(chat_id))
+
+    elif data == "dashboard":
+        try:
+            report = generate_dashboard(_signal_db)
+            text = format_dashboard_text(report)
+        except Exception as e:
+            text = f"Dashboard error: {e}"
+        await query.edit_message_text(text, reply_markup=_main_menu(chat_id))
+
+    elif data == "stats":
+        try:
+            # Reuse cmd_stats logic inline
+            lines = ["📊 Advanced Statistics\n"]
+            total = len(_outcome_results)
+            if total > 0:
+                wins = sum(1 for r in _outcome_results if r.get("correct"))
+                accuracy = wins / total * 100
+                lines.append(f"Record: {wins}/{total} ({accuracy:.1f}%)")
+                lines.append(f"Current Streak: {_total_streak}")
+                sym_stats = {}
+                for r in _outcome_results:
+                    s = r.get("symbol", "?")
+                    if s not in sym_stats:
+                        sym_stats[s] = {"w": 0, "l": 0}
+                    if r.get("correct"):
+                        sym_stats[s]["w"] += 1
+                    else:
+                        sym_stats[s]["l"] += 1
+                lines.append("\nPer Symbol:")
+                for s, v in sorted(sym_stats.items()):
+                    t = v["w"] + v["l"]
+                    pct = v["w"] / t * 100 if t > 0 else 0
+                    lines.append(f"  {s}: {v['w']}/{t} ({pct:.0f}%)")
+            else:
+                lines.append("No outcomes yet.")
+            text = "\n".join(lines)
+        except Exception as e:
+            text = f"Stats error: {e}"
+        await query.edit_message_text(text, reply_markup=_main_menu(chat_id))
+
+    elif data == "audit":
+        try:
+            signals = _signal_db.get_recent_signals(n=10)
+            if not signals:
+                text = "📋 No signals recorded yet."
+            else:
+                lines = ["📋 Signal Audit (last 10)\n"]
+                for s in signals:
+                    ts = str(s[1])[:16] if s[1] else "?"
+                    sym = s[2] or "?"
+                    d = s[3] or "?"
+                    conf = s[5] or 0
+                    was_correct = s[8]
+                    icon = "✅" if was_correct == 1 else "❌" if was_correct == 0 else "⏳"
+                    lines.append(f"{icon} {ts} {sym} {d} {conf:.0f}%")
+                text = "\n".join(lines)
+        except Exception as e:
+            text = f"Audit error: {e}"
+        await query.edit_message_text(text, reply_markup=_main_menu(chat_id))
+
+    elif data == "leaderboard":
+        lines = ["🏆 Pair Leaderboard\n"]
+        if _pair_scores:
+            for sym, score in sorted(_pair_scores.items(), key=lambda x: -x[1]):
+                stars = "⭐" * (score // 5)
+                lines.append(f"  {sym}: {score}/30 {stars}")
+        else:
+            lines.append("No pair scores yet.")
+        if _win_streaks:
+            lines.append("\n🔥 Streaks:")
+            for sym, streak in sorted(_win_streaks.items(), key=lambda x: -x[1]):
+                icon = "🔥" if streak > 0 else "❄️"
+                lines.append(f"  {sym}: {icon} {streak}")
+        text = "\n".join(lines)
+        await query.edit_message_text(text, reply_markup=_main_menu(chat_id))
+
+    elif data == "info":
+        text = (
+            "⚡ QUOTEX LORD v10+ ⚡\n\n"
+            "14-layer ML pipeline:\n"
+            "  6 model ensemble + isotonic calibration\n"
+            "  (XGB×2 + HistGBM + ExtraTrees + RF + CatBoost)\n"
+            "  HistGBM meta-model (reliability)\n"
+            "  Logistic weight learner (confidence)\n"
+            "  Triple barrier labels (TP=1.5×ATR, SL=1.0×ATR)\n"
+            "  Multi-TF confluence (M5/M15/H1)\n"
+            "  Signal validator + quality filter\n"
+            "  Circuit breaker (5 losses / 8% DD)\n"
+            "  Online learning (SGD/PA)\n"
+            "  Feature drift detection (PSI/KS)\n\n"
+            f"Features: 103 forward-safe\n"
+            f"Symbols: {len(SYMBOLS)}\n"
+            "Quality over quantity."
+        )
+        await query.edit_message_text(text, reply_markup=_main_menu(chat_id))
+
+
+def _get_status_text() -> str:
+    """System status summary."""
+    n_subs = sum(1 for s in _subscribers.values() if s.get("active"))
+    n_outcomes = len(_outcome_results)
+    acc = _accuracy.accuracy if hasattr(_accuracy, 'accuracy') else 0
+    corr = _conf_corr.correlation if hasattr(_conf_corr, 'correlation') else 0
+    cb_status = "HALTED" if _cb.is_halted else "OK"
+    losses = _cb.consecutive_losses
+
+    return (
+        "System Status\n\n"
+        f"Subscribers: {n_subs} active\n"
+        f"Total outcomes: {n_outcomes}\n"
+        f"Rolling accuracy: {acc*100:.1f}%\n"
+        f"Conf correlation: {corr:.3f}\n"
+        f"Circuit breaker: {cb_status}\n"
+        f"Consecutive losses: {losses}\n"
+        f"Pair scores: {dict(sorted(_pair_scores.items()))}\n"
+    )
+
+
+def _get_results_text() -> str:
+    """Today's results including pending signals."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Resolved outcomes
+    today_outcomes = [r for r in _outcome_results if r.get("timestamp", "").startswith(today)]
+
+    # Pending signals
+    pending = []
+    for sig_id, entry in _pending_signals.items():
+        if entry.get("time", "").startswith(today):
+            pending.append(entry)
+
+    if not today_outcomes and not pending:
+        return f"📊 Today's Results ({today})\n\nNo signals sent today yet."
+
+    wins = sum(1 for r in today_outcomes if r.get("correct"))
+    losses = len(today_outcomes) - wins
+
+    lines = [f"📊 Today's Results ({today})\n"]
+
+    if today_outcomes:
+        pct = wins / len(today_outcomes) * 100
+        trend = "🏆" if pct >= 60 else "📉" if pct < 50 else "➡️"
+        lines.append(f"{trend} Resolved: {wins}W / {losses}L ({pct:.0f}%)")
+
+    if pending:
+        lines.append(f"⏳ Pending: {len(pending)} signal(s)\n")
+
+    # Detailed signals
+    for r in today_outcomes:
+        icon = "✅" if r.get("correct") else "❌"
+        sym = r.get("symbol", "?")
+        d = r.get("predicted", "?")
+        conf = r.get("confidence", 0)
+        ts = str(r.get("timestamp", ""))[-15:-7]
+        lines.append(f"{icon} {ts} {sym} {d} ({conf:.0f}%)")
+
+    for entry in pending:
+        sym = entry.get("symbol", "?")
+        d = entry.get("direction", "?")
+        conf = entry.get("confidence", 0)
+        ts = entry.get("time", "")[-15:-7]
+        lines.append(f"⏳ {ts} {sym} {d} ({conf:.0f}%) — waiting...")
+
+    # Per-symbol summary
+    if today_outcomes:
+        lines.append("\n📈 Per Symbol:")
+        sym_results = {}
+        for r in today_outcomes:
+            s = r.get("symbol", "?")
+            if s not in sym_results:
+                sym_results[s] = {"w": 0, "t": 0}
+            sym_results[s]["t"] += 1
+            if r.get("correct"):
+                sym_results[s]["w"] += 1
+
+        for s, v in sorted(sym_results.items()):
+            wr = v["w"] / v["t"] * 100 if v["t"] > 0 else 0
+            lines.append(f"  {s}: {v['w']}/{v['t']} ({wr:.0f}%)")
+
+    return "\n".join(lines)
+
+
+def _get_today_signals_text() -> str:
+    """All signals sent today with current status."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Collect all signals from today
+    signals = []
+
+    # Pending signals
+    for sig_id, entry in _pending_signals.items():
+        if entry.get("time", "").startswith(today):
+            sig_time = datetime.fromisoformat(entry["time"])
+            elapsed = (datetime.now(timezone.utc) - sig_time).total_seconds()
+            remaining = max(0, 300 - elapsed)
+            signals.append({
+                "time": entry["time"],
+                "symbol": entry.get("symbol", "?"),
+                "direction": entry.get("direction", "?"),
+                "confidence": entry.get("confidence", 0),
+                "regime": entry.get("regime", "?"),
+                "price": entry.get("price", 0),
+                "status": "pending",
+                "remaining": remaining,
+            })
+
+    # Resolved outcomes
+    for r in _outcome_results:
+        if r.get("timestamp", "").startswith(today):
+            signals.append({
+                "time": r["timestamp"],
+                "symbol": r.get("symbol", "?"),
+                "direction": r.get("predicted", "?"),
+                "confidence": r.get("confidence", 0),
+                "regime": r.get("regime", "?"),
+                "price": 0,
+                "status": "win" if r.get("correct") else "loss",
+                "remaining": 0,
+            })
+
+    if not signals:
+        return f"📡 Today's Signals ({today})\n\nNo signals dispatched today."
+
+    # Sort by time
+    signals.sort(key=lambda x: x["time"])
+
+    wins = sum(1 for s in signals if s["status"] == "win")
+    losses = sum(1 for s in signals if s["status"] == "loss")
+    pend_count = sum(1 for s in signals if s["status"] == "pending")
+    resolved = wins + losses
+
+    lines = [f"📡 Today's Signals ({today})\n"]
+    lines.append(f"Total: {len(signals)} | ✅ {wins}W  ❌ {losses}L  ⏳ {pend_count} pending")
+    if resolved > 0:
+        pct = wins / resolved * 100
+        lines.append(f"Accuracy: {pct:.0f}%")
+    lines.append("")
+
+    for s in signals:
+        ts = s["time"][-15:-7] if len(s["time"]) > 15 else s["time"][:8]
+        icon_map = {"win": "✅", "loss": "❌", "pending": "⏳"}
+        label_map = {"win": "WIN", "loss": "LOSS", "pending": "PENDING"}
+        icon = icon_map.get(s["status"], "?")
+        label = label_map.get(s["status"], "?")
+        conf = s["confidence"]
+        sym = s["symbol"]
+        d = s["direction"]
+        line = f"{icon} {ts} {sym} {d} ({conf:.0f}%) — {label}"
+        if s["status"] == "pending" and s["remaining"] > 0:
+            mins = int(s["remaining"]) // 60
+            secs = int(s["remaining"]) % 60
+            line += f" ({mins}m {secs}s left)"
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+def _get_history_text() -> str:
+    """Signal history (last 20)."""
+    all_signals = []
+
+    # From outcome results
+    for r in _outcome_results[-20:]:
+        ts = r.get("timestamp", "?")
+        sym = r.get("symbol", "?")
+        pred_dir = r.get("predicted", "?")
+        correct = r.get("correct", False)
+        conf = r.get("confidence", 0)
+        regime = r.get("regime", "?")
+        icon = "✅" if correct else "❌"
+        all_signals.append(f"{icon} {ts[:16]} {sym} {pred_dir} ({conf:.0f}%) [{regime}]")
+
+    # From pending
+    for sig_id, entry in _pending_signals.items():
+        ts = entry.get("time", "?")
+        sym = entry.get("symbol", "?")
+        d = entry.get("direction", "?")
+        conf = entry.get("confidence", 0)
+        regime = entry.get("regime", "?")
+        all_signals.append(f"⏳ {ts[:16]} {sym} {d} ({conf:.0f}%) [{regime}]")
+
+    if not all_signals:
+        return "📜 Signal History\n\nNo signals recorded."
+
+    lines = [f"📜 Signal History (last {min(20, len(all_signals))})\n"]
+    lines.extend(all_signals[-20:])
+    return "\n".join(lines)
+
+
+# =============================================================================
+#  Server Time & M5 Close Alignment
+# =============================================================================
+
+def _get_server_time() -> datetime:
+    """Get MT5 server time in UTC."""
+    tick = mt5.symbol_info_tick(DEFAULT_SYMBOL)
+    if tick and tick.time:
+        return datetime.fromtimestamp(tick.time, tz=timezone.utc)
+    return datetime.now(timezone.utc)
+
+
+def _next_m5_close(server_time: datetime) -> datetime:
+    """Calculate next M5 candle close time."""
+    minute = server_time.minute
+    next_5 = ((minute // 5) + 1) * 5
+    close = server_time.replace(second=0, microsecond=0)
+    if next_5 >= 60:
+        close += timedelta(hours=1)
+        close = close.replace(minute=next_5 - 60)
+    else:
+        close = close.replace(minute=next_5)
+    return close
+
+
+# =============================================================================
+#  Auto-Signal Job (Core Loop)
 # =============================================================================
 
 async def _auto_signal_job(app: Application):
     """
-    Background loop: sends predictions to all subscribers
-    5 seconds before every M5 candle close.
+    Main auto-signal loop — runs every M5 candle.
+
+    Implements all 14 layers of the pipeline:
+      1. Data collection per symbol
+      2. Cleaning (in feature pipeline)
+      3. Feature engineering (66 features)
+      4. (Labels — training only)
+      5-7. Primary -> Meta -> Weight model inference
+      8. Regime detection
+      9. Risk filtering
+     10. Signal output (BUY/SELL/SKIP)
+     11. Telegram dispatch
+     12. Circuit breaker check
+     13. Drift detection (periodic)
+     14. Online learning update (on outcomes)
     """
     bot: Bot = app.bot
     log.info("Auto-signal job started.")
 
+    global _pair_counter, _pair_scores, _candle_count
+
     while True:
         try:
+            # Align to M5 close
             server_time = _get_server_time()
-            close_time = _next_m5_close_time(server_time)
+            close_time = _next_m5_close(server_time)
             send_time = close_time - timedelta(seconds=TELEGRAM_SEND_BEFORE_CLOSE_SEC)
             wait_seconds = (send_time - server_time).total_seconds()
 
             if wait_seconds < 0:
-                # Already past send time, wait for next candle
-                wait_seconds += 300  # 5 minutes
-
+                wait_seconds += 300
             if wait_seconds > 0:
-                log.info("Auto-signal: next send in %.0fs at %s UTC",
+                log.info("Auto-signal: next cycle in %.0fs at %s UTC",
                          wait_seconds, send_time.strftime("%H:%M:%S"))
                 await asyncio.sleep(wait_seconds)
 
             # Collect active subscribers
-            active_subs = {
-                cid: info for cid, info in _subscribers.items()
-                if info.get("active", False)
-            }
-
+            active_subs = {cid: info for cid, info in _subscribers.items()
+                           if info.get("active", False)}
             if not active_subs:
                 await asyncio.sleep(10)
                 continue
 
-            log.info("Auto-signal: sending to %d subscribers", len(active_subs))
+            log.info("Auto-signal: cycle for %d subscribers", len(active_subs))
 
-            # Run predictions for all needed symbols
+            # Gather needed symbols
             needed_symbols = set()
             for info in active_subs.values():
-                needed_symbols.update(info.get("symbols", [DEFAULT_SYMBOL]))
+                needed_symbols.update(info.get("symbols", SYMBOLS))
 
-            # -----------------------------------------------------------------
-            # NEW COMPONENT: CIRCUIT BREAKER (GAP 2)
-            # -----------------------------------------------------------------
-            global _cb_just_reset
+            # ── LAYER 12: Circuit Breaker ──
             if not _cb.can_trade():
-                status = _cb.get_status()
-                halt_msg = (
-                    f'🛑 *CIRCUIT BREAKER ACTIVE*\n'
-                    f'Reason: _{status["reason"]}_\n'
-                    f'Consecutive losses: *{status["consecutive_losses"]}*\n'
-                    f'Cooldown: 60 min. Signals resume automatically.'
-                )
-                await _broadcast_to_subscribers(bot, halt_msg)
+                log.info("Circuit breaker active. Skipping cycle.")
                 await asyncio.sleep(300)
                 continue
 
-            # -----------------------------------------------------------------
-            # NEW COMPONENT: DRIFT DETECTOR / AUTO-RETRAIN (GAP 4)
-            # -----------------------------------------------------------------
-            global _candle_count
-            _candle_count += 1
-            if _candle_count % DRIFT_CHECK_INTERVAL == 0:
-                tradeable_symbols = list(active_subs.values())[0].get("symbols", [DEFAULT_SYMBOL])
-                asyncio.create_task(_run_drift_check(bot, list(tradeable_symbols)))
-
-            # -----------------------------------------------------------------
-            # NEW COMPONENT: DYNAMIC PAIR SELECTOR (GAP 5)
-            # -----------------------------------------------------------------
-            needed_symbols = set()
-            for info in active_subs.values():
-                needed_symbols.update(info.get("symbols", [DEFAULT_SYMBOL]))
-
-            global _pair_score_counter, _pair_scores
-            _pair_score_counter += 1
-            if _pair_score_counter >= PAIR_SCORE_REFRESH or not _pair_scores:
-                _pair_score_counter = 0
-                for sym in list(needed_symbols):
-                    try:
-                        data = fetch_multi_timeframe(sym, 500)
-                        df   = compute_features(data.get('M5'), m15_df=data.get('M15'), h1_df=data.get('H1'), m1_df=data.get('M1'))
-                        res  = score_pair(df, symbol=sym)
-                        _pair_scores[sym] = res['total']
-                        log.info('Pair score %s: %d/30', sym, res['total'])
-                    except Exception:
-                        _pair_scores[sym] = 25  # assume tradeable if scoring fails
-
-            # Filter: skip symbols with score < 18/30
-            tradeable = {s for s in needed_symbols if _pair_scores.get(s, 25) >= 18}
-            skipped   = needed_symbols - tradeable
-            if skipped:
-                log.info('Pair selector skipped %s (low score)', skipped)
-            needed_symbols = tradeable
-
-            # Weekend check (Sat/Sun)
+            # ── Weekend Check ──
             now_utc = datetime.now(timezone.utc)
-            if now_utc.weekday() >= 5:  # Saturday=5, Sunday=6
-                log.info("Auto-signal: market closed (weekend). Sleeping 30 min.")
+            if now_utc.weekday() >= 5:
+                log.info("Market closed (weekend). Sleeping 30 min.")
                 await asyncio.sleep(1800)
                 continue
 
+            # ── Session Filter ──
+            if now_utc.hour in BLOCKED_HOURS_UTC:
+                log.info("Blocked hour %02d UTC. Sleeping 5 min.", now_utc.hour)
+                await asyncio.sleep(300)
+                continue
+
+            # ── LAYER 13: Drift Detection (periodic) ──
+            _candle_count += 1
+            if _candle_count % DRIFT_CHECK_INTERVAL == 0:
+                try:
+                    from drift_detector import check_drift_from_files
+                    drift_result = check_drift_from_files()
+                    if drift_result.get("drift_detected"):
+                        log.warning("Feature drift detected: %s", drift_result.get("details"))
+                        asyncio.create_task(_retrain_job(bot))
+                except Exception as e:
+                    log.debug("Drift check failed: %s", e)
+
+            # ── Dynamic Pair Selector ──
+            _pair_counter += 1
+            if _pair_counter >= PAIR_SCORE_REFRESH or not _pair_scores:
+                _pair_counter = 0
+                for sym in list(needed_symbols):
+                    try:
+                        data = fetch_multi_timeframe(sym, 500)
+                        df = compute_features(data.get("M5"), m15_df=data.get("M15"),
+                                              h1_df=data.get("H1"), m1_df=data.get("M1"))
+                        res = score_pair(df, symbol=sym)
+                        _pair_scores[sym] = res["total"]
+                        log.info("Pair score %s: %d/30", sym, res["total"])
+                    except Exception:
+                        _pair_scores[sym] = 25  # assume tradeable on error
+
+            # Filter by pair score
+            tradeable = {s for s in needed_symbols if _pair_scores.get(s, 25) >= PAIR_SELECTOR_MIN_SCORE}
+            skipped_pairs = needed_symbols - tradeable
+            if skipped_pairs:
+                log.info("Pair selector skipped %s (score < %d)", skipped_pairs, PAIR_SELECTOR_MIN_SCORE)
+            needed_symbols = tradeable
+
+            if not needed_symbols:
+                log.info("No tradeable symbols this cycle.")
+                await asyncio.sleep(60)
+                continue
+
+            # ── Resolve pending outcomes (Layer 14: Online Learning updates) ──
+            await _resolve_pending_signals(bot)
+
+            # ── Run Predictions ──
             predictions = {}
             filtered_out = {}
+
             for sym in needed_symbols:
                 try:
-                    # 1. Cooldown check
+                    # Cooldown check
                     if sym in _cooldown_until:
                         if datetime.now(timezone.utc) < _cooldown_until[sym]:
                             filtered_out[sym] = "cooldown"
@@ -632,473 +1713,245 @@ async def _auto_signal_job(app: Application):
                         else:
                             del _cooldown_until[sym]
 
-                    # 2. Regime transition skip
-                    if _regime_transition_skip.get(sym, 0) > 0:
-                        _regime_transition_skip[sym] -= 1
-                        filtered_out[sym] = f"regime shift ({_regime_transition_skip[sym]+1} left)"
+                    # Per-symbol consecutive loss check
+                    if _consecutive_losses.get(sym, 0) >= MAX_CONSECUTIVE_LOSSES_PER_SYM:
+                        _cooldown_until[sym] = datetime.now(timezone.utc) + timedelta(minutes=30)
+                        filtered_out[sym] = f"per_sym_losses:{_consecutive_losses[sym]}"
+                        _consecutive_losses[sym] = 0
                         continue
 
-                    pred = _run_prediction(sym)
-                    conf = pred["final_confidence_percent"]
-                    trade = pred["suggested_trade"]
-                    regime = pred.get("market_regime", "Unknown")
+                    # Regime transition skip
+                    if _regime_skip.get(sym, 0) > 0:
+                        _regime_skip[sym] -= 1
+                        filtered_out[sym] = "regime_transition"
+                        continue
 
-                    # 3. Regime transition detection
-                    prev_regime = _last_regime.get(sym)
-                    if prev_regime and regime != prev_regime:
-                        _regime_transition_skip[sym] = REGIME_SKIP_CANDLES
-                        filtered_out[sym] = f"regime changed {prev_regime}→{regime}"
-                        log.info("REGIME SHIFT %s: %s -> %s, pausing %d candles",
-                                 sym, prev_regime, regime, REGIME_SKIP_CANDLES)
+                    # ── Layers 1-8: Prediction Pipeline ──
+                    pred = _run_prediction(sym)
+                    _log_all_predictions(sym, pred)
+
+                    conf = pred.get("final_confidence_percent", 0)
+                    direction = pred.get("suggested_direction", "HOLD")
+                    trade = pred.get("suggested_trade", "HOLD")
+                    regime = pred.get("market_regime", "Unknown")
+                    risk_warnings = pred.get("risk_warnings", [])
+
+                    # Regime transition detection
+                    prev = _last_regime.get(sym)
+                    if prev and regime != prev:
+                        _regime_skip[sym] = 2
+                        filtered_out[sym] = f"regime_shift:{prev}->{regime}"
+                        _last_regime[sym] = regime
+                        continue
                     _last_regime[sym] = regime
 
-                    # Log EVERY prediction to CSV (before filtering)
-                    _log_prediction_csv(sym, pred)
-
-                    # =========================================================
-                    # Phase 6 (Always-On High Frequency Override):
-                    # We bypass ALL legacy ML confidence thresholds, regime blockers, 
-                    # and session filters. Every single 5-minute candle passes through 
-                    # to the Gemini Oracle for a forced directional verdict.
-                    # =========================================================
+                    # Skip errors
                     if pred.get("error"):
                         filtered_out[sym] = pred["error"]
                         continue
-                        
+
+                    # ── LAYER 9: Risk Filter ──
+
+                    # 9a. Hard risk warnings (ATR spike, high spread, low vol)
+                    blocked, reason = _has_hard_risk(risk_warnings)
+                    if blocked:
+                        filtered_out[sym] = f"risk:{reason}"
+                        log.info("Risk filter blocked %s: %s", sym, reason)
+                        continue
+
+                    # 9b. Confidence gate (adaptive per-symbol)
+                    sym_min_conf = _symbol_min_confidence.get(sym, MIN_CONFIDENCE)
+                    if conf < sym_min_conf:
+                        filtered_out[sym] = f"confidence<{sym_min_conf:.0f}"
+                        continue
+
+                    # 9c. Ensemble agreement
+                    unanimity = float(pred.get("ensemble_unanimity", 0))
+                    variance = float(pred.get("ensemble_variance", 1.0))
+                    if unanimity < MIN_UNANIMITY:
+                        filtered_out[sym] = f"unanimity:{unanimity:.2f}"
+                        continue
+                    if variance > MAX_ENSEMBLE_VARIANCE:
+                        filtered_out[sym] = f"variance:{variance:.3f}"
+                        continue
+
+                    # 9d. Production gate (HOLD)
+                    if trade == "HOLD" or direction == "HOLD":
+                        filtered_out[sym] = pred.get("skip_reason", "hold")
+                        continue
+
+                    # 9e. Blocked regimes
+                    if regime in PRODUCTION_BLOCKED_REGIMES:
+                        filtered_out[sym] = f"blocked_regime:{regime}"
+                        continue
+
+                    # 9f. Multi-TF confluence (Layer 9 extension)
+                    cf = _check_confluence(sym, direction)
+                    cf_m5_df = cf.pop("_m5_df", None)  # reuse for momentum check
+                    pred["_confluence_score"] = cf.get("confluence_score", 0)
+                    if not cf.get("confluence_pass", True):
+                        filtered_out[sym] = f"confluence:{cf.get('reason', 'TF conflict')}"
+                        log.info("Confluence filter blocked %s: %s", sym, cf.get("reason"))
+                        continue
+
+                    # 9g. Session multiplier
+                    session = pred.get("session", "Off")
+                    session_mult = SESSION_CONFIDENCE_MULT.get(session, 0.80)
+                    adjusted_conf = conf * session_mult
+                    if adjusted_conf < MIN_CONFIDENCE:
+                        filtered_out[sym] = f"session_adj:{session}({adjusted_conf:.0f}%)"
+                        continue
+
+                    # 9h. Momentum confirmation (v2 accuracy upgrade)
+                    try:
+                        m5_data = cf_m5_df  # reuse data from confluence check
+                        if m5_data is None:
+                            d = fetch_multi_timeframe(sym, 50)
+                            m5_data = d.get("M5")
+                        mom_pass, mom_reason = _check_momentum_confirmation(pred, m5_data)
+                        if not mom_pass:
+                            filtered_out[sym] = f"momentum:{mom_reason}"
+                            log.info("Momentum filter blocked %s: %s", sym, mom_reason)
+                            continue
+                        # Also compute candle pattern quality and attach to pred
+                        cpq = _check_candle_pattern_quality(m5_data, direction)
+                        pred["_candle_pattern_quality"] = cpq
+                    except Exception as e:
+                        log.debug("Momentum check skipped for %s: %s", sym, e)
+
                     predictions[sym] = pred
-                    _last_predictions[sym] = {
-                        "pred": pred,
-                        "time": datetime.now(timezone.utc).isoformat(),
-                        "meta_row": pred.get("_meta_row"),
-                    }
-                    _signal_history.append({
-                        "symbol": sym,
-                        "direction": pred["suggested_direction"],
-                        "confidence": conf,
-                        "kelly": pred.get("kelly_fraction_percent", 0),
-                        "trade": trade,
-                        "regime": regime,
-                        "time": datetime.now(timezone.utc).isoformat(),
-                    })
+
                 except Exception as e:
                     log.error("Prediction failed %s: %s", sym, e)
                     record_error(f"{sym}: {e}")
+                    filtered_out[sym] = f"error:{e}"
 
-            # =================================================================
-            # Phase 10: Restore Correlation Filter
-            # =================================================================
+            # ── Correlation Guard ──
             try:
-                corr_passed, corr_reason = check_correlation(predictions)
-                if not corr_passed:
-                    log.warning("Correlation filter blocked trade: %s", corr_reason)
-                    predictions.clear()
+                for sym, pred in list(predictions.items()):
+                    corr = check_correlation(sym, pred.get("suggested_direction", ""), predictions)
+                    if not corr.get("corr_pass", True):
+                        filtered_out[sym] = f"correlation:{corr.get('reason')}"
+                        del predictions[sym]
             except Exception as e:
-                log.warning("Correlation EXCEPTION — signal BLOCKED: %s", e)
-                predictions.clear()
+                log.warning("Correlation filter error: %s", e)
 
-            # =================================================================
-            # Phase 10: Restore Direction Flip Filter (Strategy 5)
-            # =================================================================
+            # ── Direction Flip Filter ──
             for sym, pred in list(predictions.items()):
                 direction = pred["suggested_direction"]
                 regime = pred.get("market_regime", "Unknown")
                 if sym in _prev_directions:
                     if _prev_directions[sym] != direction and regime != "Trending":
-                        log.info("Blocked direction flip for %s in %s", sym, regime)
                         filtered_out[sym] = "direction_flip"
                         del predictions[sym]
+                        continue
                 if sym in predictions:
                     _prev_directions[sym] = direction
 
-            # =================================================================
-            # Phase 10: Restore Stacking Gatekeeper & Rank/Select
-            # =================================================================
-            if predictions:
-                for sym, pred in list(predictions.items()):
-                    try:
-                        stack_pass, stack_reason = _stacker.check_gate(pred)
-                        if not stack_pass:
-                            log.info("Stack blocker %s: %s", sym, stack_reason)
-                            filtered_out[sym] = f"stack_reject: {stack_reason}"
-                            del predictions[sym]
-                    except Exception as e:
-                        log.warning("Stacking EXCEPTION on %s — signal BLOCKED: %s", sym, e)
-                        filtered_out[sym] = "stack_error"
-                        if sym in predictions: del predictions[sym]
-                
-                if predictions:
-                    ranked = rank_and_select(predictions, max_signals=MAX_SIGNALS_PER_CYCLE)
-                    predictions = {sym: pred for sym, pred, score in ranked}
-
-            # =================================================================
-            # LAYER 13: Gemini AI Master Trader Verification
-            # =================================================================
-            if predictions:
-                gemini_filtered = {}
-                for sym, pred in predictions.items():
-                    try:
-                        data_mtf = fetch_multi_timeframe(sym, 250)
-                        m5_df = data_mtf.get('M5')
-                        m1_df = data_mtf.get('M1')
-                        if m5_df is not None and not m5_df.empty and len(m5_df) > 5:
-                            m5_feats = compute_features(m5_df, m15_df=data_mtf.get('M15'), h1_df=data_mtf.get('H1'), m1_df=m1_df)
-                            if m5_feats is None or m5_feats.empty:
-                                raise ValueError("Computed features returned empty df")
-                                
-                            last_row = m5_feats.iloc[-1]
-                            price = last_row.get("close", 0)
-                            e20 = last_row.get("ema_20", 0)
-                            e50 = last_row.get("ema_50", 0)
-                            e100 = last_row.get("ema_100", 0)
-                            e200 = last_row.get("ema_200", 0)
-                            atr = last_row.get("atr_14", 0)
-                            adx = last_row.get("adx", 0)
-                            rsi = last_row.get("rsi_14", 50)
-                            vol_imb = last_row.get("volume_imbalance", 0)
-                            # Phase 7 Microstructure Extractions
-                            dist_to_res = last_row.get("dist_to_resistance", 5.0)
-                            dist_to_sup = last_row.get("dist_to_support", 5.0)
-                            bull_div = last_row.get("bullish_divergence", 0.0)
-                            bear_div = last_row.get("bearish_divergence", 0.0)
-                            vol_accel = last_row.get("tick_vol_accel_1", 0.0)
-                            
-                            # Phase 8 Microstructure Extractions
-                            cum_delta = last_row.get("cumulative_delta", 0.0)
-                            m1_absorp = last_row.get("m1_absorption", 0.0)
-                            trade_int = last_row.get("trade_intensity", 0.0)
-                            
-                            recent_candles_df = m5_df.tail(5)[['time', 'open', 'high', 'low', 'close', 'tick_volume']].copy()
-                            recent_candles_str = recent_candles_df.to_string(index=False)
-                            
-                            # Phase 8: Live News & Macro Asset Scraping
-                            live_news_text = fetch_live_news()
-                            
-                            def safe_tick_price(s):
-                                try:
-                                    t = mt5.symbol_info_tick(s)
-                                    return t.bid if t else 0.0
-                                except: return 0.0
-
-                            dxy_proxy = safe_tick_price("USDX") or safe_tick_price("DXY")
-                            gold_price = safe_tick_price("XAUUSD")
-                            eurgbp_price = safe_tick_price("EURGBP")
-                            
-                            v = await verify_signal(
-                                symbol=sym,
-                                timestamp=datetime.now(timezone.utc).isoformat(),
-                                direction=pred["suggested_direction"],
-                                green_prob=pred.get("green_prob_percent", 50.0) / 100.0,
-                                confidence=pred.get("final_confidence_percent", 0.0),
-                                meta_trust=pred.get("meta_reliability_percent", 50.0),
-                                uncertainty=pred.get("ensemble_variance", 0.0),
-                                regime=pred.get("market_regime", "Unknown"),
-                                session="Unknown", # Handled intrinsically or fallback
-                                kelly=pred.get("kelly_fraction_percent", 0.0),
-                                recent_candles=recent_candles_str,
-                                support1="N/A",  # Pending auto-SR implementation
-                                resistance1="N/A",
-                                ema20=e20,
-                                ema50=e50,
-                                rsi=rsi,
-                                atr=atr,
-                                dist_to_res=dist_to_res,
-                                dist_to_sup=dist_to_sup,
-                                bull_div=bull_div,
-                                bear_div=bear_div,
-                                vol_accel=vol_accel,
-                                cumulative_delta=cum_delta,
-                                m1_absorption=m1_absorp,
-                                trade_intensity=trade_int,
-                                news_sentiment=live_news_text,
-                                dxy_price=dxy_proxy,
-                                gold_price=gold_price,
-                                eurgbp_price=eurgbp_price
-                            )
-                            # Phase 6 & 8: Gemini represents the ultimate Directional Override
-                            # It forces a YES/NO on the current direction, converting the signal.
-                            if v["verdict"] == "NO_TRADE" or not v.get("approved", True):
-                                filtered_out[sym] = f"Gemini Veto: {v['reason']}"
-                                log.info("Gemini filtered out %s: %s", sym, v["reason"])
-                            else:
-                                pred["suggested_direction"] = v["verdict"]
-                                if v.get("gemini_confidence", 0) > 0:
-                                    pred["final_confidence_percent"] = v["gemini_confidence"]
-                                gemini_filtered[sym] = pred
-                                log.info("Gemini OVERRIDE on %s to %s (Conf: %s%%): %s", sym, v["verdict"], v.get("gemini_confidence", "?"), v["reason"])
-                    except Exception as e:
-                        log.warning("Gemini EXCEPTION on %s — signal BLOCKED: %s", sym, e)
-                        filtered_out[sym] = f"Gemini Error: {e}"
-                predictions = gemini_filtered
-
-            # Send ONE combined message per subscriber (respecting alert mode)
-            # Track which symbols were actually sent per subscriber
-            sent_symbols_per_sub = {}  # {chat_id: set(symbols)}
-            for chat_id, info in active_subs.items():
-                symbols = info.get("symbols", [DEFAULT_SYMBOL])
-                mode = info.get("mode", "all")
-                # Filter predictions for this subscriber
-                sub_preds = {}
-                for sym in symbols:
-                    if sym in predictions:
-                        pred = predictions[sym]
-                        conf = pred["final_confidence_percent"]
-                        if mode == "high" and conf < HIGH_CONF_THRESHOLD:
-                            continue
-                        sub_preds[sym] = pred
-
-                if not sub_preds:
-                    continue
-
-                sent_symbols_per_sub[chat_id] = set(sub_preds.keys())
-
-                msg = _format_combined_signal(sub_preds, filtered_out)
+            # ── Stacking Gate ──
+            for sym, pred in list(predictions.items()):
                 try:
-                    await bot.send_message(
-                        chat_id=int(chat_id),
-                        text=msg,
-                        parse_mode="Markdown",
-                    )
-                except Exception as e:
-                    log.error("Failed to send to %s: %s", chat_id, e)
+                    decision = _stacker.should_send(pred)
+                    if not decision.get("send", True):
+                        filtered_out[sym] = f"stack:{decision.get('reason')}"
+                        del predictions[sym]
+                except Exception:
+                    pass
 
+            # ── LAYER 10: Rank & Select ──
+            if predictions:
+                predictions = rank_and_select(
+                    predictions,
+                    max_signals=MAX_SIGNALS_PER_CYCLE,
+                    min_score=MIN_SIGNAL_SCORE,
+                )
+
+            # ── LAYER 10b: Signal Validator (confidence, duplicate, rate limit) ──
+            for sym, pred in list(predictions.items()):
+                is_valid, reject_reasons = validate_signal(pred, sym, _cb)
+                if not is_valid:
+                    filtered_out[sym] = "; ".join(reject_reasons[:2])
+                    del predictions[sym]
+
+            # ── Log Filtered ──
             if filtered_out:
-                log.info("Filtered signals: %s", filtered_out)
+                log.info("Filtered: %s", {k: v[:50] for k, v in filtered_out.items()})
 
-            # Schedule outcome check after candle closes (+30s buffer)
-            asyncio.create_task(
-                _check_outcomes(bot, predictions, active_subs, sent_symbols_per_sub)
-            )
+            # ── LAYER 11: Signal Dispatch ──
+            if predictions:
+                message = _format_auto_signal(predictions, filtered_out)
 
-            # Small delay to avoid double-sending
-            await asyncio.sleep(15)
+                sent_ids = []
+                msg_ids = {}  # {chat_id: message_id} for result editing
+                for cid, info in active_subs.items():
+                    if info.get("active"):
+                        syms = info.get("symbols", SYMBOLS)
+                        sub_preds = {s: p for s, p in predictions.items() if s in syms}
+                        if sub_preds:
+                            mid = await _safe_send(bot, cid, message)
+                            if mid:
+                                msg_ids[cid] = mid
+                            sent_ids.append(cid)
 
-        except Exception as e:
-            log.exception("Auto-signal job error: %s", e)
-            await asyncio.sleep(30)
+                # Record sent signals + cycle for message editing
+                cycle_key = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                sig_ids = []
+                for sym, pred in predictions.items():
+                    sid = _record_sent_signal(sym, pred, sent_ids)
+                    sig_ids.append(sid)
+                    # Record in SQLite DB and link db_id to pending signal
+                    try:
+                        db_id = _signal_db.insert_signal(
+                            symbol=sym,
+                            direction=pred.get("suggested_direction", "HOLD"),
+                            probability=pred.get("green_probability_percent", 50),
+                            confidence=pred.get("final_confidence_percent", 0),
+                            meta_score=pred.get("meta_reliability_percent", 0),
+                            regime=pred.get("market_regime", ""),
+                            session=pred.get("session", ""),
+                            ensemble_std=pred.get("ensemble_variance", 0),
+                            kelly_fraction=pred.get("kelly_fraction_percent", 0),
+                            signal_strength=pred.get("signal_strength", ""),
+                            reason_chain=pred.get("reason_chain", ""),
+                            quality_score=pred.get("quality_score", 0),
+                            unanimity=pred.get("ensemble_unanimity", 0),
+                            ensemble_variance=pred.get("ensemble_variance", 0),
+                        )
+                        # Link DB ID to pending signal for outcome update
+                        if sid in _pending_signals:
+                            _pending_signals[sid]["db_id"] = db_id
+                    except Exception as db_err:
+                        log.warning("signal_db insert error: %s", db_err)
 
+                # Store cycle for result message editing
+                if msg_ids and sig_ids:
+                    _cycle_messages[cycle_key] = {
+                        "text": message,
+                        "msg_ids": msg_ids,
+                        "sig_ids": sig_ids,
+                        "results": {},
+                    }
 
-async def _check_outcomes(bot: Bot, predictions: dict, subscribers: dict,
-                         sent_symbols_per_sub: dict = None):
-    """
-    Wait for the current candle to close, then check if predictions were correct.
-    Send result notifications ONLY for symbols each subscriber actually received.
-    """
-    # STAGE 1: Wait for current candle to close (trade opens) + 15s buffer
-    # TELEGRAM_SEND_BEFORE_CLOSE_SEC is usually 15s, so this waits ~30s total
-    await asyncio.sleep(TELEGRAM_SEND_BEFORE_CLOSE_SEC + 15)
+                # Persist pending signals (with db_ids now attached)
+                try:
+                    with open(PENDING_JSON, "w") as f:
+                        json.dump(_pending_signals, f, indent=2, default=str)
+                except Exception:
+                    pass
 
-    # Send ENTRY CONFIRMATION to subscribers who received these signals
-    for chat_id, info in subscribers.items():
-        if not info.get("active", False):
-            continue
-
-        if sent_symbols_per_sub and chat_id in sent_symbols_per_sub:
-            sub_syms = sent_symbols_per_sub[chat_id]
-        else:
-            sub_syms = set(predictions.keys())
-
-        if not sub_syms:
-            continue
-
-        entry_lines = []
-        for sym in sub_syms:
-            if sym in predictions:
-                pred = predictions[sym]
-                d = "🟢 UP" if pred["suggested_direction"] == "UP" else "🔴 DOWN"
-                entry_lines.append(f"⏱ *{sym}* Trade is LIVE \u2192 *{d}*")
-
-        if entry_lines:
-            entry_msg = "⏳ *ENTRY CONFIRMED*\n━━━━━━━━━━━━━━━━━━━━━━━\n" + "\n".join(entry_lines) + "\n\n_Waiting 5 mins for candle close..._"
-            try:
-                await bot.send_message(
-                    chat_id=int(chat_id),
-                    text=entry_msg,
-                    parse_mode="Markdown",
-                )
-            except Exception as e:
-                log.error("Failed to send entry confirmation to %s: %s", chat_id, e)
-
-    # STAGE 2: Wait for the PREDICTED 5-minute candle to fully form
-    # We already waited ~30s, now we wait the remaining 5 minutes + 15s buffer
-    await asyncio.sleep(300 + 15)
-
-    # Build all outcome data first
-    all_outcomes = {}  # {sym: {emoji, msg_line, correct, conf, pred}}
-    for sym, pred in predictions.items():
-        try:
-            data = fetch_multi_timeframe(sym, 10)
-            df = data.get("M5")
-            if df is None or len(df) < 2:
-                continue
-
-            # The last closed candle is the one we predicted
-            last_candle = df.iloc[-2]  # second to last (fully closed)
-            actual_green = last_candle["close"] > last_candle["open"]
-            predicted_up = pred["suggested_direction"] == "UP"
-            correct = (predicted_up == actual_green)
-
-            # Phase 8: Online Learner Update
-            # The Online Learner trains the Base ML Meta-model. It MUST train on the base ML's
-            # original prediction ('primary_direction'), NOT the Gemini-override direction.
-            # Otherwise, Gemini wins will reinforce incorrect Base ML weights.
-            base_ml_up = pred.get("primary_direction") == "GREEN"
-            base_ml_correct = (base_ml_up == actual_green)
-            
-            meta_row = _last_predictions.get(sym, {}).get("meta_row")
-            if meta_row is not None:
-                update_online_learner(meta_row, base_ml_correct)
-
-            # Upgrade 3: Adaptive Threshold — record outcome
-            _adaptive_thresh.record_outcome(correct)
-
-            # Upgrade 6: Stacker Gatekeeper — learn from this outcome
-            _stacker.update(pred, correct)
-
-            # Circuit Breaker update
-            global _cb_just_reset
-            was_halted = _cb.is_halted
-            cb_halted, cb_reason = _cb.check(was_win=correct)
-            if cb_halted and not was_halted:
-                cb_msg = (
-                    f'\xf0\x9f\x9b\x91 *CIRCUIT BREAKER TRIGGERED* \u2014 {sym}\n'
-                    f'Reason: _{cb_reason}_\n'
-                    f'All signals halted 60 min. Resumes automatically.'
-                )
-                await _broadcast_to_subscribers(bot, cb_msg)
-                await _send_admin_alert(bot, cb_msg)
-            elif was_halted and not _cb.is_halted:
-                _cb_just_reset = True
-
-            emoji = "\u2705" if correct else "\u274c"
-            conf = pred["final_confidence_percent"]
-
-            _outcome_results.append({
-                "symbol": sym,
-                "predicted": pred["suggested_direction"],
-                "actual": "UP" if actual_green else "DOWN",
-                "correct": correct,
-                "confidence": conf,
-                "time": datetime.now(timezone.utc).isoformat(),
-            })
-
-            # Update prediction history for adaptive confidence
-            update_prediction_history(
-                pred["green_probability_percent"] / 100,
-                correct,
-                confidence=conf,
-            )
-            # Update production state
-            record_prediction(correct, conf, pred.get("latency_ms", 0))
-
-            # Consecutive loss tracking + cooldown
-            if correct:
-                _consecutive_losses[sym] = 0
+                log.info("Sent %d signals to %d subscribers.", len(predictions), len(sent_ids))
             else:
-                _consecutive_losses[sym] = _consecutive_losses.get(sym, 0) + 1
-                if _consecutive_losses[sym] >= MAX_CONSECUTIVE_LOSSES:
-                    cooldown_end = datetime.now(timezone.utc) + timedelta(minutes=5 * COOLDOWN_CANDLES)
-                    _cooldown_until[sym] = cooldown_end
-                    log.warning("COOLDOWN: %s has %d consecutive losses, pausing until %s",
-                                sym, _consecutive_losses[sym], cooldown_end.strftime("%H:%M"))
+                log.info("No signals passed filters this cycle.")
 
-            # CSV logging
-            _log_outcome_csv(sym, pred, actual_green, correct)
-
-            # Rolling win rate
-            recent = _outcome_results[-50:]
-            wins = sum(1 for r in recent if r["correct"])
-            win_rate = wins / len(recent) * 100
-
-            all_outcomes[sym] = {
-                "line": (
-                    f"{emoji} *{sym}*: Predicted {pred['suggested_direction']} "
-                    f"\u2192 Actual {'UP' if actual_green else 'DOWN'} "
-                    f"({conf:.0f}% conf) | Win rate: {win_rate:.0f}%"
-                ),
-            }
         except Exception as e:
-            log.error("Outcome check failed for %s: %s", sym, e)
-
-    if not all_outcomes:
-        return
-
-    # Send MATCHED results to each subscriber (only their sent symbols)
-    for chat_id, info in subscribers.items():
-        if not info.get("active", False):
-            continue
-
-        # Determine which symbols this subscriber actually received
-        if sent_symbols_per_sub and chat_id in sent_symbols_per_sub:
-            sub_syms = sent_symbols_per_sub[chat_id]
-        else:
-            # Fallback: send all outcomes
-            sub_syms = set(all_outcomes.keys())
-
-        # Build result lines only for symbols this subscriber got signals for
-        sub_lines = [all_outcomes[s]["line"] for s in sub_syms if s in all_outcomes]
-        if not sub_lines:
-            continue
-
-        msg = "\U0001f4cb *Signal Results*\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n" + "\n".join(sub_lines)
-        try:
-            await bot.send_message(
-                chat_id=int(chat_id),
-                text=msg,
-                parse_mode="Markdown",
-            )
-        except Exception as e:
-            log.error("Failed to send result to %s: %s", chat_id, e)
+            log.error("Auto-signal cycle error: %s", e, exc_info=True)
+            record_error(str(e))
+            await asyncio.sleep(60)
 
 
-
-def _log_prediction_csv(symbol, pred):
-    """Log EVERY prediction to CSV (before filtering). For weekly analysis."""
-    os.makedirs(os.path.dirname(PREDICTION_CSV), exist_ok=True)
-    header_needed = not os.path.exists(PREDICTION_CSV)
-    try:
-        with open(PREDICTION_CSV, "a") as f:
-            if header_needed:
-                f.write("timestamp,symbol,direction,green_prob,confidence,kelly,"
-                        "regime,trade,uncertainty,latency_ms\n")
-            f.write(
-                f"{datetime.now(timezone.utc).isoformat()},"
-                f"{symbol},"
-                f"{pred.get('suggested_direction', '?')},"
-                f"{pred.get('green_probability_percent', 50):.2f},"
-                f"{pred.get('final_confidence_percent', 0):.2f},"
-                f"{pred.get('kelly_fraction_percent', 0):.1f},"
-                f"{pred.get('market_regime', 'Unknown')},"
-                f"{pred.get('suggested_trade', 'HOLD')},"
-                f"{pred.get('uncertainty_percent', 0):.2f},"
-                f"{pred.get('latency_ms', -1)}\n"
-            )
-    except Exception as e:
-        log.error("Prediction CSV write failed: %s", e)
-
-
-def _log_outcome_csv(symbol, pred, actual_green, correct):
-    """Append every signal outcome to CSV for offline analysis."""
-    os.makedirs(os.path.dirname(SIGNAL_CSV), exist_ok=True)
-    header_needed = not os.path.exists(SIGNAL_CSV)
-    try:
-        with open(SIGNAL_CSV, "a") as f:
-            if header_needed:
-                f.write("timestamp,symbol,predicted,actual,correct,green_prob,confidence,kelly,regime,latency_ms\n")
-            f.write(
-                f"{datetime.now(timezone.utc).isoformat()},"
-                f"{symbol},"
-                f"{pred['suggested_direction']},"
-                f"{'UP' if actual_green else 'DOWN'},"
-                f"{correct},"
-                f"{pred['green_probability_percent']:.2f},"
-                f"{pred['final_confidence_percent']:.2f},"
-                f"{pred.get('kelly_fraction_percent', 0):.1f},"
-                f"{pred.get('market_regime', 'Unknown')},"
-                f"{pred.get('latency_ms', -1)}\n"
-            )
-    except Exception as e:
-        log.error("CSV write failed: %s", e)
-
+# =============================================================================
+#  Report Jobs
+# =============================================================================
 
 async def _daily_report_job(app: Application):
     """Send daily performance summary at 21:00 UTC."""
@@ -1111,683 +1964,205 @@ async def _daily_report_job(app: Application):
             target = now.replace(hour=21, minute=0, second=0, microsecond=0)
             if now >= target:
                 target += timedelta(days=1)
-            wait_secs = (target - now).total_seconds()
-            log.info("Daily report: next send in %.0f min at 21:00 UTC", wait_secs / 60)
-            await asyncio.sleep(wait_secs)
+            wait = (target - now).total_seconds()
+            log.info("Daily report: next in %.0f min", wait / 60)
+            await asyncio.sleep(wait)
 
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            today_res = [r for r in _outcome_results if r["time"].startswith(today)]
+            today_outcomes = [r for r in _outcome_results if r.get("timestamp", "").startswith(today)]
 
-            if not today_res:
+            if not today_outcomes:
                 await asyncio.sleep(60)
                 continue
 
-            total = len(today_res)
-            wins = sum(1 for r in today_res if r["correct"])
-            losses = total - wins
-            win_rate = wins / total * 100
+            wins = sum(1 for r in today_outcomes if r.get("correct"))
+            total = len(today_outcomes)
 
-            sym_stats = {}
-            for r in today_res:
-                s = r["symbol"]
-                if s not in sym_stats:
-                    sym_stats[s] = {"w": 0, "l": 0}
-                if r["correct"]:
-                    sym_stats[s]["w"] += 1
-                else:
-                    sym_stats[s]["l"] += 1
-
-            best_sym = max(sym_stats, key=lambda s: sym_stats[s]["w"] / max(sym_stats[s]["w"] + sym_stats[s]["l"], 1))
-            worst_sym = min(sym_stats, key=lambda s: sym_stats[s]["w"] / max(sym_stats[s]["w"] + sym_stats[s]["l"], 1))
-            best_rate = sym_stats[best_sym]["w"] / max(sym_stats[best_sym]["w"] + sym_stats[best_sym]["l"], 1) * 100
-            worst_rate = sym_stats[worst_sym]["w"] / max(sym_stats[worst_sym]["w"] + sym_stats[worst_sym]["l"], 1) * 100
-
-            ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-            msg = (
-                f"📋 *Daily Report — {today}*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📊 Signals: *{total}* | ✅ *{wins}* | ❌ *{losses}*\n"
-                f"🎯 Win Rate: *{win_rate:.1f}%*\n\n"
-                f"🏆 Best: *{best_sym}* ({best_rate:.0f}%)\n"
-                f"📉 Worst: *{worst_sym}* ({worst_rate:.0f}%)\n\n"
+            text = (
+                f"Daily Report — {today}\n\n"
+                f"Signals: {total}\n"
+                f"Wins: {wins}\n"
+                f"Accuracy: {wins/total*100:.1f}%\n"
+                f"Circuit breaker: {'HALTED' if _cb.is_halted else 'OK'}\n"
             )
-            for s, st in sorted(sym_stats.items()):
-                t = st["w"] + st["l"]
-                r = st["w"] / t * 100 if t > 0 else 0
-                emoji = "🟢" if r >= 60 else "🔴"
-                msg += f"  {emoji} {s}: {st['w']}/{t} ({r:.0f}%)\n"
 
-            await _broadcast_to_subscribers(bot, msg)
-            await asyncio.sleep(60)
+            # Per-symbol breakdown
+            sym_map = {}
+            for r in today_outcomes:
+                s = r["symbol"]
+                if s not in sym_map:
+                    sym_map[s] = [0, 0]
+                sym_map[s][1] += 1
+                if r.get("correct"):
+                    sym_map[s][0] += 1
+
+            for s, (w, t) in sorted(sym_map.items()):
+                text += f"\n  {s}: {w}/{t} ({w/t*100:.0f}%)"
+
+            await _broadcast(bot, text)
 
         except Exception as e:
-            log.exception("Daily report error: %s", e)
+            log.error("Daily report error: %s", e)
             await asyncio.sleep(300)
 
 
 async def _weekly_report_job(app: Application):
-    """Send weekly accuracy report every Sunday at 21:05 UTC."""
+    """Send weekly performance summary on Sunday 20:00 UTC."""
     bot: Bot = app.bot
     log.info("Weekly report job started.")
 
     while True:
         try:
             now = datetime.now(timezone.utc)
-            # Find next Sunday
+            # Next Sunday 20:00
             days_until_sunday = (6 - now.weekday()) % 7
-            if days_until_sunday == 0 and now.hour >= 21:
+            if days_until_sunday == 0 and now.hour >= 20:
                 days_until_sunday = 7
-            target = (now + timedelta(days=days_until_sunday)).replace(
-                hour=21, minute=5, second=0, microsecond=0
-            )
-            wait_secs = (target - now).total_seconds()
-            log.info("Weekly report: next send in %.1f hours", wait_secs / 3600)
-            await asyncio.sleep(wait_secs)
+            target = (now + timedelta(days=days_until_sunday)).replace(hour=20, minute=0, second=0, microsecond=0)
+            wait = (target - now).total_seconds()
+            log.info("Weekly report: next in %.1f hours", wait / 3600)
+            await asyncio.sleep(wait)
 
-            # Build 7-day summary from outcome results
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-            week_res = [r for r in _outcome_results if r["time"] >= cutoff]
-
-            if len(week_res) < 5:
+            if not _outcome_results:
                 await asyncio.sleep(60)
                 continue
 
-            total = len(week_res)
-            wins = sum(1 for r in week_res if r["correct"])
-            win_rate = wins / total * 100
+            # Last 7 days
+            cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+            week = [r for r in _outcome_results
+                    if datetime.fromisoformat(r.get("timestamp", "2000-01-01T00:00:00+00:00")) > cutoff]
 
-            # Per-symbol
-            sym_stats = {}
-            for r in week_res:
-                s = r["symbol"]
-                if s not in sym_stats:
-                    sym_stats[s] = {"w": 0, "l": 0}
-                if r["correct"]:
-                    sym_stats[s]["w"] += 1
-                else:
-                    sym_stats[s]["l"] += 1
+            if not week:
+                await asyncio.sleep(60)
+                continue
 
-            # Confidence bins
-            high_conf = [r for r in week_res if r["confidence"] >= 70]
-            low_conf = [r for r in week_res if r["confidence"] < 70]
-            hc_rate = sum(1 for r in high_conf if r["correct"]) / max(len(high_conf), 1) * 100
-            lc_rate = sum(1 for r in low_conf if r["correct"]) / max(len(low_conf), 1) * 100
+            wins = sum(1 for r in week if r.get("correct"))
+            total = len(week)
 
-            week_str = datetime.now(timezone.utc).strftime("%b %d")
-            msg = (
-                f"📊 *Weekly Report — Week of {week_str}*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📈 Total: *{total}* signals\n"
-                f"✅ Wins: *{wins}* | ❌ Losses: *{total - wins}*\n"
-                f"🎯 Win Rate: *{win_rate:.1f}%*\n\n"
-                f"🔥 High Conf (≥70%): *{hc_rate:.0f}%* ({len(high_conf)} signals)\n"
-                f"📉 Low Conf (<70%): *{lc_rate:.0f}%* ({len(low_conf)} signals)\n\n"
+            text = (
+                f"Weekly Report\n\n"
+                f"Total signals: {total}\n"
+                f"Wins: {wins}\n"
+                f"Accuracy: {wins/total*100:.1f}%\n"
             )
-            for s, st in sorted(sym_stats.items()):
-                t = st["w"] + st["l"]
-                r_pct = st["w"] / t * 100 if t > 0 else 0
-                emoji = "🟢" if r_pct >= 60 else "🟡" if r_pct >= 50 else "🔴"
-                msg += f"  {emoji} *{s}*: {st['w']}/{t} ({r_pct:.0f}%)\n"
-
-            msg += f"\n💡 _Retrain recommended if win rate < 55%_"
-
-            await _broadcast_to_subscribers(bot, msg)
-            await asyncio.sleep(60)
+            await _broadcast(bot, text)
 
         except Exception as e:
-            log.exception("Weekly report error: %s", e)
-            await asyncio.sleep(300)
-
-
-async def _broadcast_to_subscribers(bot: Bot, msg: str):
-    """Send a message to all active subscribers."""
-    for chat_id, info in _subscribers.items():
-        if info.get("active", False):
-            try:
-                await bot.send_message(
-                    chat_id=int(chat_id), text=msg, parse_mode="Markdown",
-                )
-            except Exception as e:
-                log.error("Broadcast failed for %s: %s", chat_id, e)
-
-
-# =============================================================================
-#  Bot Handlers
-# =============================================================================
-
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    n_subs = sum(1 for s in _subscribers.values() if s.get("active"))
-    welcome = (
-        "🤖 *QUOTEX LORD V3 — ML Trading Engine*\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🔔 *Auto-Signal Mode:*\n"
-        "  Predictions 5s before every M5 close\n"
-        "  6 pairs │ Win/loss tracking │ Daily reports\n\n"
-        "🏗 *V3 Architecture (14 Layers):*\n"
-        "  • 65 features + multi-timeframe (M5/M15/H1)\n"
-        "  • Triple Barrier labeling (1.5x TP / 1.0x SL)\n"
-        "  • XGBoost + LightGBM + RandomForest ensemble\n"
-        "  • Purged Walk-Forward CV (leak-proof)\n"
-        "  • Regime-specific model routing\n"
-        "  • 10-gate pre-flight filter system\n"
-        "  • Meta-model + Kelly sizing + Circuit breaker\n\n"
-        "📊 *Backtest: 56.2% (honest, leak-free)*\n"
-        f"🎯 *High-Conf (≥70%): 75%*\n"
-        f"👥 Active subscribers: *{n_subs}*\n\n"
-        "👇 *Tap below to start!*"
-    )
-    await update.message.reply_text(
-        welcome,
-        parse_mode="Markdown",
-        reply_markup=_main_menu_keyboard(chat_id),
-    )
-
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    chat_id = query.message.chat_id
-
-    # ----- Menu -----
-    if data == "menu":
-        await query.edit_message_text(
-            "🤖 *QUOTEX LORD — Main Menu*\n\nChoose an option 👇",
-            parse_mode="Markdown",
-            reply_markup=_main_menu_keyboard(chat_id),
-        )
-
-    # ----- Subscribe -----
-    elif data == "sub":
-        await query.edit_message_text(
-            "🟢 *Start Auto-Signal*\n\nWhich symbols do you want signals for?",
-            parse_mode="Markdown",
-            reply_markup=_sub_symbol_keyboard(),
-        )
-
-    elif data.startswith("sub_"):
-        symbol = data.replace("sub_", "")
-        cid = str(chat_id)
-        if symbol == "ALL":
-            symbols = SYMBOLS.copy()
-        else:
-            symbols = [symbol]
-
-        # Store symbols temporarily, ask for alert mode
-        _subscribers[cid] = {"symbols": symbols, "active": False, "mode": "all"}
-        _save_subscribers()
-
-        sym_list = ", ".join(symbols)
-        await query.edit_message_text(
-            f"📊 Symbols: *{sym_list}*\n\n"
-            f"🔔 *Choose alert mode:*\n\n"
-            f"📡 *All Signals* — every M5 candle\n"
-            f"🎯 *High-Conf Only* — only when ≥70% confidence",
-            parse_mode="Markdown",
-            reply_markup=_alert_mode_keyboard(),
-        )
-
-    elif data in ("mode_all", "mode_high"):
-        cid = str(chat_id)
-        mode = "high" if data == "mode_high" else "all"
-        if cid in _subscribers:
-            _subscribers[cid]["active"] = True
-            _subscribers[cid]["mode"] = mode
-            _save_subscribers()
-
-        mode_label = "🎯 High-Conf Only (≥70%)" if mode == "high" else "📡 All Signals"
-        syms = _subscribers.get(cid, {}).get("symbols", [DEFAULT_SYMBOL])
-        await query.edit_message_text(
-            f"✅ *Auto-Signal Activated!*\n\n"
-            f"📊 Symbols: *{', '.join(syms)}*\n"
-            f"🔔 Mode: *{mode_label}*\n"
-            f"⏰ Predictions every 5 minutes\n\n"
-            f"Signals will start at the next candle.\n"
-            f"Send /start anytime to see the menu.",
-            parse_mode="Markdown",
-            reply_markup=_main_menu_keyboard(chat_id),
-        )
-        log.info("Subscriber activated: %s mode=%s syms=%s", cid, mode, syms)
-
-    # ----- Unsubscribe -----
-    elif data == "unsub":
-        cid = str(chat_id)
-        if cid in _subscribers:
-            _subscribers[cid]["active"] = False
-            _save_subscribers()
-        await query.edit_message_text(
-            "🔴 *Auto-Signal Stopped*\n\n"
-            "You won't receive automatic signals anymore.\n"
-            "Tap the button below to reactivate.",
-            parse_mode="Markdown",
-            reply_markup=_main_menu_keyboard(chat_id),
-        )
-
-    # ----- Predict Now -----
-    elif data == "predict_now":
-        await query.edit_message_text(
-            "🔮 *Instant Prediction*\n\nSelect symbol:",
-            parse_mode="Markdown",
-            reply_markup=_symbol_keyboard("now"),
-        )
-
-    elif data.startswith("now_"):
-        symbol = data.replace("now_", "")
-        if not _is_market_open():
-            await query.edit_message_text(
-                _market_closed_msg(), parse_mode="Markdown",
-                reply_markup=_back_keyboard(chat_id))
-            return
-        await query.edit_message_text(f"⏳ Running *{symbol}*...", parse_mode="Markdown")
-        try:
-            pred = _run_prediction(symbol)
-            msg = _format_prediction(pred)
-            await query.edit_message_text(msg, parse_mode="Markdown",
-                                          reply_markup=_back_keyboard(chat_id))
-        except Exception as e:
-            log.exception("Prediction failed for %s", symbol)
-            await query.edit_message_text(f"❌ Error: {e}",
-                                          reply_markup=_back_keyboard(chat_id))
-
-    # ----- Next Candle -----
-    elif data == "predict_next":
-        await query.edit_message_text(
-            "⏳ *Next Candle Prediction*\n\nSelect symbol:",
-            parse_mode="Markdown",
-            reply_markup=_symbol_keyboard("next"),
-        )
-
-    elif data.startswith("next_"):
-        symbol = data.replace("next_", "")
-        if not _is_market_open():
-            await query.edit_message_text(
-                _market_closed_msg(), parse_mode="Markdown",
-                reply_markup=_back_keyboard(chat_id))
-            return
-        if not _validate_symbol(symbol):
-            await query.edit_message_text(f"❌ `{symbol}` not found.",
-                                          reply_markup=_back_keyboard(chat_id))
-            return
-
-        server_time = _get_server_time()
-        close_time = _next_m5_close_time(server_time)
-        send_time = close_time - timedelta(seconds=TELEGRAM_SEND_BEFORE_CLOSE_SEC)
-        wait_seconds = max(0, (send_time - server_time).total_seconds())
-
-        await query.edit_message_text(
-            f"⏳ *{symbol}* M5 close at `{close_time.strftime('%H:%M:%S')}` UTC\n"
-            f"Prediction in ~{int(wait_seconds)}s...",
-            parse_mode="Markdown",
-        )
-
-        if wait_seconds > 0:
-            await asyncio.sleep(wait_seconds)
-
-        try:
-            pred = _run_prediction(symbol)
-            msg = _format_prediction(pred)
-            await query.edit_message_text(msg, parse_mode="Markdown",
-                                          reply_markup=_back_keyboard(chat_id))
-        except Exception as e:
-            await query.edit_message_text(f"❌ Error: {e}",
-                                          reply_markup=_back_keyboard(chat_id))
-
-    # ----- Multi-Symbol -----
-    elif data == "multi_symbol":
-        if not _is_market_open():
-            await query.edit_message_text(
-                _market_closed_msg(), parse_mode="Markdown",
-                reply_markup=_back_keyboard(chat_id))
-            return
-        await query.edit_message_text("📈 *Scanning all symbols...*", parse_mode="Markdown")
-        results = []
-        for sym in SYMBOLS:
-            try:
-                if not _validate_symbol(sym):
-                    results.append(f"  {sym}: ❌ N/A")
-                    continue
-                pred = _run_prediction(sym)
-                d = "🟢" if pred["suggested_direction"] == "UP" else "🔴"
-                conf = pred["final_confidence_percent"]
-                kelly = pred.get("kelly_fraction_percent", 0)
-                trade = pred["suggested_trade"]
-                results.append(f"  {d} *{sym}*: {conf:.0f}% | K:{kelly:.1f}% | {trade}")
-            except Exception as e:
-                results.append(f"  {sym}: ⚠️ {str(e)[:25]}")
-
-        msg = "📈 *Multi-Symbol Scan*\n━━━━━━━━━━━━━━━━━━━━━\n\n" + "\n".join(results)
-        await query.edit_message_text(msg, parse_mode="Markdown",
-                                      reply_markup=_back_keyboard(chat_id))
-
-    # ----- Status -----
-    elif data == "status":
-        acc_status = _tracker.status()
-        conf_status = _conf_tracker.status()
-        n_subs = sum(1 for s in _subscribers.values() if s.get("active"))
-        msg = (
-            f"📊 *Engine Status*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🎯 Rolling Accuracy: *{acc_status['rolling_accuracy']:.1%}*\n"
-            f"📝 Predictions: *{acc_status['predictions_tracked']}*\n"
-            f"📈 Conf Correlation: *{conf_status['confidence_correlation']:.3f}*\n"
-            f"🔔 Alert: *{conf_status['alert']}*\n"
-            f"🔄 Retrain: *{acc_status['should_retrain']}*\n\n"
-            f"👥 Active Subscribers: *{n_subs}*\n"
-            f"📡 Signals Today: *{_count_today_signals()}*"
-        )
-        await query.edit_message_text(msg, parse_mode="Markdown",
-                                      reply_markup=_back_keyboard(chat_id))
-
-    # ----- Regime -----
-    elif data == "regime":
-        if not _is_market_open():
-            await query.edit_message_text(
-                _market_closed_msg(), parse_mode="Markdown",
-                reply_markup=_back_keyboard(chat_id))
-            return
-        try:
-            data_dict = fetch_multi_timeframe(DEFAULT_SYMBOL, CANDLES_TO_FETCH)
-            df = data_dict.get("M5")
-            m15, h1 = data_dict.get("M15"), data_dict.get("H1")
-            df = compute_features(df, m15_df=m15, h1_df=h1)
-            regime = detect_regime(df)
-
-            last = df.iloc[-1]
-            adx = last.get("adx", 0)
-            atr = last.get("atr_14", 0)
-            vol_z = last.get("volatility_zscore", 0)
-            comp = last.get("compression_ratio", 0)
-            imb = last.get("imbalance_10", 0)
-
-            regime_emoji = {"Trending": "📈", "Ranging": "↔️",
-                           "High_Volatility": "🔥", "Low_Volatility": "❄️"}.get(regime, "❓")
-
-            msg = (
-                f"🌊 *Market Regime*\n━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"{regime_emoji} *{regime}*\n\n"
-                f"ADX: *{adx:.1f}* | ATR: *{atr:.5f}*\n"
-                f"Vol Z: *{vol_z:.2f}* | Comp: *{comp:.2f}*\n"
-                f"Imbalance: *{imb:.0f}*"
-            )
-        except Exception as e:
-            msg = f"❌ Error: {e}"
-
-        await query.edit_message_text(msg, parse_mode="Markdown",
-                                      reply_markup=_back_keyboard(chat_id))
-
-    # ----- Model Info -----
-    elif data == "model_info":
-        msg = (
-            "ℹ️ *V3 Architecture — 14 Layers*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "🏗 *Ensemble:* XGB + LGB + RF (5 seeds)\n"
-            "🎯 *Labels:* Triple Barrier (1.5x/1.0x ATR)\n"
-            "⚖️ *Training:* Purged WF-CV + time weights\n"
-            "🧠 *Meta:* GBM + Sigmoid (14 features)\n"
-            "📊 *Features:* 65 (multi-TF: M5/M15/H1)\n"
-            "🌊 *Regime:* ADX+ATR+BB classifier → routing\n\n"
-            "*V3 Backtest Results:*\n"
-            "  📈 Overall: *56.2%* (leak-free)\n"
-            "  🇬🇧 London: *58.6%*\n"
-            "  ≥70% conf: *75.0%*\n"
-            "  BSS: *+0.012* (beats naive)\n\n"
-            "*10-Gate Filter:*\n"
-            "  G1-Conf │ G2-Meta │ G3-Regime\n"
-            "  G4-Stability │ G5-Variance\n"
-            "  G6-Session │ G7-Cooldown\n"
-            "  G8-Spread │ G9-Kelly │ G10-Circuit"
-        )
-        await query.edit_message_text(msg, parse_mode="Markdown",
-                                      reply_markup=_back_keyboard(chat_id))
-
-    # ----- Production State -----
-    elif data == "prod_state":
-        msg = get_state_summary()
-        await query.edit_message_text(msg, parse_mode="Markdown",
-                                      reply_markup=_back_keyboard(chat_id))
-
-    # ----- Position Guide -----
-    elif data == "position_guide":
-        msg = (
-            "💰 *Position Sizing (¼ Kelly)*\n━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "🔴 Kelly <1% → *0.5x*\n"
-            "🟠 Kelly 1-2% → *0.8x*\n"
-            "🟡 Kelly 2-3% → *1.2x*\n"
-            "🟢 Kelly >3% → *1.5x*\n\n"
-            "⚠️ Never exceed 1.5x\n"
-            "⚠️ 3 losses in a row → pause"
-        )
-        await query.edit_message_text(msg, parse_mode="Markdown",
-                                      reply_markup=_back_keyboard(chat_id))
-
-    # ----- Today's Signals -----
-    elif data == "today_signals":
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        today_sigs = [s for s in _signal_history
-                      if s["time"].startswith(today)]
-
-        if not today_sigs:
-            msg = "📜 *Today's Signals*\n\nNo signals sent yet today."
-        else:
-            lines = [f"📜 *Today's Signals* ({len(today_sigs)} total)\n━━━━━━━━━━━━━━━━━━━━━\n"]
-            for s in today_sigs[-20:]:  # Last 20
-                t = s["time"][11:16]
-                d = "🟢" if s["direction"] == "UP" else "🔴"
-                lines.append(f"  {t} {d} *{s['symbol']}* {s['confidence']:.0f}% | {s['trade']}")
-            msg = "\n".join(lines)
-
-        await query.edit_message_text(msg, parse_mode="Markdown",
-                                      reply_markup=_back_keyboard(chat_id))
-
-    # ----- Today's Results (Outcome Feedback) -----
-    elif data == "today_results":
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        today_res = [r for r in _outcome_results
-                     if r["time"].startswith(today)]
-
-        if not today_res:
-            msg = "🎯 *Today's Results*\n\nNo results yet. Outcomes appear ~35s after each candle closes."
-        else:
-            wins = sum(1 for r in today_res if r["correct"])
-            total = len(today_res)
-            win_rate = wins / total * 100
-
-            lines = [
-                f"🎯 *Today's Results*",
-                f"━━━━━━━━━━━━━━━━━━━━━",
-                f"✅ Wins: *{wins}* | ❌ Losses: *{total - wins}*",
-                f"📊 Win Rate: *{win_rate:.1f}%*",
-                f"",
-            ]
-            for r in today_res[-15:]:
-                t = r["time"][11:16]
-                emoji = "✅" if r["correct"] else "❌"
-                lines.append(
-                    f"  {t} {emoji} *{r['symbol']}*: "
-                    f"{r['predicted']}→{r['actual']} ({r['confidence']:.0f}%)"
-                )
-            msg = "\n".join(lines)
-
-        await query.edit_message_text(msg, parse_mode="Markdown",
-                                      reply_markup=_back_keyboard(chat_id))
-
-def _count_today_signals():
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return sum(1 for s in _signal_history if s["time"].startswith(today))
-
-
-# Legacy command handlers
-async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    symbol = args[0].upper() if args else DEFAULT_SYMBOL
-
-    if not _validate_symbol(symbol):
-        await update.message.reply_text(f"❌ `{symbol}` not found.")
-        return
-
-    server_time = _get_server_time()
-    close_time = _next_m5_close_time(server_time)
-    send_time = close_time - timedelta(seconds=TELEGRAM_SEND_BEFORE_CLOSE_SEC)
-    wait_seconds = max(0, (send_time - server_time).total_seconds())
-
-    await update.message.reply_text(
-        f"⏳ *{symbol}* M5 close at `{close_time.strftime('%H:%M:%S')}` UTC\n"
-        f"Prediction in ~{int(wait_seconds)}s...",
-        parse_mode="Markdown",
-    )
-    if wait_seconds > 0:
-        await asyncio.sleep(wait_seconds)
-
-    try:
-        pred = _run_prediction(symbol)
-        msg = _format_prediction(pred)
-        chat_id = update.effective_chat.id
-        await update.message.reply_text(msg, parse_mode="Markdown",
-                                        reply_markup=_back_keyboard(chat_id))
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
-
-
-async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    acc_status = _tracker.status()
-    conf_status = _conf_tracker.status()
-    await update.message.reply_text(
-        f"📊 *Engine Status*\n\n"
-        f"Accuracy: *{acc_status['rolling_accuracy']:.1%}*\n"
-        f"Predictions: *{acc_status['predictions_tracked']}*\n"
-        f"Correlation: *{conf_status['confidence_correlation']:.3f}*\n"
-        f"Retrain: *{acc_status['should_retrain']}*",
-        parse_mode="Markdown",
-    )
-
-
-async def _send_admin_alert(bot: Bot, msg: str):
-    '''Send alert to ADMIN_CHAT_ID only (not all subscribers).'''
-    from config import ADMIN_CHAT_ID
-    if not ADMIN_CHAT_ID:
-        return
-    try:
-        await bot.send_message(
-            chat_id=int(ADMIN_CHAT_ID),
-            text=f'🔔 *ADMIN ALERT*\n{msg}',
-            parse_mode='Markdown')
-    except Exception as e:
-        log.error('Admin alert failed: %s', e)
-
-async def _broadcast_to_subscribers(bot: Bot, text: str):
-    '''Send message to all active subscribers.'''
-    for str_cid, info in _subscribers.items():
-        if info.get("active", False):
-            try:
-                await bot.send_message(
-                    chat_id=int(str_cid),
-                    text=text,
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                log.error("Broadcast failed to %s: %s", str_cid, e)
-
-async def _run_drift_check(bot: Bot, symbols):
-    try:
-        sym  = symbols[0] if symbols else DEFAULT_SYMBOL
-        data = fetch_multi_timeframe(sym, 1000)
-        df   = compute_features(data.get('M5'))
-        from auto_learner import check_drift_triggers
-        triggers = check_drift_triggers(sym, recent_df=df, feature_names=FEATURE_COLUMNS)
-        if triggers:
-            msg = f'⚠️ Drift detected: {triggers}\nLite retrain starting...'
-            await _send_admin_alert(bot, msg)
-            from auto_learner import retrain_lite
-            import threading
-            threading.Thread(target=retrain_lite, args=(sym,), kwargs={"validate": True}, daemon=True).start()
-    except Exception as e:
-        log.warning('Drift check coroutine failed: %s', e)
-
-async def _weekly_retrain_job(app: Application):
-    '''Lite retrain every Sunday 21:15 UTC. Notifies admin. Never blocks.'''
-    bot = app.bot
-    while True:
-        try:
-            now = datetime.now(timezone.utc)
-            days_left = (6 - now.weekday()) % 7
-            if days_left == 0 and (now.hour > 21 or (now.hour == 21 and now.minute >= 15)):
-                days_left = 7
-            target = (now + timedelta(days=days_left)).replace(
-                hour=21, minute=15, second=0, microsecond=0)
-            await asyncio.sleep((target - now).total_seconds())
-
-            await _send_admin_alert(bot, f'🔄 Weekly lite retrain starting for {DEFAULT_SYMBOL}...')
-
-            result = {}
-            def _run():
-                from auto_learner import retrain_lite
-                result['ok'] = retrain_lite(DEFAULT_SYMBOL, validate=True)
-            import threading
-            t = threading.Thread(target=_run, daemon=True)
-            t.start(); t.join(timeout=600)
-
-            ok = result.get('ok', False)
-            await _send_admin_alert(bot, f"{'✅' if ok else '❌'} Weekly retrain {'complete' if ok else 'FAILED'}.")
-            await asyncio.sleep(60)
-        except Exception as e:
-            log.exception('Weekly retrain job error: %s', e)
+            log.error("Weekly report error: %s", e)
             await asyncio.sleep(3600)
 
 
 # =============================================================================
-#  Main
+#  Retrain Job
 # =============================================================================
 
-async def post_init(app: Application):
-    """Start background jobs after bot initializes."""
-    asyncio.create_task(_auto_signal_job(app))
-    asyncio.create_task(_daily_report_job(app))
-    asyncio.create_task(_weekly_report_job(app))
-    asyncio.create_task(_weekly_retrain_job(app))
-    record_startup()
-    log.info("All background jobs scheduled (auto-signal + daily + weekly + retrain).")
+async def _retrain_job(bot: Bot):
+    """Trigger model retrain when accuracy/correlation degrades."""
+    try:
+        from auto_learner import retrain
+        log.info("Auto-retrain triggered.")
+        result = retrain()
+        if result:
+            load_models()
+            log.info("Retrain complete. Models reloaded.")
+            if ADMIN_CHAT_ID:
+                await _safe_send(bot, ADMIN_CHAT_ID, "Auto-retrain complete. Models reloaded.")
+    except Exception as e:
+        log.error("Retrain failed: %s", e)
+
+
+async def _retrain_check_job(app: Application):
+    """Periodic retrain trigger check (every 4 hours)."""
+    bot: Bot = app.bot
+
+    while True:
+        try:
+            await asyncio.sleep(14400)  # 4 hours
+
+            acc = _accuracy.accuracy if hasattr(_accuracy, 'accuracy') else 0.5
+            corr = _conf_corr.correlation if hasattr(_conf_corr, 'correlation') else 0.5
+
+            if acc < AUTO_RETRAIN_ACCURACY_TRIGGER or corr < AUTO_RETRAIN_CORRELATION_TRIGGER:
+                log.warning("Retrain trigger: accuracy=%.3f, correlation=%.3f", acc, corr)
+                await _retrain_job(bot)
+
+        except Exception as e:
+            log.error("Retrain check error: %s", e)
+            await asyncio.sleep(3600)
+
+
+# =============================================================================
+#  Main Entry
+# =============================================================================
 
 def main():
+    """Initialize and start the v10 bot."""
     if not TELEGRAM_BOT_TOKEN:
-        print('[X] STARTUP FAILED: TELEGRAM_BOT_TOKEN is not set.')
-        print('Copy .env.example to .env and fill your values.')
-        return
+        log.error("TELEGRAM_BOT_TOKEN not set. Exiting.")
+        sys.exit(1)
 
-    # Warn (but don't block) if MT5 credentials are missing
-    if not MT5_LOGIN or int(MT5_LOGIN) == 0:
-        log.warning('MT5_LOGIN is 0 or missing -- MT5 will try default terminal.')
-    if not MT5_SERVER:
-        log.warning('MT5_SERVER is empty -- MT5 will try default terminal.')
+    # Ensure directories exist
+    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(MODEL_DIR, exist_ok=True)
 
-    if not _connect_mt5():
-        print("WARNING: MT5 not connected.")
+    # Connect MT5
+    if not _ensure_mt5():
+        log.warning("MT5 connection failed at startup. Will retry on first prediction.")
 
+    # Load state
     _load_subscribers()
-    _load_today_from_csv()
+    _load_outcomes()
 
+    # Load ML models
     try:
         load_models()
         log.info("Models pre-loaded.")
     except Exception as e:
-        log.warning("Could not pre-load models: %s", e)
+        log.warning("Model pre-load failed: %s (will retry)", e)
 
-    app = (
-        Application.builder()
-        .token(TELEGRAM_BOT_TOKEN)
-        .connect_timeout(30)
-        .read_timeout(30)
-        .write_timeout(30)
-        .post_init(post_init)
-        .build()
-    )
+    # Load pending signals
+    try:
+        global _pending_signals
+        if os.path.exists(PENDING_JSON):
+            with open(PENDING_JSON) as f:
+                loaded = json.load(f)
+                _pending_signals = loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        _pending_signals = {}
 
+    record_startup()
+
+    # Build application
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # Register handlers
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("next", cmd_next))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("predict", cmd_predict))
+    app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CommandHandler("results", cmd_results))
+    app.add_handler(CommandHandler("today", cmd_today))
+    app.add_handler(CommandHandler("dashboard", cmd_dashboard))
+    app.add_handler(CommandHandler("audit", cmd_audit))
+    app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
+    app.add_handler(CallbackQueryHandler(_handle_callback))
 
-    log.info("Telegram bot starting (with auto-signal)...")
+    async def _on_startup(app_ref: Application):
+        log.info("Telegram bot starting (v10)...")
+
+        # Start background tasks
+        asyncio.create_task(_auto_signal_job(app_ref))
+        asyncio.create_task(_daily_report_job(app_ref))
+        asyncio.create_task(_weekly_report_job(app_ref))
+        asyncio.create_task(_retrain_check_job(app_ref))
+
+        log.info("All background jobs scheduled.")
+
+    app.post_init = _on_startup
+
+    log.info("QUOTEX LORD v10 starting...")
     app.run_polling(drop_pending_updates=True)
 
 

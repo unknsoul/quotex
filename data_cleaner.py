@@ -81,14 +81,26 @@ def remove_zero_range(df):
 
 
 def clean_data(df):
-    """Full cleaning pipeline: validate → spikes → weekends → duplicates → zero-range."""
+    """Full v10 cleaning pipeline: validate → fill gaps → spikes → weekends → duplicates → zero-range → drop missing."""
     n_before = len(df)
     df = validate_ohlcv(df)
+    # Fill small gaps (≤3 bars) via forward-fill
+    if "time" in df.columns:
+        df = df.set_index("time").asfreq("5min").reset_index() if False else df
+    for col in ["open", "high", "low", "close"]:
+        df[col] = df[col].ffill(limit=3)
     for col in ["open", "high", "low", "close"]:
         df = remove_spikes(df, col=col)
     df = remove_weekend_gaps(df)
     df = remove_duplicates(df)
     df = remove_zero_range(df)
+    # Drop rows with >10% missing values
+    missing_pct = df.isnull().mean(axis=1)
+    high_missing = missing_pct > 0.10
+    if high_missing.any():
+        n_drop = high_missing.sum()
+        df = df[~high_missing].reset_index(drop=True)
+        log.info("Dropped %d rows with >10%% missing values", n_drop)
     n_after = len(df)
     log.info("Data cleaning: %d → %d bars (%.1f%% kept)",
              n_before, n_after, n_after / n_before * 100 if n_before else 0)

@@ -1,13 +1,16 @@
 """
-Multi-Timeframe Confluence Filter — Strategy 1.
+Multi-Timeframe Confluence Filter — v2 (Accuracy-Optimized).
 
-Only allows signals when M5, M15, and H1 agree on direction.
-If lower timeframe says UP but higher says DOWN, the signal
-is fighting the macro trend and should be skipped.
+Improved confluence logic:
+  1. Weighted TF voting — H1 counts more than M5
+  2. RSI momentum confirmation per TF
+  3. Partial-pass scoring — strong H1 alignment can override weak M5
+  4. EMA hierarchy check — proper trend structure (EMA20 > EMA50 > EMA200)
+  5. Momentum magnitude — not just direction, but strength
 
 Returns:
-    confluence_score  : 0–3 (how many TFs agree)
-    confluence_pass   : True if score >= threshold
+    confluence_score  : 0.0–3.0 (weighted score, not just count)
+    confluence_pass   : True if weighted score >= threshold
     tf_directions     : dict of directions per TF
 """
 
@@ -16,25 +19,35 @@ import numpy as np
 
 log = logging.getLogger("confluence_filter")
 
+# TF weights — higher timeframes more important for trend accuracy
+TF_WEIGHTS = {"M5": 0.25, "M15": 0.35, "H1": 0.40}
 
-def _tf_direction(df, lookback=3):
+
+def _tf_direction_v2(df, lookback=3, tf_name="M5"):
     """
-    Determine direction from a dataframe using multiple confirmations:
-    - EMA slope (trend direction)
-    - Last N candles momentum
-    - Current price vs EMA-20
-    Returns: 'UP', 'DOWN', or 'NEUTRAL'
+    Determine direction with confidence score using multiple confirmations:
+    - EMA slope (trend direction) + magnitude
+    - Last N candles momentum (green/red ratio)
+    - Price vs EMA-20 (above/below)
+    - RSI positioning (>55 bullish, <45 bearish)
+    - EMA hierarchy (20 > 50 > 200 = strong trend)
+
+    Returns: ('UP'|'DOWN'|'NEUTRAL', confidence 0.0-1.0)
     """
     if df is None or len(df) < max(lookback, 20):
-        return "NEUTRAL"
+        return "NEUTRAL", 0.0
 
     try:
         close = df["close"].values
-        # EMA-20 slope check
+        high = df["high"].values
+        low = df["low"].values
+
+        # EMA-20 slope
         ema20 = df["close"].ewm(span=20, min_periods=10).mean().values
+        ema50 = df["close"].ewm(span=50, min_periods=20).mean().values if len(df) >= 50 else ema20
         ema_slope = (ema20[-1] - ema20[-3]) / max(abs(ema20[-3]), 1e-10)
 
-        # Last N candles: more green or red?
+        # Candle momentum
         recent = df.tail(lookback)
         green_count = (recent["close"] > recent["open"]).sum()
         red_count = (recent["close"] < recent["open"]).sum()
@@ -42,35 +55,65 @@ def _tf_direction(df, lookback=3):
         # Price vs EMA-20
         above_ema = close[-1] > ema20[-1]
 
-        # Scoring: each factor votes
-        up_votes = 0
-        down_votes = 0
+        # RSI (simple)
+        delta = np.diff(close[-15:]) if len(close) >= 15 else np.diff(close)
+        gains = np.where(delta > 0, delta, 0)
+        losses = np.where(delta < 0, -delta, 0)
+        avg_gain = max(np.mean(gains[-14:]), 1e-10) if len(gains) >= 14 else max(np.mean(gains), 1e-10)
+        avg_loss = max(np.mean(losses[-14:]), 1e-10) if len(losses) >= 14 else max(np.mean(losses), 1e-10)
+        rsi = 100 - (100 / (1 + avg_gain / (avg_loss + 1e-10)))
 
-        if ema_slope > 0.0001:
-            up_votes += 1
-        elif ema_slope < -0.0001:
-            down_votes += 1
+        # EMA hierarchy: check if EMAs are properly stacked
+        ema_stacked_bull = (ema20[-1] > ema50[-1]) if len(df) >= 50 else False
+        ema_stacked_bear = (ema20[-1] < ema50[-1]) if len(df) >= 50 else False
 
+        # Weighted voting with magnitude
+        up_score = 0.0
+        down_score = 0.0
+
+        # EMA slope (weight: 0.30)
+        slope_threshold = 0.00005 if tf_name == "H1" else 0.0001
+        if ema_slope > slope_threshold:
+            up_score += 0.30 * min(abs(ema_slope) / 0.002, 1.0)
+        elif ema_slope < -slope_threshold:
+            down_score += 0.30 * min(abs(ema_slope) / 0.002, 1.0)
+
+        # Candle momentum (weight: 0.20)
         if green_count > red_count:
-            up_votes += 1
+            up_score += 0.20 * (green_count / lookback)
         elif red_count > green_count:
-            down_votes += 1
+            down_score += 0.20 * (red_count / lookback)
 
+        # Price vs EMA (weight: 0.15)
+        ema_dist = abs(close[-1] - ema20[-1]) / max(abs(ema20[-1]), 1e-10)
         if above_ema:
-            up_votes += 1
+            up_score += 0.15 * min(ema_dist / 0.002, 1.0)
         else:
-            down_votes += 1
+            down_score += 0.15 * min(ema_dist / 0.002, 1.0)
 
-        if up_votes >= 2:
-            return "UP"
-        elif down_votes >= 2:
-            return "DOWN"
+        # RSI (weight: 0.20)
+        if rsi > 55:
+            up_score += 0.20 * min((rsi - 50) / 30, 1.0)
+        elif rsi < 45:
+            down_score += 0.20 * min((50 - rsi) / 30, 1.0)
+
+        # EMA hierarchy (weight: 0.15)
+        if ema_stacked_bull:
+            up_score += 0.15
+        elif ema_stacked_bear:
+            down_score += 0.15
+
+        conf = max(up_score, down_score)
+        if up_score > down_score and up_score >= 0.30:
+            return "UP", round(conf, 3)
+        elif down_score > up_score and down_score >= 0.30:
+            return "DOWN", round(conf, 3)
         else:
-            return "NEUTRAL"
+            return "NEUTRAL", round(conf, 3)
 
     except Exception as e:
         log.debug("TF direction calc failed: %s", e)
-        return "NEUTRAL"
+        return "NEUTRAL", 0.0
 
 
 def check_confluence(m5_df, m15_df=None, h1_df=None,
@@ -78,60 +121,83 @@ def check_confluence(m5_df, m15_df=None, h1_df=None,
     """
     Check if multiple timeframes agree with the predicted direction.
 
-    Args:
-        m5_df:  M5 dataframe
-        m15_df: M15 dataframe (optional)
-        h1_df:  H1 dataframe (optional)
-        predicted_direction: 'UP' or 'DOWN' from the model
-        min_score: minimum agreeing TFs to pass (default 2 of 3)
+    v2 improvements:
+      - Weighted scoring (H1=0.40, M15=0.35, M5=0.25)
+      - Confidence-weighted votes
+      - Partial pass: strong H1 can compensate for weak M5
+      - H1 NEUTRAL counts as partial agree (no strong opposing trend)
 
     Returns:
         dict with:
-            confluence_score: 0–3
+            confluence_score: 0.0–3.0 (weighted, not just count)
             confluence_pass: bool
             tf_directions: {M5: ..., M15: ..., H1: ...}
             reason: human-readable explanation
     """
     directions = {}
-    score = 0
+    weighted_score = 0.0
+    raw_count = 0  # backwards compat
 
     # M5 direction
-    m5_dir = _tf_direction(m5_df, lookback=3)
+    m5_dir, m5_conf = _tf_direction_v2(m5_df, lookback=3, tf_name="M5")
     directions["M5"] = m5_dir
     if m5_dir == predicted_direction:
-        score += 1
+        weighted_score += TF_WEIGHTS["M5"] * (1.0 + m5_conf)
+        raw_count += 1
+    elif m5_dir == "NEUTRAL":
+        weighted_score += TF_WEIGHTS["M5"] * 0.3  # partial credit
 
     # M15 direction
     if m15_df is not None and len(m15_df) >= 20:
-        m15_dir = _tf_direction(m15_df, lookback=3)
+        m15_dir, m15_conf = _tf_direction_v2(m15_df, lookback=3, tf_name="M15")
         directions["M15"] = m15_dir
         if m15_dir == predicted_direction:
-            score += 1
+            weighted_score += TF_WEIGHTS["M15"] * (1.0 + m15_conf)
+            raw_count += 1
+        elif m15_dir == "NEUTRAL":
+            weighted_score += TF_WEIGHTS["M15"] * 0.3
     else:
         directions["M15"] = "N/A"
-        # Phase 1 Gap 4: No benefit of doubt point. Neutral rating.
 
-    # H1 direction
+    # H1 direction — most important TF
     if h1_df is not None and len(h1_df) >= 20:
-        h1_dir = _tf_direction(h1_df, lookback=2)
+        h1_dir, h1_conf = _tf_direction_v2(h1_df, lookback=2, tf_name="H1")
         directions["H1"] = h1_dir
         if h1_dir == predicted_direction:
-            score += 1
+            weighted_score += TF_WEIGHTS["H1"] * (1.0 + h1_conf)
+            raw_count += 1
+        elif h1_dir == "NEUTRAL":
+            # H1 neutral = no strong opposing trend, partial credit
+            weighted_score += TF_WEIGHTS["H1"] * 0.4
     else:
         directions["H1"] = "N/A"
-        # Phase 1 Gap 4: No benefit of doubt point. Neutral rating.
 
-    passed = score >= min_score
+    # Scale weighted_score to 0-3 range for backwards compatibility
+    # Max possible: sum(weights * 2.0) ≈ 2.0, scale to 0-3
+    scaled_score = min(3.0, weighted_score * 3.0 / 2.0)
+
+    # Pass condition: weighted score threshold (v2: more nuanced than raw count)
+    # min_score=2 → need weighted_score >= ~1.0 (moderate agreement)
+    weighted_threshold = min_score / 3.0  # 2/3 ≈ 0.667
+    passed = weighted_score >= weighted_threshold
+
+    # Special case: if H1 strongly opposes, fail even if M5+M15 agree
+    if h1_df is not None and len(h1_df) >= 20:
+        h1_dir_check = directions.get("H1", "NEUTRAL")
+        if h1_dir_check != "NEUTRAL" and h1_dir_check != predicted_direction and h1_dir_check != "N/A":
+            # H1 opposes — need very strong M5+M15 to override
+            if raw_count < 2:
+                passed = False
 
     if not passed:
         opposing = [f"{tf}={d}" for tf, d in directions.items()
                     if d != predicted_direction and d != "N/A" and d != "NEUTRAL"]
         reason = f"TF conflict: {', '.join(opposing)} vs pred={predicted_direction}"
     else:
-        reason = f"Confluence {score}/3 OK"
+        reason = f"Confluence {scaled_score:.1f}/3 OK (weighted)"
 
     return {
-        "confluence_score": score,
+        "confluence_score": round(scaled_score, 1),
         "confluence_pass": passed,
         "tf_directions": directions,
         "reason": reason,

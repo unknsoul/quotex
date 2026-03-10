@@ -143,6 +143,8 @@ def load_models():
                     mismatches = fp.get('mismatches', [])
                     log.warning('FEATURE MISMATCH: %d features drifted — model may be stale. %s',
                                 len(mismatches), mismatches[:5])
+                elif fp.get('status') == 'skipped':
+                    log.info('Feature fingerprint loaded (%d features).', fp.get('n_checked', 0))
                 else:
                     log.info('Feature fingerprint OK (%d features).', fp.get('n_checked', 0))
             except Exception as e:
@@ -182,8 +184,8 @@ def verify_candle_closed(df, timeframe_minutes=5):
     is_closed = candle_close <= now
 
     if not is_closed:
-        log.warning("Last candle NOT closed (time=%s, closes=%s, now=%s). "
-                     "Using second-to-last.", last_time, candle_close, now)
+        log.info("Last candle not closed (time=%s, closes=%s, now=%s). "
+                 "Using second-to-last.", last_time, candle_close, now)
     return is_closed
 
 
@@ -305,14 +307,31 @@ def _should_skip(regime, confidence_pct, df, ensemble_variance=0.0):
 
 def _quality_score(confidence_pct, meta_pct, unanimity, stability_score, uncertainty_pct, green_p):
     edge_pct = abs(green_p - 0.5) * 200.0
-    # Rebalanced: emphasize primary edge and unanimity more, penalize uncertainty harder
+
+    # v2: Multi-factor quality with non-linear scaling
+    # Strong edges get bonus; weak edges get penalty
+    edge_bonus = 0.0
+    if edge_pct > 30:  # green_p > 0.65 or < 0.35
+        edge_bonus = (edge_pct - 30) * 0.15
+    elif edge_pct < 10:  # green_p between 0.45-0.55 (weak)
+        edge_bonus = (edge_pct - 10) * 0.20  # negative penalty
+
+    # Unanimity bonus for 5/6 or 6/6
+    unanimity_bonus = 0.0
+    if unanimity >= 0.833:  # 5/6+
+        unanimity_bonus = 8.0
+    elif unanimity >= 1.0:  # 6/6
+        unanimity_bonus = 15.0
+
     return round(
-        0.30 * confidence_pct +
+        0.28 * confidence_pct +
         0.15 * meta_pct +
-        0.25 * (unanimity * 100.0) +
+        0.22 * (unanimity * 100.0) +
         0.10 * (stability_score * 100.0) +
-        0.20 * edge_pct -
-        0.35 * uncertainty_pct,
+        0.18 * edge_pct -
+        0.30 * uncertainty_pct +
+        edge_bonus +
+        unanimity_bonus,
         2,
     )
 
@@ -474,6 +493,16 @@ def predict(df, regime):
 
         confidence = weighted_score * (1.0 - norm_var)
 
+        # v2: Strong signal confidence boost —
+        # When ensemble strongly agrees (5/6+) AND variance is very low,
+        # boost confidence slightly to reward high-quality setups
+        if unanimity >= 0.833 and variance < 0.008:
+            boost = 1.0 + 0.05 * (unanimity - 0.667)  # up to ~1.7% boost
+            confidence *= boost
+        # Penalty for borderline signals (4/6 with moderate variance)
+        elif unanimity <= 0.667 and variance > 0.015:
+            confidence *= 0.95  # small penalty
+
         # Phase 3: Session-aware confidence adjustment
         session = "Off"
         try:
@@ -534,7 +563,7 @@ def predict(df, regime):
         # Kelly criterion position sizing (quarter-Kelly, binary options payoff)
         win_prob = min(_direction_probability(green_p), 0.99)
         payout_ratio = 0.80  # typical binary options payout: 80% on win
-        if trade == "HOLD" or confidence_pct < 60.0:
+        if trade == "HOLD" or confidence_pct < 50.0:
             kelly_pct = 0.0
         else:
             # Kelly for asymmetric payoff: f = (p*b - q) / b
@@ -547,6 +576,26 @@ def predict(df, regime):
 
         # Latency measurement
         latency_ms = round((time.perf_counter() - t_start) * 1000, 1)
+
+        # Build signal strength label and reason chain
+        _strength_label = "Weak"
+        if confidence_pct >= 70:
+            _strength_label = "Strong"
+        elif confidence_pct >= 58:
+            _strength_label = "Moderate"
+
+        _reasons = []
+        if unanimity >= 0.667:
+            _reasons.append(f"Models agree ({agree_count}/{n_models})")
+        if meta_pct >= 55:
+            _reasons.append(f"Meta trust {meta_pct:.0f}%")
+        if stability_score >= 0.8:
+            _reasons.append(f"Stable {regime.replace('_', ' ')} regime")
+        if uncertainty_pct < 3:
+            _reasons.append("Low uncertainty")
+        if kelly_pct > 0:
+            _reasons.append(f"Kelly {kelly_pct:.1f}%")
+        reason_chain = " | ".join(_reasons[:4]) if _reasons else "Marginal edge"
 
         result = {
             "green_probability_percent": green_pct,
@@ -573,6 +622,8 @@ def predict(df, regime):
             "session": session,
             "skip_reason": skip_reason,
             "quality_score": quality_score,
+            "signal_strength": _strength_label,
+            "reason_chain": reason_chain,
             "total_skips": _skip_count,
             "latency_ms": latency_ms,
         }

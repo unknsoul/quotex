@@ -101,7 +101,10 @@ def fetch_multi_timeframe(symbol: str,
         try:
             result[tf_name] = fetch_candles(symbol, tf_name, tf_count)
         except RuntimeError as e:
-            log.warning("Could not fetch %s: %s", tf_name, e)
+            if tf_name == "M1":
+                log.info("Could not fetch %s: %s", tf_name, e)
+            else:
+                log.warning("Could not fetch %s: %s", tf_name, e)
     return result
 
 

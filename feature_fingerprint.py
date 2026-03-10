@@ -53,6 +53,11 @@ def check_fingerprint(df, feature_cols, path=FINGERPRINT_PATH, tolerance=0.3):
     if not os.path.exists(path):
         log.warning("No fingerprint found at %s — skipping check", path)
         return {"status": "no_fingerprint", "mismatches": []}
+
+    if df is None:
+        log.info("Feature fingerprint file found (%d features) - runtime sample unavailable, skipping drift check",
+                 len(feature_cols))
+        return {"status": "skipped", "mismatches": [], "n_checked": len(feature_cols)}
     
     with open(path) as f:
         saved = json.load(f)

@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 log = logging.getLogger("adaptive_threshold")
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "logs", "adaptive_state.json")
+CORRUPT_STATE_FILE = os.path.join(os.path.dirname(__file__), "logs", "adaptive_state.corrupt.json")
 
 # Bounds — never go below or above these
 MIN_BOUND = 25.0    # absolute minimum confidence threshold
@@ -57,7 +58,16 @@ class AdaptiveThreshold:
                 log.info("Adaptive threshold loaded: %.1f%% (%d outcomes in buffer)",
                          self.threshold, len(self._outcomes))
             except Exception as e:
-                log.warning("Failed to load adaptive state: %s", e)
+                log.info("Adaptive state invalid, resetting to defaults: %s", e)
+                try:
+                    os.replace(STATE_FILE, CORRUPT_STATE_FILE)
+                    log.info("Corrupt adaptive state moved to %s", CORRUPT_STATE_FILE)
+                except Exception:
+                    pass
+                self.threshold = DEFAULT
+                self._outcomes = []
+                self._adjustments = []
+                self._save_state()
 
     def _save_state(self):
         os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)

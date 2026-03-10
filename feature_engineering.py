@@ -97,6 +97,22 @@ FEATURE_COLUMNS = [
     "momentum_quality_5", "momentum_quality_10",
     "vwap_distance", "rejection_ratio",
     "trend_exhaustion_10", "range_expansion", "bb_position",
+    # Phase 10 (v10+ upgrades: HA, OBV, pin bar, HH/HL, pattern scoring)
+    "ha_body_ratio", "ha_direction", "ha_streak",
+    "obv_slope_10", "obv_divergence",
+    "pin_bar_score", "hammer_score", "engulfing_score",
+    "hh_hl_count_10", "ll_lh_count_10", "swing_structure",
+    # Phase 11 (Accuracy v2 Upgrades)
+    "rsi_stoch_confluence",        # RSI + Stochastic agreement
+    "ema_ribbon_width",            # EMA fan width (trend strength)
+    "momentum_acceleration",       # 2nd derivative of momentum
+    "candle_strength_ratio",       # body-to-wick quality
+    "volume_momentum_confirm",     # volume supporting price direction
+    "price_rejection_level",       # rejection at key levels
+    "multi_bar_trend_quality",     # consistency of recent trend
+    "intrabar_volatility_ratio",   # current bar vs recent bars
+    "directional_pressure",        # net buying/selling pressure
+    "smart_money_divergence",      # OBV vs price divergence (enhanced)
 ]
 
 
@@ -647,6 +663,152 @@ def compute_features(df, m15_df=None, h1_df=None, m1_df=None):
     bb_lower = bb_mid - BB_STD * bb_std
     df["bb_position"] = (c - bb_lower) / (bb_upper - bb_lower + 1e-10) * 2 - 1
 
+    # ---- Phase 10 (v10+ upgrades): Heikin-Ashi, OBV, pin bar, HH/HL, pattern scoring ----
+
+    # Heikin-Ashi candles
+    ha_close = (o + h + l + c) / 4
+    ha_open = pd.Series(o.values.copy(), index=o.index)
+    for i in range(1, len(ha_open)):
+        ha_open.iloc[i] = (ha_open.iloc[i - 1] + ha_close.iloc[i - 1]) / 2
+    ha_body = ha_close - ha_open
+    ha_range = h - l + 1e-10
+    df["ha_body_ratio"] = ha_body.abs() / ha_range
+    df["ha_direction"] = (ha_close > ha_open).astype(float)
+    # Streak of consecutive same-direction HA candles
+    ha_dir_int = df["ha_direction"].astype(int)
+    ha_change = ha_dir_int.ne(ha_dir_int.shift(1)).astype(int)
+    ha_group = ha_change.cumsum()
+    df["ha_streak"] = ha_dir_int.groupby(ha_group).cumcount() + 1
+
+    # On-Balance Volume (OBV)
+    if "tick_volume" in df.columns:
+        tv_raw = df["tick_volume"].astype(float)
+        obv_dir = pd.Series(0.0, index=df.index)
+        obv_dir[c > c.shift(1)] = 1.0
+        obv_dir[c < c.shift(1)] = -1.0
+        obv = (tv_raw * obv_dir).cumsum()
+        obv_ema = _ema(obv, 10)
+        df["obv_slope_10"] = (obv_ema - obv_ema.shift(3)) / (obv_ema.shift(3).abs() + 1e-10)
+        # OBV divergence: price up but OBV down, or vice versa
+        price_up = (c > c.shift(3)).astype(float) * 2 - 1
+        obv_up = (obv_ema > obv_ema.shift(3)).astype(float) * 2 - 1
+        df["obv_divergence"] = (price_up != obv_up).astype(float)
+    else:
+        df["obv_slope_10"] = 0.0
+        df["obv_divergence"] = 0.0
+
+    # Pin bar detection (long wick + small body)
+    _body = (c - o).abs()
+    _lower = pd.concat([o, c], axis=1).min(axis=1) - l
+    _upper = h - pd.concat([o, c], axis=1).max(axis=1)
+    _range = h - l + 1e-10
+    body_pct = _body / _range
+    # Pin bar: body < 30% range AND one wick > 60% range
+    long_lower = (_lower / _range > 0.6) & (body_pct < 0.3)
+    long_upper = (_upper / _range > 0.6) & (body_pct < 0.3)
+    df["pin_bar_score"] = (long_lower.astype(float) + long_upper.astype(float)).clip(0, 1)
+
+    # Hammer: small body near top + long lower wick (bullish reversal)
+    df["hammer_score"] = (_lower / _range > 0.55).astype(float) * (body_pct < 0.35).astype(float)
+
+    # Engulfing scoring: uses existing _engulfing fn but as float score
+    eng = _engulfing(o, h, l, c)
+    df["engulfing_score"] = eng.astype(float)
+
+    # Higher-Highs / Higher-Lows & Lower-Lows / Lower-Highs structure
+    hh = (h > h.shift(1)).astype(float)
+    hl = (l > l.shift(1)).astype(float)
+    ll = (l < l.shift(1)).astype(float)
+    lh = (h < h.shift(1)).astype(float)
+    df["hh_hl_count_10"] = (hh * hl).rolling(10, min_periods=1).sum()  # bullish structure
+    df["ll_lh_count_10"] = (ll * lh).rolling(10, min_periods=1).sum()  # bearish structure
+    # Net swing structure: positive = bullish, negative = bearish
+    df["swing_structure"] = df["hh_hl_count_10"] - df["ll_lh_count_10"]
+
+    # ---- Phase 11 (Accuracy v2 Upgrades) ----
+
+    # 1. RSI + Stochastic confluence: both overbought/oversold = strong signal
+    rsi_bull = (df["rsi_14"] > 55).astype(float)
+    rsi_bear = (df["rsi_14"] < 45).astype(float)
+    stoch_bull = (df["stoch_k"] > 55).astype(float)
+    stoch_bear = (df["stoch_k"] < 45).astype(float)
+    df["rsi_stoch_confluence"] = (rsi_bull * stoch_bull) - (rsi_bear * stoch_bear)
+
+    # 2. EMA ribbon width: distance between fastest and slowest EMA
+    # Wide ribbon = strong trend, narrow = consolidation
+    df["ema_ribbon_width"] = (ema20 - ema200).abs() / (c + 1e-10)
+
+    # 3. Momentum acceleration: 2nd derivative of price change
+    mom_1 = c.pct_change(1)
+    mom_3 = c.pct_change(3)
+    df["momentum_acceleration"] = (mom_1 - mom_1.shift(1)).fillna(0)
+
+    # 4. Candle strength: ratio of body to total range, combined with direction
+    # High body ratio close near high/low = strong conviction
+    body_abs = (c - o).abs()
+    full_range = h - l + 1e-10
+    direction_sign = (c > o).astype(float) * 2 - 1  # +1 for green, -1 for red
+    # Close near high when green (buying strength) or near low when red (selling strength)
+    close_quality = np.where(
+        c > o,
+        (c - l) / full_range,  # green: close near high = good
+        (h - c) / full_range   # red: close near low = good
+    )
+    df["candle_strength_ratio"] = (body_abs / full_range) * close_quality * direction_sign
+
+    # 5. Volume confirming momentum: ticks increase with price direction
+    if "tick_volume" in df.columns:
+        tv = df["tick_volume"].astype(float)
+        tv_change = tv.pct_change(1).fillna(0)
+        price_dir = (c > c.shift(1)).astype(float) * 2 - 1
+        # Positive when volume increases WITH price direction
+        df["volume_momentum_confirm"] = (tv_change * price_dir).rolling(3, min_periods=1).mean()
+    else:
+        df["volume_momentum_confirm"] = 0.0
+
+    # 6. Price rejection at key levels: wicks touching recent highs/lows
+    recent_high_20 = h.rolling(20).max()
+    recent_low_20 = l.rolling(20).min()
+    # Near resistance rejection (wick at top, closes below)
+    near_resist = (h >= recent_high_20 * 0.999) & (c < h - full_range * 0.3)
+    near_support = (l <= recent_low_20 * 1.001) & (c > l + full_range * 0.3)
+    df["price_rejection_level"] = near_support.astype(float) - near_resist.astype(float)
+
+    # 7. Multi-bar trend quality: how consistent is the last 5 bars direction
+    green_bars = (c > o).astype(float)
+    df["multi_bar_trend_quality"] = green_bars.rolling(5, min_periods=2).mean() * 2 - 1
+    # +1 = all green (strong uptrend), -1 = all red (strong downtrend)
+
+    # 8. Intra-bar volatility ratio: current bar range vs average recent
+    current_range = h - l
+    avg_recent_range = current_range.rolling(10, min_periods=3).mean()
+    df["intrabar_volatility_ratio"] = current_range / (avg_recent_range + 1e-10)
+
+    # 9. Directional pressure: net of upper vs lower wicks across recent bars
+    upper_wick = h - pd.concat([o, c], axis=1).max(axis=1)
+    lower_wick_v2 = pd.concat([o, c], axis=1).min(axis=1) - l
+    # Positive = more buying pressure (larger lower wicks = demand), negative = supply
+    pressure = (lower_wick_v2 - upper_wick) / (full_range + 1e-10)
+    df["directional_pressure"] = pressure.rolling(5, min_periods=1).mean()
+
+    # 10. Smart money divergence: enhanced OBV vs price
+    if "tick_volume" in df.columns:
+        tv = df["tick_volume"].astype(float)
+        obv_dir = pd.Series(0.0, index=df.index)
+        obv_dir[c > c.shift(1)] = 1.0
+        obv_dir[c < c.shift(1)] = -1.0
+        obv_raw = (tv * obv_dir).cumsum()
+        # 5-bar comparison: price direction vs OBV direction
+        price_chg_5 = c.pct_change(5).fillna(0)
+        obv_chg_5 = obv_raw.diff(5).fillna(0)
+        # divergence: price up + OBV down (-1) or price down + OBV up (+1)
+        df["smart_money_divergence"] = np.where(
+            (price_chg_5 > 0) & (obv_chg_5 < 0), -1.0,
+            np.where((price_chg_5 < 0) & (obv_chg_5 > 0), 1.0, 0.0)
+        )
+    else:
+        df["smart_money_divergence"] = 0.0
+
     # Drop warmup
     warmup = max(EMA_200, BB_PERIOD, ATR_PERIOD, RSI_PERIOD, MACD_SLOW,
                  ADX_PERIOD, STOCH_K_PERIOD, ROLLING_STD_PERIOD,
@@ -717,7 +879,13 @@ def add_primary_training_target(df):
 
     Keeping a single label definition prevents silent OOF index drift between
     the primary model and second-stage models.
+
+    v10: Uses triple barrier labeling when enabled (TP=1.5×ATR, SL=1.0×ATR, max_bars=4).
+    Falls back to smoothed target when disabled.
     """
+    from config import TRIPLE_BARRIER_ENABLED
+    if TRIPLE_BARRIER_ENABLED:
+        return add_target_triple_barrier(df)
     return add_target_smoothed(df, lookahead=TARGET_LOOKAHEAD)
 
 

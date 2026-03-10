@@ -10,7 +10,12 @@ import os
 import logging
 import json
 import asyncio
-import google.generativeai as genai
+import warnings
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", FutureWarning)
+    import google.generativeai as genai
+
 from config import GEMINI_API_KEY
 
 log = logging.getLogger("gemini_filter")
@@ -45,6 +50,24 @@ if GEMINI_API_KEY:
         log.warning("Failed to initialize Gemini API: %s", e)
 else:
     log.warning("GEMINI_API_KEY not found in config. Layer 13 will be skipped.")
+
+
+def _extract_json_payload(text: str) -> str:
+    if not text:
+        return ""
+
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+
+    start_idx = cleaned.find("{")
+    end_idx = cleaned.rfind("}")
+    if start_idx != -1 and end_idx != -1 and end_idx >= start_idx:
+        return cleaned[start_idx:end_idx + 1]
+    return cleaned
 
 async def verify_signal(
     symbol: str, 
@@ -152,19 +175,14 @@ Ensure the JSON is valid and parsable.
     try:
         # Prevent blocking the main Telegram asyncio loop
         text = await asyncio.to_thread(_call_gemini)
-        
-        # Strip markdown formatting by extracting just the JSON object
-        start_idx = text.find("{")
-        end_idx = text.rfind("}")
-        if start_idx != -1 and end_idx != -1:
-            text = text[start_idx:end_idx + 1]
-            
+
+        text = _extract_json_payload(text)
         parsed = json.loads(text)
-        
+
         action = parsed.get("action", "NO_TRADE").upper()
         reason = parsed.get("reasoning", "No reasoning provided.")
-        gemini_conf = parsed.get("confidence", 0)
-        
+        gemini_conf = int(parsed.get("confidence", 0) or 0)
+
         if action == "BUY":
             direction_pred = "UP"
             approved = True
@@ -174,15 +192,19 @@ Ensure the JSON is valid and parsable.
         else:
             direction_pred = "NO_TRADE"
             approved = False
-            
+
         return {
             "approved": approved,
             "reason": f"Gemini {action} ({gemini_conf}%): {reason}",
             "gemini_confidence": gemini_conf,
             "verdict": direction_pred
         }
-            
+
     except Exception as e:
         log.warning("Gemini API call failed for %s: %s", symbol, e)
-        # Fail open by defaulting to original direction if API goes down
-        return {"approved": True, "reason": f"Gemini Error (Auto-Passed): {str(e)}", "gemini_confidence": 0, "verdict": direction}
+        return {
+            "approved": False,
+            "reason": f"Gemini Error (Blocked): {str(e)}",
+            "gemini_confidence": 0,
+            "verdict": "NO_TRADE",
+        }

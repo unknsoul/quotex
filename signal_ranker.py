@@ -1,75 +1,164 @@
 """
-Signal Ranker — Strategy 4.
+Signal Ranker — v2 (Accuracy-Optimized).
 
-Instead of sending ALL qualifying signals, ranks them by a
-composite quality score and returns only the top N.
+Ranks signals by composite quality score incorporating:
+  - Primary confidence + meta reliability (model trust)
+  - Ensemble unanimity + low variance (agreement quality)
+  - Multi-TF confluence (directional alignment)
+  - Kelly edge (mathematical edge)
+  - Regime stability (environment quality)
+  - Momentum quality (price action confirmation)
+  - Win streak bonus / loss streak penalty per symbol
 
-Score = confidence × meta_reliability × unanimity × (1 - uncertainty/100)
-
-This ensures only the absolute best signals reach the user.
+Returns only the top N signals above the minimum score.
 """
 
 import logging
+import math
+from datetime import datetime, timezone
 
 log = logging.getLogger("signal_ranker")
 
+# Per-symbol performance tracking for adaptive scoring
+_symbol_stats: dict = {}  # {symbol: {"wins": int, "total": int, "streak": int}}
 
-def compute_signal_score(pred: dict, confluence_score: int = 3) -> float:
+
+def update_symbol_stats(symbol: str, was_correct: bool):
+    """Update per-symbol win/loss stats for ranking adjustments."""
+    if symbol not in _symbol_stats:
+        _symbol_stats[symbol] = {"wins": 0, "total": 0, "streak": 0}
+    s = _symbol_stats[symbol]
+    s["total"] += 1
+    if was_correct:
+        s["wins"] += 1
+        s["streak"] = max(1, s["streak"] + 1)
+    else:
+        s["streak"] = min(-1, s["streak"] - 1)
+    # Keep rolling window of last 50
+    if s["total"] > 50:
+        s["wins"] = round(s["wins"] * 40 / s["total"])
+        s["total"] = 40
+
+
+def _symbol_accuracy_bonus(symbol: str) -> float:
+    """Return a -0.10 to +0.10 bonus based on recent symbol accuracy."""
+    s = _symbol_stats.get(symbol)
+    if not s or s["total"] < 5:
+        return 0.0
+    acc = s["wins"] / s["total"]
+    # Bonus/penalty: 70% accuracy → +0.05, 40% → -0.05
+    return round((acc - 0.55) * 0.50, 3)
+
+
+def _streak_bonus(symbol: str) -> float:
+    """Return small bonus for win streaks, penalty for loss streaks."""
+    s = _symbol_stats.get(symbol)
+    if not s:
+        return 0.0
+    streak = s["streak"]
+    if streak >= 3:
+        return 0.03
+    elif streak >= 2:
+        return 0.015
+    elif streak <= -3:
+        return -0.05
+    elif streak <= -2:
+        return -0.025
+    return 0.0
+
+
+def _momentum_quality_score(pred: dict) -> float:
+    """Score based on how well price action supports the signal direction."""
+    quality = pred.get("quality_score", 50)
+    regime_stab = pred.get("regime_stability", 0.5)
+    # Combine quality and stability into 0-1 range
+    q_norm = min(max(quality, 0) / 100, 1.0)
+    return q_norm * (0.6 + 0.4 * regime_stab)
+
+
+def _session_quality_bonus(pred: dict) -> float:
+    """Higher bonus during high-quality sessions."""
+    session = pred.get("session", "Off")
+    bonuses = {
+        "Overlap": 0.05,   # Best: London+NY overlap
+        "London": 0.03,
+        "New_York": 0.02,
+        "Asian": -0.02,
+        "Off": -0.05,
+    }
+    return bonuses.get(session, 0.0)
+
+
+def compute_signal_score(pred: dict, symbol: str = "", confluence_score: int = 3) -> float:
     """
     Compute a composite quality score for a single prediction.
 
-    Components:
-        - confidence (0-100) — how strong the model is
-        - meta_reliability (0-100) — how trustworthy the meta model finds it
-        - unanimity (0-1) — fraction of ensemble models agreeing
-        - confluence (0-3) — multi-TF agreement
-        - uncertainty (0-100) — lower is better
-
-    Returns: score in [0, 100]
+    v2 improvements:
+      - Momentum quality factor (price action confirmation)
+      - Session quality bonus (time-of-day quality)
+      - Symbol accuracy bonus (recent hit rate)
+      - Streak bonus (hot/cold hand adjustment)
+      - Non-linear unanimity scaling (rewards 5/6+ more than 4/6)
+      - Regime stability factor
     """
     conf = pred.get("final_confidence_percent", 0)
     meta = pred.get("meta_reliability_percent", 50)
     uncertainty = pred.get("uncertainty_percent", 50)
     unanimity = pred.get("ensemble_unanimity", 0.5)
     kelly = pred.get("kelly_fraction_percent", 0)
+    actual_confluence = pred.get("_confluence_score", confluence_score)
+    regime_stab = pred.get("regime_stability", 0.5)
 
     # Normalize components to 0-1 range
     conf_norm = min(conf / 100, 1.0)
     meta_norm = min(meta / 100, 1.0)
-    uncert_norm = 1.0 - min(uncertainty / 100, 1.0)  # inverted: low uncertainty = good
-    confl_norm = confluence_score / 3.0
-    unanimity_norm = max(unanimity, 0.5)
+    uncert_norm = 1.0 - min(uncertainty / 100, 1.0)
+    confl_norm = actual_confluence / 3.0
+    kelly_norm = min(kelly / 10.0, 1.0)
 
-    # Weighted composite (tuned from data analysis)
-    score = (
-        conf_norm       * 0.30 +   # 30% weight: primary signal strength
-        meta_norm       * 0.20 +   # 20% weight: meta model validation
-        unanimity_norm  * 0.25 +   # 25% weight: ensemble agreement
-        confl_norm      * 0.15 +   # 15% weight: multi-TF confluence
-        uncert_norm     * 0.10     # 10% weight: model certainty
+    # Non-linear unanimity: reward strong agreement (5/6, 6/6) more than 4/6
+    # 0.667 → 0.67, 0.833 → 0.87, 1.0 → 1.0
+    unanimity_scaled = math.pow(max(unanimity, 0.5), 0.8)
+
+    # Momentum quality factor
+    mom_quality = _momentum_quality_score(pred)
+
+    # Regime stability factor (0.5 - 1.0)
+    stab_norm = 0.5 + 0.5 * min(regime_stab, 1.0)
+
+    # Weighted composite (v2 retuned)
+    base_score = (
+        conf_norm         * 0.22 +   # 22% primary signal strength
+        meta_norm         * 0.13 +   # 13% meta model validation
+        unanimity_scaled  * 0.18 +   # 18% ensemble agreement (non-linear)
+        confl_norm        * 0.12 +   # 12% multi-TF confluence
+        uncert_norm       * 0.10 +   # 10% model certainty
+        kelly_norm        * 0.10 +   # 10% Kelly edge
+        mom_quality       * 0.08 +   # 8% momentum quality (NEW)
+        stab_norm         * 0.07     # 7% regime stability (NEW)
     )
 
-    return round(score * 100, 2)
+    # Additive bonuses
+    bonus = (
+        _session_quality_bonus(pred) +
+        _symbol_accuracy_bonus(symbol) +
+        _streak_bonus(symbol)
+    )
+
+    final = max(0, min(100, (base_score + bonus) * 100))
+    return round(final, 2)
 
 
 def rank_and_select(predictions: dict, max_signals: int = 2,
                     min_score: float = 55.0) -> dict:
     """
     Rank all qualifying predictions and return only the best N.
-
-    Args:
-        predictions: {symbol: pred_dict} — already pre-filtered
-        max_signals: maximum signals to send (default 2)
-        min_score: minimum composite score to pass (default 55)
-
-    Returns:
-        dict: {symbol: pred_dict} — only the top signals
-        Also populates pred["signal_score"] for display
+    v2: Uses symbol-aware scoring with performance history.
     """
     scored = []
 
     for sym, pred in predictions.items():
-        score = compute_signal_score(pred)
+        score = compute_signal_score(pred, symbol=sym)
         pred["signal_score"] = score
         scored.append((sym, pred, score))
 

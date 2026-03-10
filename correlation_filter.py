@@ -15,22 +15,24 @@ import logging
 
 log = logging.getLogger("correlation_filter")
 
-# Correlation clusters: pairs that should agree on direction
-# within each cluster, all pairs should move the same way
+# v10 Correlation clusters for EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF
 CORRELATION_CLUSTERS = {
     "USD_weak": {
         "pairs": {"EURUSD", "GBPUSD", "AUDUSD"},
         "description": "All move UP when USD weakens",
     },
-    "JPY_cross": {
-        "pairs": {"USDJPY", "GBPJPY"},
-        "description": "Both move with JPY sentiment",
+    "USD_strong": {
+        "pairs": {"USDJPY", "USDCAD", "USDCHF"},
+        "description": "All move UP when USD strengthens",
     },
 }
 
 # Inverse correlations: these pairs should move OPPOSITE
 INVERSE_PAIRS = [
+    ("EURUSD", "USDCHF"),  # EUR/CHF nearly 1:1 inverse via USD
     ("EURUSD", "USDJPY"),  # EUR up usually means USD down = JPY pairs down
+    ("GBPUSD", "USDCAD"),  # GBP up / CAD down via USD
+    ("AUDUSD", "USDCHF"),  # commodity vs safe haven
 ]
 
 
@@ -104,7 +106,7 @@ def check_correlation(symbol: str, direction: str,
         }
 
     corr_score = agreements / total_checks
-    passed = len(conflicts) == 0  # strict: ANY conflict = skip
+    passed = corr_score >= 0.5  # v2: allow partial conflicts (was: ANY conflict = skip)
 
     if not passed:
         reason = f"Correlation conflict: {', '.join(conflicts)}"
