@@ -1,12 +1,13 @@
 """
-Predict Engine — v11 Production-safe, anti-streak, candle-quality aware.
+Predict Engine — v11.1 Production-safe, strategy-enhanced.
 
-v11 upgrades:
+v11.1 upgrades:
+  - Hour-strategy confidence scaling (replaces hour blocking)
   - Anti-streak engine: prevents directional collapse
   - Candle quality filter: detects stale/repetitive candles
   - Momentum exhaustion: detects trend exhaustion
-  - Hour gating: blocks worst-performing hours
   - Symbol confidence adjustments: data-driven per-symbol scaling
+  - Weak-hour extra confirmation requirement
   - Race condition protection via retrain lock
 
 Live parity: meta features built identically to training
@@ -53,13 +54,12 @@ from config import (
     V11_CANDLE_FRESHNESS_MIN, V11_CANDLE_QUALITY_MIN,
     V11_EXHAUSTION_ENABLED, V11_EXHAUSTION_SKIP_THRESHOLD,
     V11_EXHAUSTION_PENALTY_START,
-    V11_HOUR_GATING_ENABLED, V11_BLOCKED_HOURS, V11_BOOSTED_HOURS,
-    V11_HOUR_BOOST_MULT,
     V11_SYMBOL_CONFIDENCE_ADJUSTMENTS,
 )
 from candle_quality import candle_quality_score, candle_freshness_score
 from anti_streak import apply_streak_correction, get_streak_engine
 from momentum_exhaust import compute_exhaustion_score
+from session_filter import get_hour_strategy, get_hour_confidence_multiplier
 from regime_detection import (
     get_regime_thresholds, regime_stability_score, get_session,
     get_trend_alignment,
@@ -549,8 +549,9 @@ def predict(df, regime):
         v11_skip_reasons = []
         predicted_dir = "UP" if green_p >= 0.5 else "DOWN"
         
-        # v11 Layer 1: Hour Gating (blocks worst hours: 09=37.5%, 10=23.5% WR)
+        # v11.1 Layer 1: Hour-Strategy Confidence Scaling (replaces hour blocking)
         hour_val = None
+        hour_strategy = {"multiplier": 1.0, "quality": "normal", "require_extra_confirmation": False}
         try:
             last_row = df.iloc[-1]
             if hasattr(last_row, 'get'):
@@ -560,11 +561,15 @@ def predict(df, regime):
         except Exception:
             pass
         
-        if V11_HOUR_GATING_ENABLED and hour_val is not None:
-            if hour_val in V11_BLOCKED_HOURS:
-                v11_skip_reasons.append(f"Blocked hour ({hour_val:02d} UTC)")
-            elif hour_val in V11_BOOSTED_HOURS:
-                confidence *= V11_HOUR_BOOST_MULT
+        if hour_val is not None:
+            hour_strategy = get_hour_strategy(hour_val)
+            confidence *= hour_strategy["multiplier"]
+            # For weak/poor hours, require higher unanimity to pass
+            if hour_strategy["require_extra_confirmation"] and unanimity < 0.80:
+                # Weak hours need 5/6 model agreement (not just 4/6)
+                v11_skip_reasons.append(
+                    f"Weak hour ({hour_val:02d} UTC) needs 5/6 agreement (got {unanimity:.0%})"
+                )
         
         # v11 Layer 2: Candle Quality Filter (stale/repetitive candles)
         candle_info = {"quality": 50.0, "freshness": 1.0}
@@ -733,6 +738,8 @@ def predict(df, regime):
             "candle_quality": candle_info.get("quality", 50.0),
             "exhaustion_score": exhaustion_info.get("exhaustion_score", 0),
             "streak_length": get_streak_engine().current_streak_len if V11_ANTI_STREAK_ENABLED else 0,
+            "hour_quality": hour_strategy.get("quality", "normal"),
+            "hour_multiplier": hour_strategy.get("multiplier", 1.0),
         }
 
         log.info(
@@ -773,6 +780,8 @@ def _safe_fallback(reason="unknown"):
         "candle_quality": 0.0,
         "exhaustion_score": 0,
         "streak_length": 0,
+        "hour_quality": "unknown",
+        "hour_multiplier": 1.0,
     }
 
 def update_prediction_history(green_p, was_correct, confidence=0.5):

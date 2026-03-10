@@ -118,6 +118,10 @@ FEATURE_COLUMNS = [
     "candle_body_quality",         # Body/range ratio (0=doji, 1=marubozu)
     "streak_length",               # Consecutive same-direction candle count
     "candle_range_vs_avg",         # Current range / avg range (abnormality)
+    # v11.1: Hour-Quality Features (lets model learn hour effects natively)
+    "hour_quality_score",          # Data-driven hour quality (0.80-1.06)
+    "hour_volatility_interaction", # Hour quality × volatility
+    "hour_momentum_interaction",   # Hour quality × momentum
 ]
 
 
@@ -859,6 +863,13 @@ def compute_features(df, m15_df=None, h1_df=None, m1_df=None):
     # Range vs recent average (detects abnormal candles)
     avg_range = full_range.rolling(10, min_periods=1).mean()
     df["candle_range_vs_avg"] = (full_range / (avg_range + 1e-10)).clip(0, 3)
+
+    # v11.1: Hour-quality features (lets model learn hour effects natively)
+    from session_filter import HOUR_CONFIDENCE_MULT
+    hour_q = hour.map(HOUR_CONFIDENCE_MULT).fillna(0.90)
+    df["hour_quality_score"] = hour_q
+    df["hour_volatility_interaction"] = hour_q * df["volatility_zscore"]
+    df["hour_momentum_interaction"] = hour_q * df["momentum_rolling_5"]
 
     # Drop warmup
     warmup = max(EMA_200, BB_PERIOD, ATR_PERIOD, RSI_PERIOD, MACD_SLOW,

@@ -1,5 +1,5 @@
 """
-QUOTEX LORD v11 — Anti-Streak + Candle Quality ML Trading Signal Engine.
+QUOTEX LORD v11.1 — Strategy-Enhanced ML Trading Signal Engine.
 
 14-layer pipeline:
   1. Data Collector       — fetch OHLCV from MT5
@@ -102,12 +102,12 @@ LIVE_CANDLES_TO_FETCH = 1000     # warmup for EMA-200
 
 # Signal filters
 MIN_CONFIDENCE = SIGNAL_MIN_CONFIDENCE   # minimum confidence to send
-MAX_SIGNALS_PER_CYCLE = 3
-MIN_SIGNAL_SCORE = 40.0
+MAX_SIGNALS_PER_CYCLE = 4               # increased from 3 for more trades
+MIN_SIGNAL_SCORE = 35.0                 # lowered from 40 for more trades
 
 # Ensemble agreement
 MIN_UNANIMITY = 0.667           # 4/6 models agree
-MAX_ENSEMBLE_VARIANCE = 0.050
+MAX_ENSEMBLE_VARIANCE = 0.055   # slightly relaxed from 0.050
 
 # Pair selector
 PAIR_SCORE_REFRESH = 12          # re-score every 12 cycles (1 hour)
@@ -124,9 +124,9 @@ MAX_CONSECUTIVE_LOSSES_PER_SYM = 3
 # Drift check interval
 DRIFT_CHECK_INTERVAL = 60       # every 60 cycles (~5 hours)
 
-# Profitable trading hours (UTC) — expanded for global coverage
-PROFITABLE_HOURS_UTC = {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
-BLOCKED_HOURS_UTC = set(range(24)) - PROFITABLE_HOURS_UTC
+# Trading hours (UTC) — v11.1: ALL hours tradeable, confidence scaling handles quality
+# No hours are blocked; weak hours get penalized via session_filter.HOUR_CONFIDENCE_MULT
+ALL_TRADING_HOURS_UTC = set(range(24))
 
 # State files
 SUBSCRIBERS_JSON = os.path.join(LOG_DIR, "subscribers.json")
@@ -470,7 +470,7 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
             worst_pair = f"🥉 Worst: {worst_sym} ({ww['w']}/{ww['t']})"
 
     lines = [
-        "⚡ QUOTEX LORD v11 ⚡",
+        "⚡ QUOTEX LORD v11.1 ⚡",
         f"⏰ {now_str}",
         f"📊 Analyzed: {n_analyzed} | Passed: {n_passed}",
         "━" * 26,
@@ -545,12 +545,17 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
         cq_freshness = pred.get("candle_freshness", 1.0)
         cq_quality = pred.get("candle_quality", 50)
         exhaustion = pred.get("exhaustion_score", 0)
+        hour_quality = pred.get("hour_quality", "normal")
         if cq_freshness < 0.3:
             lines.append(f"   🔄 Candle: Stale ({cq_freshness:.0%})")
         elif cq_freshness > 0.7:
             lines.append(f"   ✨ Candle: Fresh ({cq_freshness:.0%})")
         if exhaustion > 40:
             lines.append(f"   ⚡ Exhaustion: {exhaustion:.0f}%")
+        if hour_quality == "prime":
+            lines.append("   🟢 Prime Trading Hour")
+        elif hour_quality in ("weak", "poor"):
+            lines.append(f"   🟡 {hour_quality.title()} Hour (extra confirmation)")
         if reasons:
             lines.append(f"   💡 {reasons}")
         lines.append(f"   ⏱ Expires: {expiry_str} UTC ({countdown_min}m {countdown_rem}s)")
@@ -561,7 +566,7 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
 
     lines.append("")
     lines.append("━" * 26)
-    lines.append(f"🛡 v11: 18-Layer Filter | Anti-Streak | Quality First")
+    lines.append(f"🛡 v11.1: Strategy-Scaled | Anti-Streak | All-Hour Trading")
 
     # Session accuracy
     if today_outcomes:
@@ -1052,9 +1057,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _save_subscribers()
 
     text = (
-        "⚡ QUOTEX LORD v11 ⚡\n\n"
-        "Anti-Streak + Candle Quality ML signal engine.\n"
-        "18-layer pipeline with calibrated probability.\n\n"
+        "⚡ QUOTEX LORD v11.1 ⚡\n\n"
+        "Strategy-Enhanced ML signal engine.\n"
+        "All-hour trading with smart confidence scaling.\n\n"
         f"📊 Symbols: {', '.join(SYMBOLS)}\n"
         f"⏱ Timeframe: M5 (5-minute candles)\n"
         f"🤖 6 ML models + meta-model ensemble\n"
@@ -1486,7 +1491,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "back":
         await query.edit_message_text(
-            "⚡ QUOTEX LORD v11 ⚡\n\nUse the menu below.",
+            "⚡ QUOTEX LORD v11.1 ⚡\n\nUse the menu below.",
             reply_markup=_main_menu(chat_id),
         )
 
@@ -1646,7 +1651,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "info":
         text = (
-            "⚡ QUOTEX LORD v11 ⚡\n\n"
+            "⚡ QUOTEX LORD v11.1 ⚡\n\n"
             "18-layer ML pipeline:\n"
             "  6 model ensemble + isotonic calibration\n"
             "  (XGB×2 + HistGBM + ExtraTrees + RF + CatBoost)\n"
@@ -1654,10 +1659,12 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "  Logistic weight learner (confidence)\n"
             "  Symmetric triple barrier (TP=1.5×ATR, SL=1.0×ATR)\n"
             "  Multi-TF confluence (M5/M15/H1)\n"
-            "  🆕 Anti-Streak Engine (prevents directional collapse)\n"
-            "  🆕 Candle Quality Filter (detects stale candles)\n"
-            "  🆕 Momentum Exhaustion Detector\n"
-            "  🆕 Hour Gating + Symbol Confidence\n"
+            "  Anti-Streak Engine (prevents directional collapse)\n"
+            "  Candle Quality Filter (detects stale candles)\n"
+            "  Momentum Exhaustion Detector\n"
+            "  🆕 Hour-Strategy Scaling (no blocking, smart scaling)\n"
+            "  🆕 Weak-Hour Extra Confirmation\n"
+            "  Symbol Confidence Adjustments\n"
             "  Signal validator + quality filter\n"
             "  Circuit breaker (5 losses / 8% DD)\n"
             "  Online learning (SGD/PA)\n"
@@ -2053,11 +2060,7 @@ async def _auto_signal_job(app: Application):
                 await asyncio.sleep(1800)
                 continue
 
-            # ── Session Filter ──
-            if now_utc.hour in BLOCKED_HOURS_UTC:
-                log.info("Blocked hour %02d UTC. Sleeping 5 min.", now_utc.hour)
-                await asyncio.sleep(300)
-                continue
+            # v11.1: No hour blocking — all hours tradeable via confidence scaling
 
             # ── LAYER 13: Drift Detection (periodic) ──
             _candle_count += 1
@@ -2528,7 +2531,7 @@ async def _retrain_check_job(app: Application):
 # =============================================================================
 
 def main():
-    """Initialize and start the v11 bot."""
+    """Initialize and start the v11.1 bot."""
     if not TELEGRAM_BOT_TOKEN:
         log.error("TELEGRAM_BOT_TOKEN not set. Exiting.")
         sys.exit(1)
@@ -2587,7 +2590,7 @@ def main():
     app.add_handler(CallbackQueryHandler(_handle_callback))
 
     async def _on_startup(app_ref: Application):
-        log.info("Telegram bot starting (v11)...")
+        log.info("Telegram bot starting (v11.1)...")
 
         # Start background tasks
         asyncio.create_task(_auto_signal_job(app_ref))
@@ -2599,7 +2602,7 @@ def main():
 
     app.post_init = _on_startup
 
-    log.info("QUOTEX LORD v11 starting...")
+    log.info("QUOTEX LORD v11.1 starting...")
     app.run_polling(drop_pending_updates=True)
 
 

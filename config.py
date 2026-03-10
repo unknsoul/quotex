@@ -120,12 +120,13 @@ REGIME_COOLDOWN_BARS = 10              # bars to stay in cooldown after accuracy
 REGIME_ROLLING_ACCURACY_WINDOW = 20    # rolling window for accuracy check
 SESSION_FILTER_ENABLED = True
 # Session confidence multipliers (learned: London best, Asian worst)
+# v11.1: Relaxed — hour-specific scaling handles the fine-grained adjustment
 SESSION_CONFIDENCE_MULT = {
     "London":   1.0,    # best session
-    "New_York": 0.95,   # good, but slightly worse
+    "New_York": 0.97,   # good, slightly conservative
     "Overlap":  1.0,    # London+NY overlap = best liquidity
-    "Asian":    0.85,   # lowest predictability
-    "Off":      0.80,   # off-hours
+    "Asian":    0.90,   # lower predictability but not blocked
+    "Off":      0.85,   # off-hours — still tradeable with strong signals
 }
 
 # --- Ensemble Variance Hard Filter (Phase 4) --------------------------------
@@ -142,11 +143,11 @@ CONFIDENCE_MEDIUM_MIN = 60.0
 
 # --- Production Decision Gate -----------------------------------------------
 PRODUCTION_SIGNAL_GATING_ENABLED = True
-PRODUCTION_MIN_CONFIDENCE = 48.0
-PRODUCTION_MIN_META_RELIABILITY = 48.0
+PRODUCTION_MIN_CONFIDENCE = 46.0
+PRODUCTION_MIN_META_RELIABILITY = 45.0
 PRODUCTION_MIN_UNANIMITY = 0.60
-PRODUCTION_MAX_UNCERTAINTY = 8.0
-PRODUCTION_MIN_QUALITY_SCORE = 35.0
+PRODUCTION_MAX_UNCERTAINTY = 10.0
+PRODUCTION_MIN_QUALITY_SCORE = 30.0
 PRODUCTION_CONFIDENCE_ALERT_PENALTY = 0.95
 PRODUCTION_REQUIRE_TREND_ALIGNMENT = False
 PRODUCTION_BLOCKED_REGIMES = set()  # v10: no blanket regime blocks; risk filter handles edge cases
@@ -227,9 +228,9 @@ DATA_BUFFER_SIZE = 20000
 MODEL_BACKUP_DIR = os.path.join(BASE_DIR, "models", "backup")
 
 # --- Signal Validator --------------------------------------------------------
-SIGNAL_MIN_CONFIDENCE = 52.0          # realistic minimum for current model accuracy
+SIGNAL_MIN_CONFIDENCE = 50.0          # lowered from 52 to allow more trades through
 SIGNAL_DUPLICATE_WINDOW_SEC = 300     # 5 min duplicate guard
-SIGNAL_MAX_PER_HOUR = 6              # max signals per hour
+SIGNAL_MAX_PER_HOUR = 8              # raised from 6 to allow more signals
 SIGNAL_REQUIRE_MTF_ALIGNMENT = True   # block if multi-TF opposes direction
 
 # --- Session Filter ----------------------------------------------------------
@@ -281,12 +282,12 @@ V11_EXHAUSTION_ENABLED = True
 V11_EXHAUSTION_SKIP_THRESHOLD = 75   # Skip if exhaustion > 75%
 V11_EXHAUSTION_PENALTY_START = 50    # Start penalizing at 50%
 
-# --- v11: Hour Gating (data-driven from outcome analysis) --------------------
-# Hours with <45% win rate are blocked; hours with 60%+ get boosted
-V11_HOUR_GATING_ENABLED = True
-V11_BLOCKED_HOURS = [9, 10]          # 23.5% and 37.5% WR — block entirely
-V11_BOOSTED_HOURS = [5, 14, 16]      # 64%+ WR — boost confidence by 5%
-V11_HOUR_BOOST_MULT = 1.05
+# --- v11: Hour-Strategy Confidence Scaling (replaces hour blocking) -----------
+# No longer blocks hours — uses per-hour confidence multipliers in session_filter.py
+# Weak hours (9,10 UTC) get 0.80-0.85x penalty but can still trade with strong signals
+# See session_filter.HOUR_CONFIDENCE_MULT for full hour mapping
+V11_HOUR_STRATEGY_ENABLED = True      # Use hour-strategy scaling
+V11_WEAK_HOUR_MIN_UNANIMITY = 0.80   # Weak hours need 5/6 model agreement
 
 # --- v11: Symbol-Specific Confidence Adjustments (data-driven) ---------------
 # EURUSD (42.1%) and AUDUSD (42.3%) need higher thresholds
