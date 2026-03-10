@@ -1,5 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Central configuration - QUOTEX LORD v17 Accuracy Maximized.
+"""Central configuration - QUOTEX LORD v17.1 Live Accuracy Fix.
+
+v17.1 live accuracy fixes:
+  - PRODUCTION_MIN_CONFIDENCE 50 -> 62 (83% of signals were <50% conf, hitting 49.9%)
+  - PRODUCTION_MIN_QUALITY_SCORE 28 -> 45
+  - MIN_EDGE_FROM_HALF 0.05 (block 3-5% edge signals that hit 42.5%)
+  - BLOCKED_HOURS {9,10} UTC (23-37% accuracy)
+  - Removed EURUSD/AUDUSD from live trading (42% accuracy)
+  - SIGNAL_DUPLICATE_WINDOW_SEC 180 -> 300 (tighter dedup)
+  - MIN_UNANIMITY 0.55 -> 0.667 (require 6/9 model agreement)
 
 v17 accuracy upgrades:
 - Early stopping for XGB/CatBoost/LightGBM (50 rounds)
@@ -70,8 +79,8 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # --- Data Settings -----------------------------------------------------------
-DEFAULT_SYMBOL = "EURUSD"
-SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "GBPJPY", "XAUUSD", "NZDUSD"]
+DEFAULT_SYMBOL = "USDJPY"  # v17.1: best-performing symbol
+SYMBOLS = ["GBPUSD", "USDJPY", "USDCAD", "USDCHF", "GBPJPY", "XAUUSD", "NZDUSD"]  # v17.1: removed EURUSD (42%) & AUDUSD (42%)
 CANDLES_TO_FETCH = 99999
 MTF_TIMEFRAMES = ["M1", "M5", "M15", "H1"]
 TRAINING_SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "GBPJPY", "XAUUSD", "NZDUSD"]  # v15: 9-symbol training
@@ -161,13 +170,15 @@ CONFIDENCE_MEDIUM_MIN = 60.0
 
 # --- Production Decision Gate -----------------------------------------------
 PRODUCTION_SIGNAL_GATING_ENABLED = True
-PRODUCTION_MIN_CONFIDENCE = 50.0       # v16.1: lowered for more throughput
+PRODUCTION_MIN_CONFIDENCE = 62.0       # v17.1: raised — signals <50% conf hit 49.9% accuracy
 PRODUCTION_MIN_META_RELIABILITY = 45.0  # v16.1: relaxed — meta model confirmatory not blocking
-PRODUCTION_MIN_UNANIMITY = 0.55         # v16.1: 5/9 models (majority rule)
+PRODUCTION_MIN_UNANIMITY = 0.667        # v17.1: require 6/9 model agreement (was 0.55)
 PRODUCTION_MAX_UNCERTAINTY = 15.0        # v16.1: relaxed — let StackingCombiner handle variance
-PRODUCTION_MIN_QUALITY_SCORE = 28.0      # v16.1: lowered quality floor
+PRODUCTION_MIN_QUALITY_SCORE = 45.0      # v17.1: raised — quality<28 were mostly losers
+PRODUCTION_MIN_EDGE_FROM_HALF = 0.05     # v17.1: require green_p > 0.55 or < 0.45 (5% edge minimum)
 PRODUCTION_CONFIDENCE_ALERT_PENALTY = 0.95
 PRODUCTION_REQUIRE_TREND_ALIGNMENT = False
+PRODUCTION_BLOCKED_HOURS_UTC = {9, 10}  # v17.1: 23-37% accuracy in live outcomes
 PRODUCTION_BLOCKED_REGIMES = {"CHOPPY"}  # v16.1: unblocked Ranging — v16 model trained on all regimes
 
 # --- Risk Warnings -----------------------------------------------------------
@@ -247,8 +258,8 @@ DATA_BUFFER_SIZE = 20000
 MODEL_BACKUP_DIR = os.path.join(BASE_DIR, "models", "backup")
 
 # --- Signal Validator --------------------------------------------------------
-SIGNAL_MIN_CONFIDENCE = 50.0          # v16.1: aligned with relaxed production gate
-SIGNAL_DUPLICATE_WINDOW_SEC = 180     # v16.1: 3 min duplicate guard (was 5 min)
+SIGNAL_MIN_CONFIDENCE = 62.0          # v17.1: aligned with raised production gate
+SIGNAL_DUPLICATE_WINDOW_SEC = 300     # v17.1: 5 min duplicate guard (was 3 min) — 18 dupes detected in outcomes
 SIGNAL_MAX_PER_HOUR = 12             # v16.1: raised from 8 for higher volume
 SIGNAL_REQUIRE_MTF_ALIGNMENT = True   # block if multi-TF opposes direction
 SIGNAL_SOFT_CONFLUENCE_OVERRIDE_CONFIDENCE = 55.0

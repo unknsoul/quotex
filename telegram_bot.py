@@ -1,5 +1,5 @@
 """
-QUOTEX LORD v17 — Accuracy Maximized ML Trading Signal Engine.
+QUOTEX LORD v17.1 — Live Accuracy Fix.
 
 14-layer pipeline:
   1. Data Collector       — fetch OHLCV from MT5
@@ -112,12 +112,12 @@ LIVE_CANDLES_TO_FETCH = 1000     # warmup for EMA-200
 
 # Signal filters
 MIN_CONFIDENCE = SIGNAL_MIN_CONFIDENCE   # minimum confidence to send
-MAX_SIGNALS_PER_CYCLE = 6               # v16.1: raised from 4 for more volume
-MIN_SIGNAL_SCORE = 28.0                 # v16.1: lowered from 35 for more trades
+MAX_SIGNALS_PER_CYCLE = 4               # v17.1: reduced from 6 for quality over quantity
+MIN_SIGNAL_SCORE = 45.0                 # v17.1: raised from 28 to filter weak signals
 
 # Ensemble agreement
-MIN_UNANIMITY = 0.55            # v16.1: 5/9 majority rule
-MAX_ENSEMBLE_VARIANCE = 0.065   # v16.1: aligned with relaxed config
+MIN_UNANIMITY = 0.667           # v17.1: 6/9 model agreement (was 0.55)
+MAX_ENSEMBLE_VARIANCE = 0.04    # v17.1: tightened from 0.065
 
 # Pair selector
 PAIR_SCORE_REFRESH = 6           # v16.1: re-score every 6 cycles (30 min) for faster adaptation
@@ -485,7 +485,7 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
             worst_pair = f"🥉 Worst: {worst_sym} ({ww['w']}/{ww['t']})"
 
     lines = [
-        "⚡ QUOTEX LORD v17 ⚡",
+        "⚡ QUOTEX LORD v17.1 ⚡",
         f"⏰ {now_str}",
         f"📊 Analyzed: {n_analyzed} | Passed: {n_passed}",
         "━" * 26,
@@ -2718,7 +2718,7 @@ def main():
 
     app.post_init = _on_startup
 
-    log.info("QUOTEX LORD v17 Accuracy Maximized starting...")
+    log.info("QUOTEX LORD v17.1 Live Accuracy Fix starting...")
     app.run_polling(drop_pending_updates=True)
 
 

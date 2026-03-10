@@ -43,7 +43,8 @@ from config import (
     PRODUCTION_MIN_META_RELIABILITY, PRODUCTION_MIN_UNANIMITY,
     PRODUCTION_MAX_UNCERTAINTY, PRODUCTION_MIN_QUALITY_SCORE,
     PRODUCTION_CONFIDENCE_ALERT_PENALTY, PRODUCTION_REQUIRE_TREND_ALIGNMENT,
-    PRODUCTION_BLOCKED_REGIMES,
+    PRODUCTION_BLOCKED_REGIMES, PRODUCTION_MIN_EDGE_FROM_HALF,
+    PRODUCTION_BLOCKED_HOURS_UTC,
     LOG_LEVEL, LOG_FORMAT,
 )
 
@@ -440,6 +441,28 @@ def _apply_production_gate(df, regime, green_p, meta_rel, confidence_pct,
 
     if regime in PRODUCTION_BLOCKED_REGIMES:
         reasons.append(f"Blocked regime ({regime})")
+
+    # v17.1: Minimum edge gate — block signals with green_p too close to 50%
+    direction_prob = _direction_probability(green_p)
+    if direction_prob < (0.5 + PRODUCTION_MIN_EDGE_FROM_HALF):
+        reasons.append(f"Weak edge ({direction_prob*100:.1f}% < {(0.5+PRODUCTION_MIN_EDGE_FROM_HALF)*100:.0f}%)")
+
+    # v17.1: Hour gate — block historically worst hours
+    try:
+        last_row = df.iloc[-1]
+        hour_utc = None
+        if hasattr(last_row, 'get'):
+            t = last_row.get('time', None)
+            if t is not None and hasattr(t, 'hour'):
+                hour_utc = t.hour
+        if hour_utc is None:
+            from datetime import datetime, timezone
+            hour_utc = datetime.now(timezone.utc).hour
+        if hour_utc in PRODUCTION_BLOCKED_HOURS_UTC:
+            reasons.append(f"Blocked hour (UTC {hour_utc})")
+    except Exception:
+        pass
+
     if effective_conf < PRODUCTION_MIN_CONFIDENCE:
         reasons.append(f"Low confidence ({effective_conf:.0f}% < {PRODUCTION_MIN_CONFIDENCE:.0f}%)")
     if meta_pct < max(PRODUCTION_MIN_META_RELIABILITY, thresholds["meta"] * 100.0):
