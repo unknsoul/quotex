@@ -124,15 +124,14 @@ REGIME_FILTER_ENABLED = True
 REGIME_SKIP_ACCURACY_THRESHOLD = 0.55  # skip if rolling accuracy < 55%
 REGIME_COOLDOWN_BARS = 10              # bars to stay in cooldown after accuracy drop
 REGIME_ROLLING_ACCURACY_WINDOW = 20    # rolling window for accuracy check
-SESSION_FILTER_ENABLED = True
-# Session confidence multipliers (learned: London best, Asian worst)
-# v11.1: Relaxed — hour-specific scaling handles the fine-grained adjustment
+SESSION_FILTER_ENABLED = False   # v13: All session restrictions removed — pure technical analysis
+# Session confidence multipliers — all set to 1.0 (no session penalty)
 SESSION_CONFIDENCE_MULT = {
-    "London":   1.0,    # best session
-    "New_York": 0.97,   # good, slightly conservative
-    "Overlap":  1.0,    # London+NY overlap = best liquidity
-    "Asian":    0.90,   # lower predictability but not blocked
-    "Off":      0.85,   # off-hours — still tradeable with strong signals
+    "London":   1.0,
+    "New_York": 1.0,
+    "Overlap":  1.0,
+    "Asian":    1.0,
+    "Off":      1.0,
 }
 
 # --- Ensemble Variance Hard Filter (Phase 4) --------------------------------
@@ -252,20 +251,13 @@ SESSION_HOURS = {
 }
 SESSION_QUALITY_SCORES = {
     "Overlap":  1.0,
-    "London":   0.95,
-    "New_York": 0.90,
-    "Asian":    0.65,
-    "Off":      0.40,
+    "London":   1.0,
+    "New_York": 1.0,
+    "Asian":    1.0,
+    "Off":      1.0,
 }
-# Sessions to block entirely per symbol (data-driven)
-SESSION_BLOCK_MAP = {
-    "EURUSD": ["Off"],
-    "GBPUSD": ["Asian", "Off"],
-    "USDJPY": ["Off"],
-    "AUDUSD": ["Off"],
-    "USDCAD": ["Off"],
-    "USDCHF": ["Asian", "Off"],
-}
+# Sessions to block entirely per symbol — DISABLED (trade all sessions)
+SESSION_BLOCK_MAP = {}
 
 # --- Performance Dashboard ---------------------------------------------------
 DASHBOARD_DIR = os.path.join(LOG_DIR, "dashboards")
@@ -295,8 +287,8 @@ V11_EXHAUSTION_PENALTY_START = 50    # Start penalizing at 50%
 # No longer blocks hours — uses per-hour confidence multipliers in session_filter.py
 # Weak hours (9,10 UTC) get 0.80-0.85x penalty but can still trade with strong signals
 # See session_filter.HOUR_CONFIDENCE_MULT for full hour mapping
-V11_HOUR_STRATEGY_ENABLED = True      # Use hour-strategy scaling
-V11_WEAK_HOUR_MIN_UNANIMITY = 0.80   # Weak hours need 5/6 model agreement
+V11_HOUR_STRATEGY_ENABLED = False     # v13: Disabled — no hour-based restrictions
+V11_WEAK_HOUR_MIN_UNANIMITY = 0.50   # v13: Relaxed — no weak-hour extra unanimity needed
 
 # --- v11: Symbol-Specific Confidence Adjustments (data-driven) ---------------
 # EURUSD (42.1%) and AUDUSD (42.3%) need higher thresholds

@@ -2319,13 +2319,11 @@ async def _auto_signal_job(app: Application):
                             log.info("Confluence filter blocked %s: %s", sym, reason)
                             continue
 
-                    # 9g. Session multiplier
+                    # 9g. Session multiplier — DISABLED v13 (pure technical analysis)
                     session = pred.get("session", "Off")
-                    session_mult = SESSION_CONFIDENCE_MULT.get(session, 0.80)
-                    adjusted_conf = conf * session_mult
-                    if adjusted_conf < MIN_CONFIDENCE:
-                        filtered_out[sym] = f"session_adj:{session}({adjusted_conf:.0f}%)"
-                        continue
+                    # No session penalty — all sessions treated equally
+                    adjusted_conf = conf
+                    # (skip session rejection)
 
                     # 9h. Momentum confirmation (v2 accuracy upgrade)
                     try:

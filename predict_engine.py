@@ -537,9 +537,10 @@ def predict(df, regime):
                 if t is not None and hasattr(t, 'hour'):
                     hour = t.hour
                     session = get_session(hour)
-                    if SESSION_FILTER_ENABLED:
-                        mult = SESSION_CONFIDENCE_MULT.get(session, 1.0)
-                        confidence *= mult
+                    # v13: Session confidence penalty disabled — pure technical analysis
+                    # if SESSION_FILTER_ENABLED:
+                    #     mult = SESSION_CONFIDENCE_MULT.get(session, 1.0)
+                    #     confidence *= mult
         except Exception:
             pass
 
@@ -593,13 +594,10 @@ def predict(df, regime):
         
         if hour_val is not None:
             hour_strategy = get_hour_strategy(hour_val)
-            confidence *= hour_strategy["multiplier"]
-            # For weak/poor hours, require higher unanimity to pass
-            if hour_strategy["require_extra_confirmation"] and unanimity < 0.80:
-                # Weak hours need 5/6 model agreement (not just 4/6)
-                v11_skip_reasons.append(
-                    f"Weak hour ({hour_val:02d} UTC) needs 5/6 agreement (got {unanimity:.0%})"
-                )
+            # v13: Hour-strategy scaling disabled — no hour penalty or extra confirmation
+            # confidence *= hour_strategy["multiplier"]
+            # if hour_strategy["require_extra_confirmation"] and unanimity < 0.80:
+            #     v11_skip_reasons.append(...)
         
         # v11 Layer 2: Candle Quality Filter (stale/repetitive candles)
         candle_info = {"quality": 50.0, "freshness": 1.0}

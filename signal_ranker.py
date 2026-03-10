@@ -77,16 +77,8 @@ def _momentum_quality_score(pred: dict) -> float:
 
 
 def _session_quality_bonus(pred: dict) -> float:
-    """Higher bonus during high-quality sessions."""
-    session = pred.get("session", "Off")
-    bonuses = {
-        "Overlap": 0.05,   # Best: London+NY overlap
-        "London": 0.03,
-        "New_York": 0.02,
-        "Asian": -0.02,
-        "Off": -0.05,
-    }
-    return bonuses.get(session, 0.0)
+    """v13: No session-based scoring penalty — all sessions equal."""
+    return 0.0
 
 
 def compute_signal_score(pred: dict, symbol: str = "", confluence_score: int = 3) -> float:

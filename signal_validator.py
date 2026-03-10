@@ -87,10 +87,10 @@ def validate_signal(pred: dict, symbol: str, circuit_breaker=None) -> tuple:
             if (h1_trend > 0 and trade_dir < 0) or (h1_trend < 0 and trade_dir > 0):
                 reasons.append("MTF conflict (H1 opposes direction)")
 
-    # 6. Session block
-    session = pred.get("session", "Off")
-    if should_block_session(symbol, session):
-        reasons.append(f"Session blocked ({symbol} in {session})")
+    # 6. Session block — DISABLED v13 (trade all sessions)
+    # session = pred.get("session", "Off")
+    # if should_block_session(symbol, session):
+    #     reasons.append(f"Session blocked ({symbol} in {session})")
 
     # 7. Circuit breaker
     if circuit_breaker is not None:
