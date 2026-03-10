@@ -1,5 +1,5 @@
 """
-QUOTEX LORD v16.1 — Advanced ML Trading Signal Engine with Attention-GRU + StackingCombiner.
+QUOTEX LORD v17 — Accuracy Maximized ML Trading Signal Engine.
 
 14-layer pipeline:
   1. Data Collector       — fetch OHLCV from MT5
@@ -485,7 +485,7 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
             worst_pair = f"🥉 Worst: {worst_sym} ({ww['w']}/{ww['t']})"
 
     lines = [
-        "⚡ QUOTEX LORD v16.1 ⚡",
+        "⚡ QUOTEX LORD v17 ⚡",
         f"⏰ {now_str}",
         f"📊 Analyzed: {n_analyzed} | Passed: {n_passed}",
         "━" * 26,
@@ -2718,7 +2718,7 @@ def main():
 
     app.post_init = _on_startup
 
-    log.info("QUOTEX LORD v16.1 Advanced starting...")
+    log.info("QUOTEX LORD v17 Accuracy Maximized starting...")
     app.run_polling(drop_pending_updates=True)
 
 

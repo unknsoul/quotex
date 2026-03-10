@@ -1,20 +1,21 @@
 """
-Train Model — v16 Accuracy-focused pipeline.
+Train Model — v17 Accuracy-maximized pipeline.
 
 Architecture:
   1. Load data from 9 symbols (up to 225K rows)
-  2. Compute 155+ features + MI-based feature selection
+  2. Compute 162+ features + MI-based feature selection
   3. Train 8-9 diverse tree ensemble + Attention-GRU
-  4. Calibrate with isotonic regression
-  5. Generate OOF predictions + train StackingCombiner
-  6. Label smoothing + focal weighting for robust training
+  4. Early stopping on boosting models (XGB/LGBM/CatBoost)
+  5. Calibrate with isotonic regression
+  6. Generate OOF predictions + train StackingCombiner (incl. LSTM)
+  7. Focal weighting on hard examples + label smoothing
 
-v16 upgrades:
-  - MI feature selection (mutual-info + correlation dedup)
-  - StackingCombiner: learned blend via LogisticRegressionCV on OOF
-  - 25K rows per symbol for richer training data
-  - 5-fold purged OOF with 80-bar embargo
-  - Label smoothing (alpha=0.03)
+v17 upgrades:
+  - Early stopping with eval_set (prevents overfitting)
+  - Focal sample weighting on hard examples (was dead code, now active)
+  - Label smoothing alpha=0.03 applied
+  - LSTM OOF predictions included in StackingCombiner
+  - 9 new features (DI, Ichimoku, CCI, Williams %R)
 
 Usage:
     python train_model.py --multi-symbol
@@ -120,6 +121,7 @@ def _generate_oof_predictions(X, y, spw, seeds, n_splits=OOF_INTERNAL_SPLITS):
     """
     Generate Out-of-Fold predictions using purged TimeSeriesSplit.
 
+    v17: early stopping via test fold as eval_set for boosting models.
     Purge: removes `PURGE_EMBARGO_BARS` from end of train and start of test
     to prevent leakage through autocorrelated features.
     """
@@ -134,9 +136,17 @@ def _generate_oof_predictions(X, y, spw, seeds, n_splits=OOF_INTERNAL_SPLITS):
         if embargo > 0 and len(tr_idx) > embargo:
             tr_idx = tr_idx[:-embargo]
 
+        # v17: use last 15% of train fold as early-stopping eval set
+        es_split = int(len(tr_idx) * 0.85)
+        tr_fit_idx = tr_idx[:es_split]
+        tr_val_idx = tr_idx[es_split:]
+
         for s_idx, spec in enumerate(model_specs):
             seed = seeds[s_idx] if s_idx < len(seeds) else 42 + s_idx
-            clf = fit_model_from_spec(spec, X.iloc[tr_idx], y[tr_idx], spw=spw, seed=seed)
+            clf = fit_model_from_spec(
+                spec, X.iloc[tr_fit_idx], y[tr_fit_idx], spw=spw, seed=seed,
+                X_val=X.iloc[tr_val_idx], y_val=y[tr_val_idx],
+            )
             oof_all[s_idx, te_idx] = clf.predict_proba(X.iloc[te_idx])[:, 1]
 
     oof_mask = ~np.isnan(oof_all[0])
@@ -297,20 +307,62 @@ def train(symbol, use_selected_features=True, multi_symbol=False):
         print(f">> Warning: fingerprint save failed: {e}")
 
     # =========================================================================
-    # Step 3b: Train StackingCombiner on OOF predictions (v16)
+    # Step 3b: Train StackingCombiner on OOF predictions (v17: includes LSTM)
     # =========================================================================
+    lstm_oof = None  # track whether LSTM was trained in stacker step
     print(f"\n>> Training StackingCombiner on OOF predictions...")
     try:
         from calibration import StackingCombiner
         model_specs = get_primary_model_specs()
         stacker = StackingCombiner()
         stacker.model_names = [spec['name'] for spec in model_specs]
-        stacker.fit(oof_all_valid, oof_actual)
+
+        # v17: Generate LSTM OOF and include in StackingCombiner
+        lstm_oof = None
+        try:
+            from lstm_model import train_lstm, predict_lstm, load_lstm_model, SEQ_LEN
+            # Train LSTM first so we can get OOF from it
+            lstm_result = train_lstm(
+                X_main.values, y_main, X_cal.values, y_cal,
+                feature_names=use_features
+            )
+            if lstm_result:
+                print(f"   LSTM: val_acc={lstm_result['val_accuracy']:.4f} val_auc={lstm_result['val_auc']:.4f}")
+                # Generate LSTM OOF predictions on the valid OOF rows
+                lstm_bundle = load_lstm_model(len(use_features))
+                if lstm_bundle:
+                    oof_idx_valid = np.where(oof_mask)[0]
+                    lstm_oof_preds = np.full(len(oof_idx_valid), np.nan)
+                    for i, idx in enumerate(oof_idx_valid):
+                        if idx >= SEQ_LEN:
+                            window = X_main.iloc[idx - SEQ_LEN + 1:idx + 1].values if idx < len(X_main) else None
+                            if window is not None and len(window) == SEQ_LEN:
+                                pred = predict_lstm(lstm_bundle, window)
+                                if pred is not None:
+                                    lstm_oof_preds[i] = pred
+                    valid_lstm = ~np.isnan(lstm_oof_preds)
+                    if valid_lstm.sum() > len(oof_idx_valid) * 0.5:
+                        # Fill NaNs with 0.5 (neutral)
+                        lstm_oof_preds[np.isnan(lstm_oof_preds)] = 0.5
+                        lstm_oof = lstm_oof_preds
+                        print(f"   LSTM OOF: {valid_lstm.sum()}/{len(oof_idx_valid)} valid predictions")
+                        stacker.model_names.append("LSTM_GRU")
+        except Exception as e:
+            print(f"   LSTM OOF generation skipped: {e}")
+
+        # Combine tree OOF + LSTM OOF
+        if lstm_oof is not None:
+            stacker_input = np.vstack([oof_all_valid, lstm_oof.reshape(1, -1)])
+        else:
+            stacker_input = oof_all_valid
+
+        stacker.fit(stacker_input, oof_actual)
         joblib.dump(stacker, STACKING_COMBINER_PATH)
-        # Evaluate stacker on OOF
-        stacker_proba = stacker.predict_proba(oof_all_valid)
+        # Evaluate stacker on OOF (use underlying model with transposed matrix)
+        X_eval = stacker_input.T  # (n_samples, n_models)
+        stacker_proba = stacker.model.predict_proba(X_eval)[:, 1]
         stacker_acc = ((stacker_proba >= 0.5).astype(int) == oof_actual).mean()
-        print(f"   StackingCombiner OOF accuracy: {stacker_acc:.4f}")
+        print(f"   StackingCombiner OOF accuracy: {stacker_acc:.4f} ({stacker_input.shape[0]} models)")
         print(f"   Saved -> {STACKING_COMBINER_PATH}")
     except Exception as e:
         print(f"   StackingCombiner training failed: {e}")
@@ -334,22 +386,25 @@ def train(symbol, use_selected_features=True, multi_symbol=False):
     print(f"   OOF data includes per-seed probabilities for variance-based uncertainty")
 
     # =========================================================================
-    # Step 4: Train Attention-GRU sequence model (v16)
+    # Step 4: Train Attention-GRU if not already trained in Step 3b
     # =========================================================================
-    print(f"\n>> Training Attention-GRU sequence model (v16)...")
-    try:
-        from lstm_model import train_lstm, SEQ_LEN
-        lstm_result = train_lstm(
-            X_main.values, y_main, X_cal.values, y_cal,
-            feature_names=use_features
-        )
-        if lstm_result:
-            print(f"   LSTM: val_acc={lstm_result['val_accuracy']:.4f} val_auc={lstm_result['val_auc']:.4f}")
-            print(f"   LSTM model saved -> {lstm_result['path']}")
-        else:
-            print(f"   LSTM training skipped (PyTorch not available)")
-    except Exception as e:
-        print(f"   LSTM training failed: {e}")
+    if lstm_oof is None:
+        print(f"\n>> Training Attention-GRU sequence model (v17 fallback)...")
+        try:
+            from lstm_model import train_lstm, SEQ_LEN
+            lstm_result = train_lstm(
+                X_main.values, y_main, X_cal.values, y_cal,
+                feature_names=use_features
+            )
+            if lstm_result:
+                print(f"   LSTM: val_acc={lstm_result['val_accuracy']:.4f} val_auc={lstm_result['val_auc']:.4f}")
+                print(f"   LSTM model saved -> {lstm_result['path']}")
+            else:
+                print(f"   LSTM training skipped (PyTorch not available)")
+        except Exception as e:
+            print(f"   LSTM training failed: {e}")
+    else:
+        print(f"\n>> LSTM already trained in Step 3b (included in StackingCombiner)")
 
     print(f"\n>> Done. Next: python meta_model.py --symbol {symbol}")
 

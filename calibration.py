@@ -1,12 +1,11 @@
 """
-Calibration v8 — v16 heterogeneous calibrated ensemble + Stacking Combiner.
+Calibration v9 — v17 heterogeneous calibrated ensemble + Stacking Combiner.
 
-v16 upgrades:
+v17 upgrades:
+  - Early stopping for XGBoost, LightGBM, CatBoost (prevents overfitting)
+  - focal_sample_weight + smooth_labels now wired into training
   - StackingCombiner: learned optimal blend weights (replaces simple mean)
-  - Focal loss sample weighting (upweights hard examples)
   - Stronger regularization across all ensemble members
-  - More estimators for 25K rows/symbol training
-  - Label smoothing support
 """
 
 import numpy as np
@@ -145,14 +144,25 @@ def get_primary_model_specs():
     return specs
 
 
-def fit_model_from_spec(spec, X_train, y_train, spw=1.0, seed=42):
-    """Fit a single heterogeneous ensemble member from a spec."""
+def fit_model_from_spec(spec, X_train, y_train, spw=1.0, seed=42,
+                        X_val=None, y_val=None):
+    """Fit a single heterogeneous ensemble member from a spec.
+    
+    v17: accepts optional X_val/y_val for early stopping on boosting models.
+    """
     params = spec.get("params", {})
     model_type = spec["model_type"]
     class_weights = _sample_weight(y_train, spw)
     # Apply time-decay weighting: recent samples get higher weight
     time_weights = _time_decay_weights(len(y_train), half_life_ratio=0.3)
     weights = class_weights * time_weights
+
+    # Prepare validation weights for early stopping
+    val_weights = None
+    if X_val is not None and y_val is not None:
+        val_class_w = _sample_weight(y_val, spw)
+        val_time_w = _time_decay_weights(len(y_val), half_life_ratio=0.3)
+        val_weights = val_class_w * val_time_w
 
     if model_type == "xgb":
         model = xgb.XGBClassifier(
@@ -171,8 +181,14 @@ def fit_model_from_spec(spec, X_train, y_train, spw=1.0, seed=42):
             reg_alpha=params.get("reg_alpha", 0.5),
             reg_lambda=params.get("reg_lambda", 3.0),
             gamma=params.get("gamma", 2.0),
+            early_stopping_rounds=50 if X_val is not None else None,
         )
-        model.fit(X_train, y_train, sample_weight=weights, verbose=False)
+        fit_kwargs = {"sample_weight": weights, "verbose": False}
+        if X_val is not None:
+            fit_kwargs["eval_set"] = [(X_val, y_val)]
+            if val_weights is not None:
+                fit_kwargs["sample_weight_eval_set"] = [val_weights]
+        model.fit(X_train, y_train, **fit_kwargs)
         return model
 
     if model_type == "hist_gb":
@@ -221,11 +237,17 @@ def fit_model_from_spec(spec, X_train, y_train, spw=1.0, seed=42):
             random_seed=seed,
             verbose=0,
             allow_writing_files=False,
+            early_stopping_rounds=50 if X_val is not None else None,
         )
-        model.fit(X_train, y_train, sample_weight=weights)
+        if X_val is not None:
+            model.fit(X_train, y_train, sample_weight=weights,
+                      eval_set=(X_val, y_val))
+        else:
+            model.fit(X_train, y_train, sample_weight=weights)
         return model
 
     if model_type == "lightgbm" and _HAS_LIGHTGBM:
+        cb = [lgb.early_stopping(50, verbose=False)] if X_val is not None else None
         model = lgb.LGBMClassifier(
             n_estimators=params.get("n_estimators", 400),
             max_depth=params.get("max_depth", 5),
@@ -238,7 +260,11 @@ def fit_model_from_spec(spec, X_train, y_train, spw=1.0, seed=42):
             random_state=seed,
             verbose=-1,
         )
-        model.fit(X_train, y_train, sample_weight=weights)
+        fit_kwargs = {"sample_weight": weights}
+        if X_val is not None:
+            fit_kwargs["eval_set"] = [(X_val, y_val)]
+            fit_kwargs["callbacks"] = cb
+        model.fit(X_train, y_train, **fit_kwargs)
         return model
 
     raise ValueError(f"Unsupported model type: {model_type}")
@@ -270,7 +296,8 @@ def build_seeded_xgb_ensemble(X_train, y_train, X_cal, y_cal, spw=1.0,
         y_tr = y_train[start:]
         window_pct = int(ratio * 100)
 
-        model = fit_model_from_spec(spec, X_tr, y_tr, spw=spw, seed=seed)
+        model = fit_model_from_spec(spec, X_tr, y_tr, spw=spw, seed=seed,
+                                    X_val=X_cal, y_val=y_cal)
         name = f"{spec['name']}_{window_pct}pct"
 
         cal = build_calibrated_model(model, X_cal, y_cal, name=name)

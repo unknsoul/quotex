@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Central configuration - QUOTEX LORD v16.1 Signal Volume + Accuracy.
+"""Central configuration - QUOTEX LORD v17 Accuracy Maximized.
+
+v17 accuracy upgrades:
+- Early stopping for XGB/CatBoost/LightGBM (50 rounds)
+- 162 features (ADX, Ichimoku, CCI, Williams %R)
+- 17 meta features (hour_cos, max/min model probs)
+- Single max-penalty replaces cascading penalties
+- LSTM in StackingCombiner
 
 v16.1 signal volume upgrades:
   - Lowered confidence gates (54→50%) for more signal throughput

@@ -163,6 +163,9 @@ def train_weights(symbol):
             if "atr_14" in sub.columns else 0.5
         ),
         "hour_sin": np.sin(2 * np.pi * hours / 24),
+        "hour_cos": np.cos(2 * np.pi * hours / 24),
+        "max_single_model_prob": oof_all.max(axis=0),
+        "min_single_model_prob": oof_all.min(axis=0),
     })
     meta_input = meta_rows[meta_feat_cols].fillna(0)
     # CalibratedClassifierCV already applies sigmoid internally

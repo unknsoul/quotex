@@ -1,18 +1,17 @@
 """
-Meta Model — OOF-only, GradientBoosting, with isotonic calibration.
+Meta Model v17 — OOF-only, GradientBoosting, with sigmoid calibration.
+
+v17 upgrades:
+  - Added hour_cos (full cyclical time encoding — sin alone is ambiguous)
+  - Added max_single_model_prob, min_single_model_prob (model agreement detail)
+  - body_percentile_rank computed via rolling rank (matches predict_engine v17)
+  - 17 meta features total
 
 CRITICAL: This model trains exclusively on Out-of-Fold primary predictions.
 It NEVER sees in-sample primary outputs. The OOF predictions come from
-train_model.py's 3-fold TimeSeriesSplit within train_main.
+train_model.py's 5-fold TimeSeriesSplit within train_main.
 
 Target: 1 if OOF primary prediction was correct, else 0.
-
-Fixes applied:
-  - OOF indices sorted ascending before slicing (prevents corrupted rolling)
-  - Ensemble variance included as meta feature
-  - Dead spread_ratio removed
-  - Meta output calibrated with isotonic regression on holdout
-  - Meta correlation logged after training
 """
 
 import argparse
@@ -63,6 +62,9 @@ META_FEATURE_COLUMNS = [
     "direction_streak",
     "rolling_vol_percentile",
     "hour_sin",                 # v8: cyclical time-of-day
+    "hour_cos",                 # v17: completes cyclical encoding
+    "max_single_model_prob",    # v17: most confident model
+    "min_single_model_prob",    # v17: least confident model
 ]
 
 META_CALIBRATOR_PATH = os.path.join(MODEL_DIR, "meta_calibrator.pkl")
@@ -173,6 +175,11 @@ def build_meta_features(df, oof_data):
     else:
         hours = pd.Series(np.zeros(len(sub)), index=sub.index)
     sub["hour_sin"] = np.sin(2 * np.pi * hours / 24)
+    sub["hour_cos"] = np.cos(2 * np.pi * hours / 24)  # v17
+
+    # v17: per-model extremes (most/least confident member)
+    sub["max_single_model_prob"] = oof_all.max(axis=0)
+    sub["min_single_model_prob"] = oof_all.min(axis=0)
 
     return sub
 

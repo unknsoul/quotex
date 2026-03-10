@@ -1,20 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Predict Engine — v11 Advanced Production Pipeline.
+Predict Engine — v17 Accuracy-Maximized Production Pipeline.
 
-v11 upgrades (full plan):
-  - Same-Candle Detector (SC-1 to SC-5): stale/frozen candle detection
-  - 9-Strategy Signal Engine: parallel evaluation with composite scoring
-  - 12-Pattern Candlestick Overlay: confirm/contradict scoring
-  - Staleness Tracker: crossover signal decay
-  - CHOPPY regime signal suspension
-  - Hour-strategy confidence scaling (replaces hour blocking)
-  - Anti-streak engine: prevents directional collapse
-  - Candle quality filter: detects stale/repetitive candles
-  - Momentum exhaustion: detects trend exhaustion
-  - Symbol confidence adjustments: data-driven per-symbol scaling
-  - Weak-hour extra confirmation requirement
-  - Race condition protection via retrain lock
+v17 upgrades:
+  - body_percentile_rank: rolling rank (fixes train/serve skew)
+  - hour_cos + max/min single model probs added to meta features
+  - Single max-penalty replaces 8+ cascading multiplicative penalties
+  - StackingCombiner includes LSTM (not just tree models)
+  - All v11 filters preserved (same-candle, anti-streak, etc.)
 
 Live parity: meta features built identically to training
   (ensemble_variance, no spread_ratio, no correctness-derived features)
@@ -245,14 +238,21 @@ def verify_candle_closed(df, timeframe_minutes=5):
     return is_closed
 
 
+# --- v17: Rolling body_size buffer for percentile rank computation ---
+_body_size_buffer = []
+_BODY_BUFFER_SIZE = 100  # match ATR_PERCENTILE_WINDOW
+
+
 def _build_meta_row(green_p, df_row, regime_enc, ensemble_variance,
-                    ensemble_disagreement=0.0, regime_duration=1):
+                    ensemble_disagreement=0.0, regime_duration=1,
+                    all_probs=None):
     """
     Build meta feature row matching META_FEATURE_COLUMNS exactly.
     
-    LIVE PARITY: same features as training (v8: 14 meta features).
+    v17 PARITY FIX: body_percentile_rank now uses rolling rank (matches training).
+    Added hour_cos + max/min single model probs.
     """
-    global _direction_history
+    global _direction_history, _body_size_buffer
 
     cur_dir = 1 if green_p >= 0.5 else 0
     dstreak = 1
@@ -270,8 +270,28 @@ def _build_meta_row(green_p, df_row, regime_enc, ensemble_variance,
             hour = t.hour
     import math
     hour_sin = math.sin(2 * math.pi * hour / 24)
+    hour_cos = math.cos(2 * math.pi * hour / 24)
 
-    return {
+    # v17 FIX: body_percentile_rank via rolling rank (matches training)
+    body_val = float(df_row.get("body_size", 0.0))
+    _body_size_buffer.append(body_val)
+    if len(_body_size_buffer) > _BODY_BUFFER_SIZE:
+        _body_size_buffer.pop(0)
+    if len(_body_size_buffer) >= 2:
+        rank = sum(1 for b in _body_size_buffer if b <= body_val) / len(_body_size_buffer)
+    else:
+        rank = 0.5
+    body_pct_rank = rank
+
+    # v17: per-model extremes
+    if all_probs is not None and len(all_probs) > 0:
+        max_prob = float(np.max(all_probs))
+        min_prob = float(np.min(all_probs))
+    else:
+        max_prob = green_p
+        min_prob = green_p
+
+    meta = {
         "primary_green_prob": green_p,
         "prob_distance_from_half": abs(green_p - 0.5),
         "primary_entropy": float(_binary_entropy(green_p)),
@@ -282,11 +302,15 @@ def _build_meta_row(green_p, df_row, regime_enc, ensemble_variance,
         "atr_value": float(df_row.get("atr_14", 0)),
         "volatility_zscore": float(df_row.get("volatility_zscore", 0)),
         "range_position": float(df_row.get("range_position", 0.5)),
-        "body_percentile_rank": float(df_row.get("body_size", 0.5)),
+        "body_percentile_rank": body_pct_rank,
         "direction_streak": dstreak,
         "rolling_vol_percentile": float(df_row.get("atr_percentile_rank", 0.5)),
         "hour_sin": hour_sin,
+        "hour_cos": hour_cos,
+        "max_single_model_prob": max_prob,
+        "min_single_model_prob": min_prob,
     }
+    return meta
 
 
 def get_confidence_reliability():
@@ -493,12 +517,21 @@ def predict(df, regime):
             except Exception as e:
                 log.debug("LSTM predict skipped: %s", e)
 
-        # v16: StackingCombiner learned blend (fallback to mean)
+        # v17: StackingCombiner learned blend — includes LSTM if available
         if _stacking_combiner is not None:
             try:
-                # Tree model probs only (exclude LSTM) for stacking combiner
-                tree_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
-                green_p = float(_stacking_combiner.predict_proba(tree_probs.reshape(1, -1)))
+                # Include LSTM in stacker if model was trained with it
+                stacker_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
+                if lstm_prob is not None:
+                    stacker_probs = np.append(stacker_probs, lstm_prob)
+                # Check if stacker expects this number of inputs
+                expected = _stacking_combiner.model.coef_.shape[1] if _stacking_combiner.model else len(stacker_probs)
+                if len(stacker_probs) == expected:
+                    green_p = float(_stacking_combiner.predict_proba(stacker_probs.reshape(1, -1)))
+                else:
+                    # Fallback: tree-only probs
+                    tree_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
+                    green_p = float(_stacking_combiner.predict_proba(tree_probs.reshape(1, -1)))
             except Exception as e:
                 log.debug("StackingCombiner fallback to mean: %s", e)
                 green_p = float(all_probs.mean())
@@ -543,7 +576,8 @@ def predict(df, regime):
         regime_enc = REGIME_ENCODING.get(regime, 1)
         meta_row = _build_meta_row(green_p, df.iloc[-1], regime_enc, variance,
                                    ensemble_disagreement=disagreement,
-                                   regime_duration=_regime_duration_counter)
+                                   regime_duration=_regime_duration_counter,
+                                   all_probs=all_probs)
         meta_input = pd.DataFrame([meta_row])[meta_feat_cols]
         meta_rel = float(meta_model.predict_proba(meta_input)[0][1])
 
@@ -573,15 +607,17 @@ def predict(df, regime):
 
         confidence = weighted_score * (1.0 - norm_var)
 
-        # v2: Strong signal confidence boost —
-        # When ensemble strongly agrees (5/6+) AND variance is very low,
-        # boost confidence slightly to reward high-quality setups
+        # v17: Collect penalty factors, apply only the WORST one (prevents cascading)
+        # Old approach: 8+ multiplicative penalties compounded to kill valid signals
+        # New approach: track all penalties, apply max single penalty (capped at 15%)
+        _penalty_factors = []
+
+        # v2: Strong signal confidence boost
         if unanimity >= 0.833 and variance < 0.008:
-            boost = 1.0 + 0.05 * (unanimity - 0.667)  # up to ~1.7% boost
+            boost = 1.0 + 0.05 * (unanimity - 0.667)
             confidence *= boost
-        # Penalty for borderline signals (4/6 with moderate variance)
         elif unanimity <= 0.667 and variance > 0.015:
-            confidence *= 0.95  # small penalty
+            _penalty_factors.append(0.05)  # 5% penalty
 
         # Phase 3: Session-aware confidence adjustment
         session = "Off"
@@ -599,12 +635,12 @@ def predict(df, regime):
         except Exception:
             pass
 
-        # Phase 3: Regime stability adjustment
+        # Phase 3: Regime stability adjustment (v17: collected, not applied directly)
         stability_score = 1.0
         try:
             stability_score = regime_stability_score(df)
             if stability_score < 1.0:
-                confidence *= (0.5 + 0.5 * stability_score)  # reduce during transitions
+                _penalty_factors.append((1.0 - stability_score) * 0.15)  # up to 15%
         except Exception:
             pass
 
@@ -627,7 +663,7 @@ def predict(df, regime):
                 if sc_info["should_skip"]:
                     v11_skip_reasons.append(f"Same-candle: {sc_info['details']}")
                 elif sc_info["confidence_penalty"] < 1.0:
-                    confidence *= sc_info["confidence_penalty"]
+                    _penalty_factors.append(1.0 - sc_info["confidence_penalty"])
             except Exception as e:
                 log.debug("Same-candle detector failed: %s", e)
         
@@ -680,7 +716,8 @@ def predict(df, regime):
                 if force_hold:
                     v11_skip_reasons.append(streak_reason)
                 elif streak_reason:
-                    confidence = adj_conf / 100.0
+                    orig_conf = confidence * 100
+                    _penalty_factors.append(max(0, (orig_conf - adj_conf) / max(orig_conf, 1)))
             except Exception as e:
                 log.debug("Anti-streak check failed: %s", e)
         
@@ -692,10 +729,9 @@ def predict(df, regime):
                 if exhaustion_info["should_skip"]:
                     v11_skip_reasons.append(exhaustion_info.get("reason", "Trend exhausted"))
                 elif exhaustion_info["exhaustion_score"] > V11_EXHAUSTION_PENALTY_START:
-                    # Proportional penalty between 50-75%
                     excess = exhaustion_info["exhaustion_score"] - V11_EXHAUSTION_PENALTY_START
                     penalty = min(excess / 50.0 * 0.15, 0.15)
-                    confidence *= (1.0 - penalty)
+                    _penalty_factors.append(penalty)
             except Exception as e:
                 log.debug("Exhaustion check failed: %s", e)
         
@@ -718,11 +754,9 @@ def predict(df, regime):
                 # but reduces confidence if strategies disagree with ML
                 if strategy_result["composite_direction"] != "NEUTRAL":
                     if strategy_result["composite_direction"] != predicted_dir:
-                        # Strategy engine disagrees with ML — reduce confidence
-                        confidence *= 0.90
+                        _penalty_factors.append(0.10)  # 10% penalty
                     elif strategy_result["signal_valid"]:
-                        # Strategy engine confirms ML with strong agreement — boost
-                        confidence *= 1.05
+                        confidence *= 1.05  # boost kept
             except Exception as e:
                 log.debug("Strategy engine failed: %s", e)
         
@@ -732,7 +766,7 @@ def predict(df, regime):
             try:
                 staleness_info = track_crossover_staleness(df)
                 if staleness_info["overall_freshness"] < 0.3 and not staleness_info["is_fresh"]:
-                    confidence *= 0.92  # slight penalty for stale crossovers
+                    _penalty_factors.append(0.08)  # 8% penalty for stale crossovers
             except Exception as e:
                 log.debug("Staleness tracker failed: %s", e)
         
@@ -742,14 +776,19 @@ def predict(df, regime):
         if V11_PATTERN_OVERLAY_ENABLED and not v11_skip_reasons:
             try:
                 pattern_info = compute_pattern_score_adjustment(df, predicted_dir)
-                # Apply as confidence adjustment (scaled from ±20 score to ±2% confidence)
-                if pattern_info["adjustment"] != 0:
-                    conf_adj = pattern_info["adjustment"] / 1000.0  # ±0.02 max
-                    confidence *= (1.0 + conf_adj)
+                if pattern_info["adjustment"] < 0:
+                    _penalty_factors.append(abs(pattern_info["adjustment"]) / 1000.0)
+                elif pattern_info["adjustment"] > 0:
+                    confidence *= (1.0 + pattern_info["adjustment"] / 1000.0)
             except Exception as e:
                 log.debug("Pattern overlay failed: %s", e)
         
         # ═══ END v11 FILTERS ═══════════════════════════════════════
+
+        # v17: Apply single worst penalty (capped at 15%) instead of cascading
+        if _penalty_factors:
+            worst_penalty = min(max(_penalty_factors), 0.15)  # cap at 15%
+            confidence *= (1.0 - worst_penalty)
 
         # Adaptive confidence (rolling calibration)
         raw_confidence_pct = round(confidence * 100, 2)

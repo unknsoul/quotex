@@ -25,3 +25,7 @@ Thumbs.db
 
 # Env
 .env
+
+# Training logs & DB
+train_v17_*.txt
+signals.db

@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Feature Engineering v7 — volume imbalance + TF agreement + pattern sequences.
+Feature Engineering v17 — Ichimoku, CCI, Williams %R, +DI/-DI, deduplication.
 
-v7 adds: volume imbalance, multi-TF agreement, 5-bar patterns,
-regime acceleration, doji count, consecutive wicks.
-Total: 66 features.
+v17 adds: Ichimoku cloud features (4), CCI, Williams %R, +DI/-DI directional ratio,
+          removes redundant features (dollar_strength_proxy, five_candle_pattern as int).
+Total: ~72 features.
 """
 
 import numpy as np
@@ -42,6 +42,16 @@ FEATURE_COLUMNS = [
     "session_flag", "hour_sin", "hour_cos",
     "return_last_5", "volatility_rolling_10",
     "momentum_rolling_5",
+    # v17: Directional indicators (+DI/-DI from ADX)
+    "plus_di", "minus_di", "di_ratio",
+    # v17: Ichimoku Cloud features
+    "ichimoku_tkx",  # Tenkan-Kijun cross signal
+    "ichimoku_cloud_dist",  # price distance from cloud
+    "ichimoku_cloud_width",  # cloud thickness (trend strength)
+    "ichimoku_chikou_pos",  # Chikou span position
+    # v17: CCI and Williams %R
+    "cci_20",
+    "williams_r",
     # Multi-timeframe (4)
     "h1_trend_direction", "h1_ema_alignment", "h1_atr", "m15_momentum",
     # Continuous regime (v4) (3)
@@ -217,6 +227,28 @@ def _adx(high, low, close, period):
     return dx.ewm(span=period, adjust=False).mean()
 
 
+def _adx_full(high, low, close, period):
+    """Return (adx, +DI, -DI) for directional analysis."""
+    plus_dm = high.diff()
+    minus_dm = -low.diff()
+    both_neg = (plus_dm <= 0) & (minus_dm <= 0)
+    plus_bigger = plus_dm > minus_dm
+    plus_dm = plus_dm.where(plus_bigger & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where(~plus_bigger & (minus_dm > 0), 0.0)
+    plus_dm[both_neg] = 0.0
+    minus_dm[both_neg] = 0.0
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_val = tr.ewm(span=period, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(span=period, adjust=False).mean() / (atr_val + 1e-10))
+    minus_di = 100 * (minus_dm.ewm(span=period, adjust=False).mean() / (atr_val + 1e-10))
+    dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10))
+    adx = dx.ewm(span=period, adjust=False).mean()
+    return adx, plus_di, minus_di
+
+
 def _stochastic(high, low, close, k_period, d_period):
     low_min = low.rolling(k_period).min()
     high_max = high.rolling(k_period).max()
@@ -383,6 +415,39 @@ def compute_features(df, m15_df=None, h1_df=None, m1_df=None):
     df["ema_slope"] = (ema50 - ema50.shift(EMA_SLOPE_WINDOW)) / (
         ema50.shift(EMA_SLOPE_WINDOW) + 1e-10)
     df["adx"] = _adx(h, l, c, ADX_PERIOD)
+
+    # v17: +DI / -DI directional indicators
+    _, pdi, mdi = _adx_full(h, l, c, ADX_PERIOD)
+    df["plus_di"] = pdi / 100.0  # normalize to 0-1
+    df["minus_di"] = mdi / 100.0
+    df["di_ratio"] = pdi / (pdi + mdi + 1e-10)  # 0.5 = balanced, >0.5 = bullish
+
+    # v17: Ichimoku Cloud features (9/26/52 standard settings)
+    tenkan = (h.rolling(9).max() + l.rolling(9).min()) / 2
+    kijun = (h.rolling(26).max() + l.rolling(26).min()) / 2
+    senkou_a = (tenkan + kijun) / 2
+    senkou_b = (h.rolling(52).max() + l.rolling(52).min()) / 2
+    # Tenkan-Kijun cross: positive = bullish cross
+    df["ichimoku_tkx"] = (tenkan - kijun) / (c + 1e-10)
+    # Price distance from cloud (positive = above cloud = bullish)
+    cloud_top = pd.concat([senkou_a, senkou_b], axis=1).max(axis=1)
+    cloud_bot = pd.concat([senkou_a, senkou_b], axis=1).min(axis=1)
+    df["ichimoku_cloud_dist"] = (c - (cloud_top + cloud_bot) / 2) / (c + 1e-10)
+    # Cloud width (trend strength)
+    df["ichimoku_cloud_width"] = (cloud_top - cloud_bot) / (c + 1e-10)
+    # Chikou span position (close vs close 26 bars ago)
+    df["ichimoku_chikou_pos"] = (c - c.shift(26)) / (c + 1e-10)
+
+    # v17: CCI (Commodity Channel Index) — 20-period
+    tp = (h + l + c) / 3  # typical price
+    tp_sma = tp.rolling(20).mean()
+    tp_mad = tp.rolling(20).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
+    df["cci_20"] = ((tp - tp_sma) / (0.015 * tp_mad + 1e-10)).clip(-300, 300) / 300.0  # normalized
+
+    # v17: Williams %R — 14-period
+    highest_14 = h.rolling(14).max()
+    lowest_14 = l.rolling(14).min()
+    df["williams_r"] = ((highest_14 - c) / (highest_14 - lowest_14 + 1e-10))  # 0=overbought, 1=oversold
 
     # Momentum
     df["rsi_14"] = _rsi(c, RSI_PERIOD)
