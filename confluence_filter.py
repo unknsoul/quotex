@@ -187,15 +187,33 @@ def check_confluence(m5_df, m15_df=None, h1_df=None,
     weighted_threshold = min_score / 3.0  # 2/3 ≈ 0.667
     passed = weighted_score >= weighted_threshold
 
-    # Special case: if H1 strongly opposes, fail even if M5+M15 agree
-    # v11: Explicit H1 hard gate — counter-trend M5 entries blocked
+    # v12: H1 strength-weighted gate — replaces hard block with graduated penalty
+    # Instead of hard-blocking on any H1 disagreement, we apply a confidence
+    # penalty proportional to H1's conviction. Weak H1 opposition (low conf)
+    # gets a mild penalty; strong H1 opposition gets a severe penalty.
     h1_hard_gate_pass = True
+    h1_penalty = 0.0
     if h1_df is not None and len(h1_df) >= 20:
         h1_dir_check = directions.get("H1", "NEUTRAL")
         if h1_dir_check != "NEUTRAL" and h1_dir_check != predicted_direction and h1_dir_check != "N/A":
-            # H1 opposes — hard block
-            h1_hard_gate_pass = False
-            passed = False
+            _, h1_opp_conf = _tf_direction_v2(h1_df, lookback=2, tf_name="H1")
+            if h1_opp_conf >= 0.65:
+                # Strong H1 opposition — still block (like old hard gate)
+                h1_hard_gate_pass = False
+                h1_penalty = 0.40
+                passed = False
+            elif h1_opp_conf >= 0.45:
+                # Moderate H1 opposition — heavy penalty but allow if M5+M15 strong
+                h1_penalty = 0.25
+                weighted_score *= (1.0 - h1_penalty)
+                scaled_score = min(3.0, weighted_score * 3.0 / 2.0)
+                # Re-check pass with reduced score
+                passed = weighted_score >= weighted_threshold
+            else:
+                # Weak H1 opposition — mild penalty, likely noise
+                h1_penalty = 0.10
+                weighted_score *= (1.0 - h1_penalty)
+                scaled_score = min(3.0, weighted_score * 3.0 / 2.0)
 
     # v11: EMA hierarchy bonus (+0.10 to confluence score)
     ema_hierarchy_bonus = 0.0
@@ -231,5 +249,6 @@ def check_confluence(m5_df, m15_df=None, h1_df=None,
         "tf_directions": directions,
         "reason": reason,
         "h1_hard_gate_pass": h1_hard_gate_pass,
+        "h1_penalty": round(h1_penalty, 2),
         "ema_hierarchy_bonus": round(ema_hierarchy_bonus, 2),
     }

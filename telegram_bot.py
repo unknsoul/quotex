@@ -66,6 +66,9 @@ from config import (
     AUTO_RETRAIN_ACCURACY_TRIGGER,
     AUTO_RETRAIN_CORRELATION_TRIGGER,
     SIGNAL_MIN_CONFIDENCE,
+    SIGNAL_SOFT_CONFLUENCE_OVERRIDE_CONFIDENCE,
+    SIGNAL_SOFT_CONFLUENCE_OVERRIDE_QUALITY,
+    SIGNAL_SOFT_CONFLUENCE_OVERRIDE_UNANIMITY,
     LOG_LEVEL,
     LOG_FORMAT,
 )
@@ -89,6 +92,13 @@ from stacking_model import StackingGatekeeper
 from signal_validator import validate_signal
 from signal_db import SignalDB
 from performance_dashboard import generate_dashboard, format_dashboard_text
+
+# v12 accuracy upgrades
+from dispatch_model import get_dispatch_model
+from bayesian_threshold import get_bayesian_threshold
+from outcome_feedback import get_feedback_loop
+from feature_importance_monitor import get_importance_monitor
+from session_filter import update_hour_outcome
 
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 log = logging.getLogger("telegram_bot")
@@ -147,6 +157,11 @@ _accuracy = AccuracyTracker()      # rolling accuracy
 _conf_corr = ConfidenceCorrelationTracker()  # conf-accuracy correlation
 _stacker = StackingGatekeeper()    # stacking gate
 _signal_db = SignalDB()            # SQLite signal database
+
+# v12 accuracy upgrade singletons
+_dispatch = get_dispatch_model()
+_bayesian = get_bayesian_threshold()
+_feedback = get_feedback_loop()
 
 _pair_scores: dict = {}            # {symbol: score}
 _pair_counter = 0                  # cycles since last pair score
@@ -679,6 +694,12 @@ def _record_sent_signal(symbol: str, pred: dict, chat_ids: list):
         "price": price,
         "time": datetime.now(timezone.utc).isoformat(),
         "chat_ids": chat_ids,
+        # v12 fields for adaptive systems
+        "unanimity": pred.get("ensemble_unanimity", 0.5),
+        "variance": pred.get("ensemble_variance", 0.01),
+        "signal_score": pred.get("signal_score", 50),
+        "quality_score": pred.get("quality_score", 0),
+        "dispatch_win_prob": pred.get("dispatch_win_prob", 0.5),
     }
     _pending_signals[signal_id] = entry
 
@@ -827,6 +848,41 @@ async def _resolve_pending_signals(bot: Bot):
         # v2: Update signal ranker per-symbol stats + adaptive thresholds
         update_symbol_stats(symbol, correct)
         _update_symbol_confidence(symbol, correct, entry.get("confidence", 50))
+
+        # v12: Update all adaptive systems with outcome
+        try:
+            # Dispatch model learns from outcome
+            _dispatch.update(entry, symbol, correct)
+        except Exception as e:
+            log.debug("Dispatch model update failed: %s", e)
+
+        try:
+            # Bayesian threshold learns per (symbol, regime, hour)
+            sig_time_parsed = datetime.fromisoformat(entry["time"])
+            sig_hour = sig_time_parsed.hour
+            _bayesian.update(symbol, entry.get("regime", "Unknown"), sig_hour, correct)
+        except Exception as e:
+            log.debug("Bayesian threshold update failed: %s", e)
+
+        try:
+            # Outcome feedback loop auto-tunes dispatch thresholds
+            _feedback.record_outcome({
+                "correct": correct,
+                "confidence": entry.get("confidence", 50),
+                "unanimity": entry.get("unanimity", 0.5),
+                "variance": entry.get("variance", 0.01),
+                "signal_score": entry.get("signal_score", 50),
+                "symbol": symbol,
+            })
+        except Exception as e:
+            log.debug("Feedback loop update failed: %s", e)
+
+        try:
+            # Session filter learns per-hour accuracy
+            sig_time_parsed2 = datetime.fromisoformat(entry["time"])
+            update_hour_outcome(sig_time_parsed2.hour, correct)
+        except Exception as e:
+            log.debug("Session hour update failed: %s", e)
 
         # Update stacking gatekeeper with outcome
         try:
@@ -2095,6 +2151,17 @@ async def _auto_signal_job(app: Application):
                 except Exception as e:
                     log.debug("Drift check failed: %s", e)
 
+                # v12: Feature importance drift check
+                try:
+                    fi_monitor = get_importance_monitor()
+                    fi_result = fi_monitor.check_drift()
+                    if fi_result.get("is_drifted"):
+                        log.warning("Feature IMPORTANCE drift: corr=%.3f, drifted=%s",
+                                    fi_result["rank_correlation"],
+                                    fi_result["drifted_features"][:3])
+                except Exception as e:
+                    log.debug("Feature importance check failed: %s", e)
+
             # ── Dynamic Pair Selector ──
             _pair_counter += 1
             if _pair_counter >= PAIR_SCORE_REFRESH or not _pair_scores:
@@ -2195,20 +2262,30 @@ async def _auto_signal_job(app: Application):
                         log.info("Risk filter blocked %s: %s", sym, reason)
                         continue
 
-                    # 9b. Confidence gate (adaptive per-symbol)
+                    # 9b. Confidence gate (adaptive per-symbol + v12 Bayesian)
                     sym_min_conf = _symbol_min_confidence.get(sym, MIN_CONFIDENCE)
+                    # v12: Bayesian threshold override (per symbol/regime/hour)
+                    try:
+                        hour_now = datetime.now(timezone.utc).hour
+                        bayes_min = _bayesian.get_min_confidence(sym, regime, hour_now)
+                        sym_min_conf = max(sym_min_conf, bayes_min)
+                    except Exception:
+                        pass
                     if conf < sym_min_conf:
                         filtered_out[sym] = f"confidence<{sym_min_conf:.0f}"
                         continue
 
-                    # 9c. Ensemble agreement
+                    # 9c. Ensemble agreement (v12: use feedback loop thresholds)
                     unanimity = float(pred.get("ensemble_unanimity", 0))
                     variance = float(pred.get("ensemble_variance", 1.0))
-                    if unanimity < MIN_UNANIMITY:
-                        filtered_out[sym] = f"unanimity:{unanimity:.2f}"
+                    fb_thresholds = _feedback.get_thresholds()
+                    effective_min_unanimity = max(MIN_UNANIMITY, fb_thresholds.get("min_unanimity", MIN_UNANIMITY))
+                    effective_max_variance = min(MAX_ENSEMBLE_VARIANCE, fb_thresholds.get("max_variance", MAX_ENSEMBLE_VARIANCE))
+                    if unanimity < effective_min_unanimity:
+                        filtered_out[sym] = f"unanimity:{unanimity:.2f}<{effective_min_unanimity:.2f}"
                         continue
-                    if variance > MAX_ENSEMBLE_VARIANCE:
-                        filtered_out[sym] = f"variance:{variance:.3f}"
+                    if variance > effective_max_variance:
+                        filtered_out[sym] = f"variance:{variance:.3f}>{effective_max_variance:.3f}"
                         continue
 
                     # 9d. Production gate (HOLD)
@@ -2226,9 +2303,21 @@ async def _auto_signal_job(app: Application):
                     cf_m5_df = cf.pop("_m5_df", None)  # reuse for momentum check
                     pred["_confluence_score"] = cf.get("confluence_score", 0)
                     if not cf.get("confluence_pass", True):
-                        filtered_out[sym] = f"confluence:{cf.get('reason', 'TF conflict')}"
-                        log.info("Confluence filter blocked %s: %s", sym, cf.get("reason"))
-                        continue
+                        reason = cf.get("reason", "TF conflict")
+                        soft_override = (
+                            cf.get("h1_hard_gate_pass", True)
+                            and conf >= SIGNAL_SOFT_CONFLUENCE_OVERRIDE_CONFIDENCE
+                            and float(pred.get("quality_score", 0)) >= SIGNAL_SOFT_CONFLUENCE_OVERRIDE_QUALITY
+                            and float(pred.get("ensemble_unanimity", 0)) >= SIGNAL_SOFT_CONFLUENCE_OVERRIDE_UNANIMITY
+                        )
+                        if soft_override:
+                            pred["_confluence_override"] = True
+                            pred["_confluence_score"] = max(pred.get("_confluence_score", 0), 2)
+                            log.info("Confluence soft override %s: %s", sym, reason)
+                        else:
+                            filtered_out[sym] = f"confluence:{reason}"
+                            log.info("Confluence filter blocked %s: %s", sym, reason)
+                            continue
 
                     # 9g. Session multiplier
                     session = pred.get("session", "Off")
@@ -2294,12 +2383,14 @@ async def _auto_signal_job(app: Application):
                 except Exception:
                     pass
 
-            # ── LAYER 10: Rank & Select ──
+            # ── LAYER 10: Rank & Select (v12: adaptive min_score) ──
             if predictions:
+                fb_thresholds = _feedback.get_thresholds()
+                effective_min_score = max(MIN_SIGNAL_SCORE, fb_thresholds.get("min_signal_score", MIN_SIGNAL_SCORE))
                 predictions = rank_and_select(
                     predictions,
                     max_signals=MAX_SIGNALS_PER_CYCLE,
-                    min_score=MIN_SIGNAL_SCORE,
+                    min_score=effective_min_score,
                 )
 
             # ── LAYER 10b: Signal Validator (confidence, duplicate, rate limit) ──
@@ -2308,6 +2399,18 @@ async def _auto_signal_job(app: Application):
                 if not is_valid:
                     filtered_out[sym] = "; ".join(reject_reasons[:2])
                     del predictions[sym]
+
+            # ── LAYER 10c: Dispatch Model Gate (v12) ──
+            for sym, pred in list(predictions.items()):
+                try:
+                    should_send, win_prob, reason = _dispatch.should_dispatch(pred, sym)
+                    pred["dispatch_win_prob"] = win_prob
+                    if not should_send:
+                        filtered_out[sym] = f"dispatch:{reason}"
+                        del predictions[sym]
+                except Exception as e:
+                    log.debug("Dispatch model check skipped for %s: %s", sym, e)
+                    pred["dispatch_win_prob"] = 0.5
 
             # ── Log Filtered ──
             if filtered_out:
@@ -2397,7 +2500,7 @@ async def _auto_signal_job(app: Application):
                 )
                 for cid, info in active_subs.items():
                     if info.get("active"):
-                        await _safe_send(bot, cid, no_sig_msg)
+                        await _safe_send(bot, cid, no_sig_msg, parse_mode=None)
 
         except Exception as e:
             log.error("Auto-signal cycle error: %s", e, exc_info=True)

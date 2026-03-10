@@ -13,19 +13,28 @@ import math
 import logging
 import json
 import os
+from datetime import datetime, timedelta, timezone
+
+from config import (
+    V11_STREAK_FORCE_HOLD,
+    V11_STREAK_MAX_PENALTY,
+    V11_STREAK_PENALTY_RATE,
+    V11_STREAK_PENALTY_START,
+)
 
 log = logging.getLogger("anti_streak")
 
 # ─── Configuration ───────────────────────────────────────────────────────────
-STREAK_PENALTY_START = 4        # Start penalizing after N consecutive same-direction
-STREAK_PENALTY_RATE = 0.04      # Exponential penalty rate per excess signal
-STREAK_MAX_PENALTY = 0.30       # Maximum 30% confidence reduction
-STREAK_FORCE_SKIP = 12          # Force HOLD after N consecutive same-direction
+STREAK_PENALTY_START = V11_STREAK_PENALTY_START
+STREAK_PENALTY_RATE = V11_STREAK_PENALTY_RATE
+STREAK_MAX_PENALTY = V11_STREAK_MAX_PENALTY
+STREAK_FORCE_SKIP = V11_STREAK_FORCE_HOLD
 DIRECTION_BALANCE_WINDOW = 50   # Window for checking direction balance
 DIRECTION_IMBALANCE_THRESHOLD = 0.80  # >80% same direction = imbalanced
 
 # Persistence
 _STATE_FILE = os.path.join(os.path.dirname(__file__), "logs", "streak_state.json")
+STATE_STALE_AFTER_HOURS = 2
 
 
 class AntiStreakEngine:
@@ -36,6 +45,13 @@ class AntiStreakEngine:
         self.current_streak_dir = None
         self.current_streak_len = 0
         self._load_state()
+
+    def _reset_state(self, reason="reset"):
+        """Reset stale or invalid streak history so the bot can recover naturally."""
+        self.direction_history = []
+        self.current_streak_dir = None
+        self.current_streak_len = 0
+        log.info("Streak state reset: %s", reason)
     
     def _load_state(self):
         """Load streak state from disk (survives restarts)."""
@@ -43,6 +59,23 @@ class AntiStreakEngine:
             if os.path.exists(_STATE_FILE):
                 with open(_STATE_FILE, "r") as f:
                     state = json.load(f)
+                updated = state.get("updated")
+                if not updated:
+                    self._reset_state("missing timestamp")
+                    self._save_state()
+                    return
+                try:
+                    updated_at = datetime.fromisoformat(updated)
+                    if updated_at.tzinfo is None:
+                        updated_at = updated_at.replace(tzinfo=timezone.utc)
+                except Exception:
+                    self._reset_state("invalid timestamp")
+                    self._save_state()
+                    return
+                if datetime.now(timezone.utc) - updated_at > timedelta(hours=STATE_STALE_AFTER_HOURS):
+                    self._reset_state("stale history")
+                    self._save_state()
+                    return
                 self.direction_history = state.get("direction_history", [])
                 self.current_streak_dir = state.get("current_streak_dir")
                 self.current_streak_len = state.get("current_streak_len", 0)
@@ -60,6 +93,7 @@ class AntiStreakEngine:
                 "direction_history": self.direction_history[-DIRECTION_BALANCE_WINDOW:],
                 "current_streak_dir": self.current_streak_dir,
                 "current_streak_len": self.current_streak_len,
+                "updated": datetime.now(timezone.utc).isoformat(),
             }
             with open(_STATE_FILE, "w") as f:
                 json.dump(state, f)

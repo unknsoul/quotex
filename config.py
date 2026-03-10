@@ -149,7 +149,7 @@ CONFIDENCE_MEDIUM_MIN = 60.0
 
 # --- Production Decision Gate -----------------------------------------------
 PRODUCTION_SIGNAL_GATING_ENABLED = True
-PRODUCTION_MIN_CONFIDENCE = 46.0
+PRODUCTION_MIN_CONFIDENCE = 42.0
 PRODUCTION_MIN_META_RELIABILITY = 45.0
 PRODUCTION_MIN_UNANIMITY = 0.60
 PRODUCTION_MAX_UNCERTAINTY = 10.0
@@ -234,10 +234,13 @@ DATA_BUFFER_SIZE = 20000
 MODEL_BACKUP_DIR = os.path.join(BASE_DIR, "models", "backup")
 
 # --- Signal Validator --------------------------------------------------------
-SIGNAL_MIN_CONFIDENCE = 50.0          # lowered from 52 to allow more trades through
+SIGNAL_MIN_CONFIDENCE = 42.0          # aligned with production gate to avoid over-filtering
 SIGNAL_DUPLICATE_WINDOW_SEC = 300     # 5 min duplicate guard
 SIGNAL_MAX_PER_HOUR = 8              # raised from 6 to allow more signals
 SIGNAL_REQUIRE_MTF_ALIGNMENT = True   # block if multi-TF opposes direction
+SIGNAL_SOFT_CONFLUENCE_OVERRIDE_CONFIDENCE = 55.0
+SIGNAL_SOFT_CONFLUENCE_OVERRIDE_QUALITY = 65.0
+SIGNAL_SOFT_CONFLUENCE_OVERRIDE_UNANIMITY = 0.80
 
 # --- Session Filter ----------------------------------------------------------
 SESSION_HOURS = {
@@ -272,10 +275,10 @@ DASHBOARD_ROLLING_WINDOW = 50    # trades for rolling metrics
 # Model predicted DOWN 96% of last 100 signals. Long streaks (>10) had 49.8% WR
 # vs short streaks (<=3) at 55% WR. This fixes directional collapse.
 V11_ANTI_STREAK_ENABLED = True
-V11_STREAK_PENALTY_START = 4         # Start penalizing after N consecutive same-direction
-V11_STREAK_PENALTY_RATE = 0.04       # 4% penalty per excess signal
-V11_STREAK_MAX_PENALTY = 0.30        # Maximum 30% reduction
-V11_STREAK_FORCE_HOLD = 12           # Force HOLD after 12 consecutive same-direction
+V11_STREAK_PENALTY_START = 8         # Allow sustained trend periods before confidence suppression starts
+V11_STREAK_PENALTY_RATE = 0.02       # Softer penalty to avoid long low-confidence droughts
+V11_STREAK_MAX_PENALTY = 0.16        # Cap reduction so valid trend signals still survive
+V11_STREAK_FORCE_HOLD = 16           # Only hard-stop extremely one-sided runs
 
 # --- v11: Candle Quality Filter ----------------------------------------------
 # Detects stale/repetitive candles in trending markets (user's specific concern)
@@ -335,3 +338,23 @@ V11_PATTERN_OVERLAY_ENABLED = True
 V11_PATTERN_CONFIRM_BONUS = 10     # +10 to composite when pattern confirms
 V11_PATTERN_CONTRADICT_PENALTY = 15  # -15 when pattern contradicts
 V11_PATTERN_MAX_BONUS = 20          # cap at ±20 for multiple patterns
+
+# --- v12: Accuracy Upgrades --------------------------------------------------
+# Dispatch model (learns from live outcomes which signals actually win)
+V12_DISPATCH_MODEL_ENABLED = True
+V12_DISPATCH_MIN_WIN_PROB = 0.46       # min predicted win probability to dispatch
+
+# Bayesian thresholds (per symbol/regime/hour adaptive confidence floors)
+V12_BAYESIAN_THRESHOLD_ENABLED = True
+
+# Outcome feedback loop (auto-tunes dispatch parameters)
+V12_OUTCOME_FEEDBACK_ENABLED = True
+
+# Feature importance drift monitoring
+V12_FEATURE_IMPORTANCE_MONITOR_ENABLED = True
+
+# Adaptive session multipliers (learns from hour-level outcomes)
+V12_ADAPTIVE_SESSION_ENABLED = True
+
+# Confidence recalibration (isotonic-style in predict_engine)
+V12_CONFIDENCE_RECALIBRATION_ENABLED = True

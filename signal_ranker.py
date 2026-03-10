@@ -93,13 +93,11 @@ def compute_signal_score(pred: dict, symbol: str = "", confluence_score: int = 3
     """
     Compute a composite quality score for a single prediction.
 
-    v2 improvements:
-      - Momentum quality factor (price action confirmation)
-      - Session quality bonus (time-of-day quality)
-      - Symbol accuracy bonus (recent hit rate)
-      - Streak bonus (hot/cold hand adjustment)
-      - Non-linear unanimity scaling (rewards 5/6+ more than 4/6)
-      - Regime stability factor
+    v3 improvements (v12):
+      - Ensemble disagreement penalty (high variance = low quality)
+      - Dispatch model win probability boost
+      - Improved weighting with disagreement factor
+      - All v2 features retained
     """
     conf = pred.get("final_confidence_percent", 0)
     meta = pred.get("meta_reliability_percent", 50)
@@ -108,6 +106,7 @@ def compute_signal_score(pred: dict, symbol: str = "", confluence_score: int = 3
     kelly = pred.get("kelly_fraction_percent", 0)
     actual_confluence = pred.get("_confluence_score", confluence_score)
     regime_stab = pred.get("regime_stability", 0.5)
+    variance = pred.get("ensemble_variance", 0.01)
 
     # Normalize components to 0-1 range
     conf_norm = min(conf / 100, 1.0)
@@ -117,7 +116,6 @@ def compute_signal_score(pred: dict, symbol: str = "", confluence_score: int = 3
     kelly_norm = min(kelly / 10.0, 1.0)
 
     # Non-linear unanimity: reward strong agreement (5/6, 6/6) more than 4/6
-    # 0.667 → 0.67, 0.833 → 0.87, 1.0 → 1.0
     unanimity_scaled = math.pow(max(unanimity, 0.5), 0.8)
 
     # Momentum quality factor
@@ -126,23 +124,33 @@ def compute_signal_score(pred: dict, symbol: str = "", confluence_score: int = 3
     # Regime stability factor (0.5 - 1.0)
     stab_norm = 0.5 + 0.5 * min(regime_stab, 1.0)
 
-    # Weighted composite (v2 retuned)
+    # v12: Ensemble disagreement factor — penalizes high variance
+    # Low variance (0.001) → 1.0 (full quality), High variance (0.05) → 0.5 (halved)
+    disagree_factor = max(0.5, 1.0 - variance * 10.0)
+
+    # v12: Dispatch model win probability (if available)
+    dispatch_wp = pred.get("dispatch_win_prob", 0.5)
+    dispatch_bonus = (dispatch_wp - 0.5) * 0.10  # ±5% based on dispatch model
+
+    # Weighted composite (v3 retuned with disagreement)
     base_score = (
-        conf_norm         * 0.22 +   # 22% primary signal strength
-        meta_norm         * 0.13 +   # 13% meta model validation
-        unanimity_scaled  * 0.18 +   # 18% ensemble agreement (non-linear)
+        conf_norm         * 0.20 +   # 20% primary signal strength
+        meta_norm         * 0.12 +   # 12% meta model validation
+        unanimity_scaled  * 0.16 +   # 16% ensemble agreement (non-linear)
         confl_norm        * 0.12 +   # 12% multi-TF confluence
-        uncert_norm       * 0.10 +   # 10% model certainty
-        kelly_norm        * 0.10 +   # 10% Kelly edge
-        mom_quality       * 0.08 +   # 8% momentum quality (NEW)
-        stab_norm         * 0.07     # 7% regime stability (NEW)
+        uncert_norm       * 0.08 +   # 8% model certainty
+        kelly_norm        * 0.08 +   # 8% Kelly edge
+        mom_quality       * 0.08 +   # 8% momentum quality
+        stab_norm         * 0.06 +   # 6% regime stability
+        disagree_factor   * 0.10     # 10% ensemble agreement quality (NEW v12)
     )
 
     # Additive bonuses
     bonus = (
         _session_quality_bonus(pred) +
         _symbol_accuracy_bonus(symbol) +
-        _streak_bonus(symbol)
+        _streak_bonus(symbol) +
+        dispatch_bonus  # v12: dispatch model bonus
     )
 
     final = max(0, min(100, (base_score + bonus) * 100))

@@ -906,24 +906,59 @@ def update_prediction_history(green_p, was_correct, confidence=0.5):
 def _adaptive_confidence(raw_confidence):
     """
     Adjust confidence based on rolling historical accuracy per confidence tier.
-    If raw confidence says 70% but historical accuracy at 70% tier is 60%,
-    adaptive confidence returns 60%.
+    
+    v12 upgrade: Isotonic-style recalibration using finer bins and monotonic
+    smoothing. If raw=70% but historical accuracy at that tier is 60%,
+    outputs ~60%. Also boosts underconfident tiers (raw=40% but actual=55% → 50%).
     """
-    if len(_adaptive_history) < 50:
+    if len(_adaptive_history) < 30:
         return raw_confidence  # not enough data yet
 
     recent = _adaptive_history[-ADAPTIVE_WINDOW:]
-    # Find similar confidence predictions
-    tier_lo = max(0, raw_confidence - 10)
-    tier_hi = raw_confidence + 10
-    in_tier = [(c, cor) for c, cor in recent if tier_lo <= c < tier_hi]
 
-    if len(in_tier) < 10:
-        return raw_confidence  # not enough data in this tier
+    # Build 5-point calibration curve from outcome data
+    bins = [(20, 35), (35, 45), (45, 55), (55, 65), (65, 95)]
+    cal_points = []  # (midpoint, actual_accuracy)
 
-    historical_acc = sum(cor for _, cor in in_tier) / len(in_tier) * 100
-    # Blend: 70% raw, 30% historical (smooth transition)
-    adapted = 0.7 * raw_confidence + 0.3 * historical_acc
+    for lo, hi in bins:
+        in_bin = [(c, cor) for c, cor in recent if lo <= c < hi]
+        if len(in_bin) >= 5:
+            mid = (lo + hi) / 2.0
+            acc = sum(cor for _, cor in in_bin) / len(in_bin) * 100
+            cal_points.append((mid, acc))
+
+    if len(cal_points) < 2:
+        # Not enough data for calibration curve — simple blend
+        tier_lo = max(0, raw_confidence - 10)
+        tier_hi = raw_confidence + 10
+        in_tier = [(c, cor) for c, cor in recent if tier_lo <= c < tier_hi]
+        if len(in_tier) < 5:
+            return raw_confidence
+        historical_acc = sum(cor for _, cor in in_tier) / len(in_tier) * 100
+        return round(0.6 * raw_confidence + 0.4 * historical_acc, 2)
+
+    # Interpolate between calibration points
+    cal_points.sort(key=lambda x: x[0])
+    
+    # Clamp to range of calibration data
+    if raw_confidence <= cal_points[0][0]:
+        calibrated = cal_points[0][1]
+    elif raw_confidence >= cal_points[-1][0]:
+        calibrated = cal_points[-1][1]
+    else:
+        # Linear interpolation between nearest two points
+        for i in range(len(cal_points) - 1):
+            x0, y0 = cal_points[i]
+            x1, y1 = cal_points[i + 1]
+            if x0 <= raw_confidence <= x1:
+                t = (raw_confidence - x0) / max(x1 - x0, 1e-6)
+                calibrated = y0 + t * (y1 - y0)
+                break
+        else:
+            calibrated = raw_confidence
+
+    # Blend: 50% raw signal, 50% calibrated (stronger correction than v11's 70/30)
+    adapted = 0.50 * raw_confidence + 0.50 * calibrated
     return round(adapted, 2)
 
 
