@@ -1,19 +1,26 @@
 """
-LSTM Sequence Model — v15 deep learning ensemble member.
+LSTM Sequence Model — v16 Attention-GRU deep learning ensemble member.
 
-A lightweight GRU (Gated Recurrent Unit) model that captures temporal
-patterns in feature sequences that tree-based models miss:
+A GRU with temporal self-attention that learns WHICH of the recent bars
+are most predictive. Tree-based models miss sequential dependencies;
+this model captures:
   - Multi-bar momentum acceleration/deceleration
   - Volatility regime transitions
   - Price pattern sequences (flags, wedges, H&S)
 
-Architecture:
-  - Input: (batch, seq_len=20, n_features) normalized feature windows
-  - 2-layer GRU with dropout
-  - Dense head → sigmoid probability
+v16 upgrades:
+  - Self-attention layer: learns to focus on most informative timesteps
+  - LayerNorm + GELU activation for better gradient flow
+  - 30-bar window (150 min) for richer temporal context
+  - Larger hidden dim (96) for more expressive representations
+  - Lower LR + more epochs for better convergence
+  - Label smoothing to reduce overfitting
 
-Designed to be trained alongside the tree ensemble and used as an
-additional ensemble member at inference time.
+Architecture:
+  - Input: (batch, seq_len=30, n_features) normalized feature windows
+  - 2-layer GRU with dropout
+  - Temporal self-attention over all hidden states
+  - Dense head with LayerNorm → sigmoid probability
 """
 
 import os
@@ -40,14 +47,15 @@ LSTM_MODEL_PATH = os.path.join(MODEL_DIR, "lstm_model.pt")
 LSTM_SCALER_PATH = os.path.join(MODEL_DIR, "lstm_scaler.pkl")
 
 # ─── Hyperparameters ────────────────────────────────────────────────────────
-SEQ_LEN = 20          # lookback window (20 × M5 = 100 min)
-HIDDEN_DIM = 64
+SEQ_LEN = 30          # v16: 30 × M5 = 150 min (was 20)
+HIDDEN_DIM = 96       # v16: wider (was 64)
 NUM_LAYERS = 2
 DROPOUT = 0.3
-LR = 1e-3
-EPOCHS = 30
-BATCH_SIZE = 512
-PATIENCE = 5          # early stopping patience
+LR = 5e-4             # v16: lower for attention model (was 1e-3)
+EPOCHS = 50           # v16: more epochs with early stopping (was 30)
+BATCH_SIZE = 256      # v16: smaller batches = better gradients (was 512)
+PATIENCE = 7          # v16: more patience for complex architecture (was 5)
+LABEL_SMOOTH = 0.03   # v16: label smoothing alpha
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -76,6 +84,7 @@ if _HAS_TORCH:
     # ═══════════════════════════════════════════════════════════════════════
 
     class GRUClassifier(nn.Module):
+        """v16 Attention-GRU: learns which timesteps matter most."""
         def __init__(self, input_dim, hidden_dim=HIDDEN_DIM,
                      num_layers=NUM_LAYERS, dropout=DROPOUT):
             super().__init__()
@@ -83,10 +92,16 @@ if _HAS_TORCH:
                 input_dim, hidden_dim, num_layers=num_layers,
                 batch_first=True, dropout=dropout if num_layers > 1 else 0,
             )
+            # Self-attention mechanism
+            self.attn_query = nn.Linear(hidden_dim, hidden_dim)
+            self.attn_key = nn.Linear(hidden_dim, hidden_dim)
+            self.attn_v = nn.Linear(hidden_dim, 1)
+
             self.head = nn.Sequential(
+                nn.LayerNorm(hidden_dim),
                 nn.Dropout(dropout),
                 nn.Linear(hidden_dim, 32),
-                nn.ReLU(),
+                nn.GELU(),
                 nn.Dropout(dropout / 2),
                 nn.Linear(32, 1),
                 nn.Sigmoid(),
@@ -94,9 +109,17 @@ if _HAS_TORCH:
 
         def forward(self, x):
             # x: (batch, seq_len, features)
-            out, _ = self.gru(x)
-            last = out[:, -1, :]  # take last hidden state
-            return self.head(last).squeeze(-1)
+            out, _ = self.gru(x)  # (batch, seq_len, hidden)
+
+            # Self-attention: learn which timesteps matter
+            q = self.attn_query(out)                     # (batch, seq, hidden)
+            k = self.attn_key(out)                       # (batch, seq, hidden)
+            scores = self.attn_v(torch.tanh(q + k))      # (batch, seq, 1)
+            weights = torch.softmax(scores, dim=1)        # (batch, seq, 1)
+
+            # Weighted sum of all hidden states (not just last)
+            context = (out * weights).sum(dim=1)           # (batch, hidden)
+            return self.head(context).squeeze(-1)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

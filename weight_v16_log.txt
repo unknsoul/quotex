@@ -1,0 +1,1846 @@
+﻿
+>> Loaded OOF data: 111430 rows, 8 seeds
+   (Indices sorted ascending ù chronological order guaranteed)
+>> Loading multi-symbol data: ['EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'USDCAD', 'USDCHF', 'GBPJPY', 'XAUUSD', 'NZDUSD']
+python : [2026-03-10 22:16:01,196] INFO data_collector: Loaded 7500 rows from 
+C:\Users\hardi\Downloads\quotex\data\EURUSD_M1.csv
+At line:1 char:132
++ ... ncoding utf8; echo "META DONE"; python weight_learner.py 2>&1 | Out-F ...
++                                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2026-03-10 22:...a\EURUSD_M1.csv 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[2026-03-10 22:16:02,068] INFO data_collector: Loaded 99999 rows from 
+C:\Users\hardi\Downloads\quotex\data\EURUSD_M5.csv
+[2026-03-10 22:16:02,330] INFO data_collector: Loaded 33333 rows from 
+C:\Users\hardi\Downloads\quotex\data\EURUSD_M15.csv
+[2026-03-10 22:16:02,607] INFO data_collector: Loaded 33333 rows from 
+C:\Users\hardi\Downloads\quotex\data\EURUSD_H1.csv
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:968: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["pattern_score"] = ((raw_pattern + 3) / 6).clip(0, 1)  # scale -3..+3 to 
+0..1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:979: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_agreement"] = (2 * (agreement_raw - 0.5).abs()).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:982: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_composite"] = (
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1011: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["tf_rsi_agreement"] = 1.0 - (rsi_std / 50.0).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1018: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["efficiency_ratio"] = (net_change_10 / (path_length_10 + 1e-10)).clip(0, 
+1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1024: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["fractal_dimension"] = (log_range_std / (log_range_mean.abs() + 
+1e-10)).clip(0, 2)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1041: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["hurst_exponent"] = pd.Series(
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1048: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["high_freq_energy"] = ret_diff.rolling(20, min_periods=5).var().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1051: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["low_freq_energy"] = (smooth_ret.rolling(20, min_periods=5).var() /
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1060: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["buy_pressure_ratio"] = buy_vol.rolling(10, min_periods=1).sum() / 
+(total_vol_10 + 1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1066: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["aggressive_ratio"] = big_moves.rolling(20, 
+min_periods=5).mean().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1069: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["absorption_rate_5"] = df["wick_absorption"].rolling(5, 
+min_periods=1).mean()
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1076: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_persistence"] = trending.groupby(trend_group).cumcount() + 1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1079: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_transition_prob"] = 1.0 - ((df["adx"] - 25).abs() / 25).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1083: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volatility_of_volatility"] = atr_returns.rolling(20, 
+min_periods=5).std().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1088: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["inside_bar"] = ((h <= prev_h) & (l >= prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1089: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["outside_bar"] = ((h > prev_h) & (l < prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1099: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["three_bar_reversal"] = bull_reversal_3.astype(float) - 
+bear_reversal_3.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1110: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["morning_star_score"] = morning.astype(float) - evening.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1114: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["macd_histogram_accel"] = macd_hist.diff(1).fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1122: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["rsi_bollinger"] = ((rsi_vals - rsi_lower) / (rsi_upper - rsi_lower + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1127: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["stoch_rsi"] = ((rsi_vals - rsi_min_14) / (rsi_max_14 - rsi_min_14 + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1135: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volume_climax_score"] = (tv_spike & reversal_candle).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1140: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["cumulative_delta_slope"] = (cd - cd.shift(5)) / (cd.shift(5).abs() + 
+1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1151: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_sin"] = np.sin(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1152: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_cos"] = np.cos(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1164: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["minutes_to_session_end"] = (min_dist / 60.0).clip(0, 8)  # normalize to 
+hours
+[2026-03-10 22:16:10,168] INFO feature_engineering: Computed 153 features on 
+24790 rows.
+[2026-03-10 22:16:10,452] INFO feature_engineering: Triple Barrier target: 
+19592/24787 rows (79.0% labeled, TP=7410, SL=12182, tp=1.2xATR, sl=0.8xATR, 
+max_bars=3)
+   EURUSD: 19592 rows
+[2026-03-10 22:16:10,670] WARNING data_collector: No M1 data for GBPUSD, 
+skipping.
+[2026-03-10 22:16:11,095] INFO data_collector: Loaded 50000 rows from 
+C:\Users\hardi\Downloads\quotex\data\GBPUSD_M5.csv
+[2026-03-10 22:16:11,230] INFO data_collector: Loaded 16666 rows from 
+C:\Users\hardi\Downloads\quotex\data\GBPUSD_M15.csv
+[2026-03-10 22:16:11,363] INFO data_collector: Loaded 16666 rows from 
+C:\Users\hardi\Downloads\quotex\data\GBPUSD_H1.csv
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:943: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["same_candle_score"] = (sc_fresh * 0.4 + sc_body_q * 0.3 + sc_range_norm 
+* 0.3).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:960: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["crossover_staleness"] = ((mg_rank + sg_rank) / 2).clip(0, 1).values
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:968: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["pattern_score"] = ((raw_pattern + 3) / 6).clip(0, 1)  # scale -3..+3 to 
+0..1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:979: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_agreement"] = (2 * (agreement_raw - 0.5).abs()).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:982: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_composite"] = (
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1011: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["tf_rsi_agreement"] = 1.0 - (rsi_std / 50.0).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1018: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["efficiency_ratio"] = (net_change_10 / (path_length_10 + 1e-10)).clip(0, 
+1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1024: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["fractal_dimension"] = (log_range_std / (log_range_mean.abs() + 
+1e-10)).clip(0, 2)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1041: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["hurst_exponent"] = pd.Series(
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1048: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["high_freq_energy"] = ret_diff.rolling(20, min_periods=5).var().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1051: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["low_freq_energy"] = (smooth_ret.rolling(20, min_periods=5).var() /
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1060: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["buy_pressure_ratio"] = buy_vol.rolling(10, min_periods=1).sum() / 
+(total_vol_10 + 1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1066: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["aggressive_ratio"] = big_moves.rolling(20, 
+min_periods=5).mean().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1069: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["absorption_rate_5"] = df["wick_absorption"].rolling(5, 
+min_periods=1).mean()
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1076: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_persistence"] = trending.groupby(trend_group).cumcount() + 1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1079: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_transition_prob"] = 1.0 - ((df["adx"] - 25).abs() / 25).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1083: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volatility_of_volatility"] = atr_returns.rolling(20, 
+min_periods=5).std().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1088: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["inside_bar"] = ((h <= prev_h) & (l >= prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1089: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["outside_bar"] = ((h > prev_h) & (l < prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1099: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["three_bar_reversal"] = bull_reversal_3.astype(float) - 
+bear_reversal_3.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1110: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["morning_star_score"] = morning.astype(float) - evening.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1114: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["macd_histogram_accel"] = macd_hist.diff(1).fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1122: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["rsi_bollinger"] = ((rsi_vals - rsi_lower) / (rsi_upper - rsi_lower + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1127: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["stoch_rsi"] = ((rsi_vals - rsi_min_14) / (rsi_max_14 - rsi_min_14 + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1135: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volume_climax_score"] = (tv_spike & reversal_candle).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1140: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["cumulative_delta_slope"] = (cd - cd.shift(5)) / (cd.shift(5).abs() + 
+1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1151: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_sin"] = np.sin(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1152: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_cos"] = np.cos(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1164: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["minutes_to_session_end"] = (min_dist / 60.0).clip(0, 8)  # normalize to 
+hours
+[2026-03-10 22:16:18,570] INFO feature_engineering: Computed 153 features on 
+24790 rows.
+[2026-03-10 22:16:18,830] INFO feature_engineering: Triple Barrier target: 
+21277/24787 rows (85.8% labeled, TP=8365, SL=12912, tp=1.2xATR, sl=0.8xATR, 
+max_bars=3)
+   GBPUSD: 21277 rows
+[2026-03-10 22:16:19,052] WARNING data_collector: No M1 data for USDJPY, 
+skipping.
+[2026-03-10 22:16:19,461] INFO data_collector: Loaded 50000 rows from 
+C:\Users\hardi\Downloads\quotex\data\USDJPY_M5.csv
+[2026-03-10 22:16:19,604] INFO data_collector: Loaded 16666 rows from 
+C:\Users\hardi\Downloads\quotex\data\USDJPY_M15.csv
+[2026-03-10 22:16:19,752] INFO data_collector: Loaded 16666 rows from 
+C:\Users\hardi\Downloads\quotex\data\USDJPY_H1.csv
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:943: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["same_candle_score"] = (sc_fresh * 0.4 + sc_body_q * 0.3 + sc_range_norm 
+* 0.3).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:960: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["crossover_staleness"] = ((mg_rank + sg_rank) / 2).clip(0, 1).values
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:968: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["pattern_score"] = ((raw_pattern + 3) / 6).clip(0, 1)  # scale -3..+3 to 
+0..1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:979: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_agreement"] = (2 * (agreement_raw - 0.5).abs()).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:982: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_composite"] = (
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1011: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["tf_rsi_agreement"] = 1.0 - (rsi_std / 50.0).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1018: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["efficiency_ratio"] = (net_change_10 / (path_length_10 + 1e-10)).clip(0, 
+1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1024: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["fractal_dimension"] = (log_range_std / (log_range_mean.abs() + 
+1e-10)).clip(0, 2)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1041: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["hurst_exponent"] = pd.Series(
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1048: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["high_freq_energy"] = ret_diff.rolling(20, min_periods=5).var().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1051: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["low_freq_energy"] = (smooth_ret.rolling(20, min_periods=5).var() /
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1060: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["buy_pressure_ratio"] = buy_vol.rolling(10, min_periods=1).sum() / 
+(total_vol_10 + 1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1066: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["aggressive_ratio"] = big_moves.rolling(20, 
+min_periods=5).mean().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1069: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["absorption_rate_5"] = df["wick_absorption"].rolling(5, 
+min_periods=1).mean()
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1076: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_persistence"] = trending.groupby(trend_group).cumcount() + 1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1079: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_transition_prob"] = 1.0 - ((df["adx"] - 25).abs() / 25).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1083: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volatility_of_volatility"] = atr_returns.rolling(20, 
+min_periods=5).std().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1088: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["inside_bar"] = ((h <= prev_h) & (l >= prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1089: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["outside_bar"] = ((h > prev_h) & (l < prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1099: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["three_bar_reversal"] = bull_reversal_3.astype(float) - 
+bear_reversal_3.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1110: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["morning_star_score"] = morning.astype(float) - evening.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1114: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["macd_histogram_accel"] = macd_hist.diff(1).fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1122: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["rsi_bollinger"] = ((rsi_vals - rsi_lower) / (rsi_upper - rsi_lower + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1127: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["stoch_rsi"] = ((rsi_vals - rsi_min_14) / (rsi_max_14 - rsi_min_14 + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1135: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volume_climax_score"] = (tv_spike & reversal_candle).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1140: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["cumulative_delta_slope"] = (cd - cd.shift(5)) / (cd.shift(5).abs() + 
+1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1151: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_sin"] = np.sin(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1152: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_cos"] = np.cos(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1164: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["minutes_to_session_end"] = (min_dist / 60.0).clip(0, 8)  # normalize to 
+hours
+[2026-03-10 22:16:26,930] INFO feature_engineering: Computed 153 features on 
+24790 rows.
+[2026-03-10 22:16:27,145] INFO feature_engineering: Triple Barrier target: 
+24787/24787 rows (100.0% labeled, TP=23201, SL=1586, tp=1.2xATR, sl=0.8xATR, 
+max_bars=3)
+   USDJPY: 24787 rows
+[2026-03-10 22:16:27,363] WARNING data_collector: No M1 data for AUDUSD, 
+skipping.
+[2026-03-10 22:16:27,731] INFO data_collector: Loaded 50000 rows from 
+C:\Users\hardi\Downloads\quotex\data\AUDUSD_M5.csv
+[2026-03-10 22:16:27,854] INFO data_collector: Loaded 16666 rows from 
+C:\Users\hardi\Downloads\quotex\data\AUDUSD_M15.csv
+[2026-03-10 22:16:27,983] INFO data_collector: Loaded 16666 rows from 
+C:\Users\hardi\Downloads\quotex\data\AUDUSD_H1.csv
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:943: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["same_candle_score"] = (sc_fresh * 0.4 + sc_body_q * 0.3 + sc_range_norm 
+* 0.3).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:960: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["crossover_staleness"] = ((mg_rank + sg_rank) / 2).clip(0, 1).values
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:968: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["pattern_score"] = ((raw_pattern + 3) / 6).clip(0, 1)  # scale -3..+3 to 
+0..1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:979: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_agreement"] = (2 * (agreement_raw - 0.5).abs()).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:982: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_composite"] = (
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1011: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["tf_rsi_agreement"] = 1.0 - (rsi_std / 50.0).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1018: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["efficiency_ratio"] = (net_change_10 / (path_length_10 + 1e-10)).clip(0, 
+1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1024: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["fractal_dimension"] = (log_range_std / (log_range_mean.abs() + 
+1e-10)).clip(0, 2)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1041: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["hurst_exponent"] = pd.Series(
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1048: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["high_freq_energy"] = ret_diff.rolling(20, min_periods=5).var().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1051: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["low_freq_energy"] = (smooth_ret.rolling(20, min_periods=5).var() /
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1060: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["buy_pressure_ratio"] = buy_vol.rolling(10, min_periods=1).sum() / 
+(total_vol_10 + 1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1066: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["aggressive_ratio"] = big_moves.rolling(20, 
+min_periods=5).mean().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1069: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["absorption_rate_5"] = df["wick_absorption"].rolling(5, 
+min_periods=1).mean()
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1076: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_persistence"] = trending.groupby(trend_group).cumcount() + 1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1079: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_transition_prob"] = 1.0 - ((df["adx"] - 25).abs() / 25).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1083: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volatility_of_volatility"] = atr_returns.rolling(20, 
+min_periods=5).std().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1088: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["inside_bar"] = ((h <= prev_h) & (l >= prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1089: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["outside_bar"] = ((h > prev_h) & (l < prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1099: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["three_bar_reversal"] = bull_reversal_3.astype(float) - 
+bear_reversal_3.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1110: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["morning_star_score"] = morning.astype(float) - evening.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1114: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["macd_histogram_accel"] = macd_hist.diff(1).fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1122: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["rsi_bollinger"] = ((rsi_vals - rsi_lower) / (rsi_upper - rsi_lower + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1127: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["stoch_rsi"] = ((rsi_vals - rsi_min_14) / (rsi_max_14 - rsi_min_14 + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1135: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volume_climax_score"] = (tv_spike & reversal_candle).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1140: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["cumulative_delta_slope"] = (cd - cd.shift(5)) / (cd.shift(5).abs() + 
+1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1151: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_sin"] = np.sin(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1152: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_cos"] = np.cos(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1164: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["minutes_to_session_end"] = (min_dist / 60.0).clip(0, 8)  # normalize to 
+hours
+[2026-03-10 22:16:35,618] INFO feature_engineering: Computed 153 features on 
+24790 rows.
+[2026-03-10 22:16:35,895] INFO feature_engineering: Triple Barrier target: 
+9596/24787 rows (38.7% labeled, TP=2821, SL=6775, tp=1.2xATR, sl=0.8xATR, 
+max_bars=3)
+   AUDUSD: 9596 rows
+[2026-03-10 22:16:36,084] WARNING data_collector: No M1 data for USDCAD, 
+skipping.
+[2026-03-10 22:16:36,515] INFO data_collector: Loaded 50000 rows from 
+C:\Users\hardi\Downloads\quotex\data\USDCAD_M5.csv
+[2026-03-10 22:16:36,665] INFO data_collector: Loaded 16666 rows from 
+C:\Users\hardi\Downloads\quotex\data\USDCAD_M15.csv
+[2026-03-10 22:16:36,821] INFO data_collector: Loaded 16666 rows from 
+C:\Users\hardi\Downloads\quotex\data\USDCAD_H1.csv
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:943: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["same_candle_score"] = (sc_fresh * 0.4 + sc_body_q * 0.3 + sc_range_norm 
+* 0.3).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:960: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["crossover_staleness"] = ((mg_rank + sg_rank) / 2).clip(0, 1).values
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:968: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["pattern_score"] = ((raw_pattern + 3) / 6).clip(0, 1)  # scale -3..+3 to 
+0..1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:979: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_agreement"] = (2 * (agreement_raw - 0.5).abs()).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:982: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_composite"] = (
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1011: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["tf_rsi_agreement"] = 1.0 - (rsi_std / 50.0).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1018: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["efficiency_ratio"] = (net_change_10 / (path_length_10 + 1e-10)).clip(0, 
+1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1024: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["fractal_dimension"] = (log_range_std / (log_range_mean.abs() + 
+1e-10)).clip(0, 2)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1041: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["hurst_exponent"] = pd.Series(
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1048: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["high_freq_energy"] = ret_diff.rolling(20, min_periods=5).var().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1051: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["low_freq_energy"] = (smooth_ret.rolling(20, min_periods=5).var() /
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1060: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["buy_pressure_ratio"] = buy_vol.rolling(10, min_periods=1).sum() / 
+(total_vol_10 + 1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1066: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["aggressive_ratio"] = big_moves.rolling(20, 
+min_periods=5).mean().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1069: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["absorption_rate_5"] = df["wick_absorption"].rolling(5, 
+min_periods=1).mean()
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1076: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_persistence"] = trending.groupby(trend_group).cumcount() + 1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1079: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_transition_prob"] = 1.0 - ((df["adx"] - 25).abs() / 25).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1083: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volatility_of_volatility"] = atr_returns.rolling(20, 
+min_periods=5).std().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1088: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["inside_bar"] = ((h <= prev_h) & (l >= prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1089: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["outside_bar"] = ((h > prev_h) & (l < prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1099: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["three_bar_reversal"] = bull_reversal_3.astype(float) - 
+bear_reversal_3.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1110: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["morning_star_score"] = morning.astype(float) - evening.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1114: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["macd_histogram_accel"] = macd_hist.diff(1).fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1122: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["rsi_bollinger"] = ((rsi_vals - rsi_lower) / (rsi_upper - rsi_lower + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1127: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["stoch_rsi"] = ((rsi_vals - rsi_min_14) / (rsi_max_14 - rsi_min_14 + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1135: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volume_climax_score"] = (tv_spike & reversal_candle).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1140: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["cumulative_delta_slope"] = (cd - cd.shift(5)) / (cd.shift(5).abs() + 
+1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1151: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_sin"] = np.sin(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1152: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_cos"] = np.cos(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1164: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["minutes_to_session_end"] = (min_dist / 60.0).clip(0, 8)  # normalize to 
+hours
+[2026-03-10 22:16:44,466] INFO feature_engineering: Computed 153 features on 
+24790 rows.
+[2026-03-10 22:16:44,733] INFO feature_engineering: Triple Barrier target: 
+21972/24787 rows (88.6% labeled, TP=8793, SL=13179, tp=1.2xATR, sl=0.8xATR, 
+max_bars=3)
+   USDCAD: 21972 rows
+[2026-03-10 22:16:44,967] WARNING data_collector: No M1 data for USDCHF, 
+skipping.
+[2026-03-10 22:16:45,385] INFO data_collector: Loaded 50000 rows from 
+C:\Users\hardi\Downloads\quotex\data\USDCHF_M5.csv
+[2026-03-10 22:16:45,529] INFO data_collector: Loaded 16666 rows from 
+C:\Users\hardi\Downloads\quotex\data\USDCHF_M15.csv
+[2026-03-10 22:16:45,673] INFO data_collector: Loaded 16666 rows from 
+C:\Users\hardi\Downloads\quotex\data\USDCHF_H1.csv
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:943: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["same_candle_score"] = (sc_fresh * 0.4 + sc_body_q * 0.3 + sc_range_norm 
+* 0.3).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:960: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["crossover_staleness"] = ((mg_rank + sg_rank) / 2).clip(0, 1).values
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:968: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["pattern_score"] = ((raw_pattern + 3) / 6).clip(0, 1)  # scale -3..+3 to 
+0..1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:979: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_agreement"] = (2 * (agreement_raw - 0.5).abs()).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:982: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_composite"] = (
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1011: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["tf_rsi_agreement"] = 1.0 - (rsi_std / 50.0).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1018: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["efficiency_ratio"] = (net_change_10 / (path_length_10 + 1e-10)).clip(0, 
+1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1024: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["fractal_dimension"] = (log_range_std / (log_range_mean.abs() + 
+1e-10)).clip(0, 2)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1041: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["hurst_exponent"] = pd.Series(
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1048: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["high_freq_energy"] = ret_diff.rolling(20, min_periods=5).var().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1051: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["low_freq_energy"] = (smooth_ret.rolling(20, min_periods=5).var() /
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1060: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["buy_pressure_ratio"] = buy_vol.rolling(10, min_periods=1).sum() / 
+(total_vol_10 + 1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1066: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["aggressive_ratio"] = big_moves.rolling(20, 
+min_periods=5).mean().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1069: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["absorption_rate_5"] = df["wick_absorption"].rolling(5, 
+min_periods=1).mean()
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1076: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_persistence"] = trending.groupby(trend_group).cumcount() + 1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1079: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_transition_prob"] = 1.0 - ((df["adx"] - 25).abs() / 25).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1083: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volatility_of_volatility"] = atr_returns.rolling(20, 
+min_periods=5).std().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1088: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["inside_bar"] = ((h <= prev_h) & (l >= prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1089: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["outside_bar"] = ((h > prev_h) & (l < prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1099: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["three_bar_reversal"] = bull_reversal_3.astype(float) - 
+bear_reversal_3.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1110: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["morning_star_score"] = morning.astype(float) - evening.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1114: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["macd_histogram_accel"] = macd_hist.diff(1).fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1122: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["rsi_bollinger"] = ((rsi_vals - rsi_lower) / (rsi_upper - rsi_lower + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1127: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["stoch_rsi"] = ((rsi_vals - rsi_min_14) / (rsi_max_14 - rsi_min_14 + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1135: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volume_climax_score"] = (tv_spike & reversal_candle).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1140: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["cumulative_delta_slope"] = (cd - cd.shift(5)) / (cd.shift(5).abs() + 
+1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1151: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_sin"] = np.sin(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1152: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_cos"] = np.cos(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1164: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["minutes_to_session_end"] = (min_dist / 60.0).clip(0, 8)  # normalize to 
+hours
+[2026-03-10 22:16:53,293] INFO feature_engineering: Computed 153 features on 
+24790 rows.
+[2026-03-10 22:16:53,570] INFO feature_engineering: Triple Barrier target: 
+12785/24787 rows (51.6% labeled, TP=4191, SL=8594, tp=1.2xATR, sl=0.8xATR, 
+max_bars=3)
+   USDCHF: 12785 rows
+[2026-03-10 22:16:53,772] WARNING data_collector: No M1 data for GBPJPY, 
+skipping.
+[2026-03-10 22:16:54,690] INFO data_collector: Loaded 99999 rows from 
+C:\Users\hardi\Downloads\quotex\data\GBPJPY_M5.csv
+[2026-03-10 22:16:54,965] INFO data_collector: Loaded 33333 rows from 
+C:\Users\hardi\Downloads\quotex\data\GBPJPY_M15.csv
+[2026-03-10 22:16:55,330] INFO data_collector: Loaded 33333 rows from 
+C:\Users\hardi\Downloads\quotex\data\GBPJPY_H1.csv
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:943: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["same_candle_score"] = (sc_fresh * 0.4 + sc_body_q * 0.3 + sc_range_norm 
+* 0.3).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:960: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["crossover_staleness"] = ((mg_rank + sg_rank) / 2).clip(0, 1).values
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:968: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["pattern_score"] = ((raw_pattern + 3) / 6).clip(0, 1)  # scale -3..+3 to 
+0..1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:979: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_agreement"] = (2 * (agreement_raw - 0.5).abs()).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:982: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_composite"] = (
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1011: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["tf_rsi_agreement"] = 1.0 - (rsi_std / 50.0).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1018: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["efficiency_ratio"] = (net_change_10 / (path_length_10 + 1e-10)).clip(0, 
+1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1024: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["fractal_dimension"] = (log_range_std / (log_range_mean.abs() + 
+1e-10)).clip(0, 2)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1041: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["hurst_exponent"] = pd.Series(
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1048: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["high_freq_energy"] = ret_diff.rolling(20, min_periods=5).var().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1051: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["low_freq_energy"] = (smooth_ret.rolling(20, min_periods=5).var() /
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1060: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["buy_pressure_ratio"] = buy_vol.rolling(10, min_periods=1).sum() / 
+(total_vol_10 + 1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1066: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["aggressive_ratio"] = big_moves.rolling(20, 
+min_periods=5).mean().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1069: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["absorption_rate_5"] = df["wick_absorption"].rolling(5, 
+min_periods=1).mean()
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1076: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_persistence"] = trending.groupby(trend_group).cumcount() + 1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1079: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_transition_prob"] = 1.0 - ((df["adx"] - 25).abs() / 25).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1083: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volatility_of_volatility"] = atr_returns.rolling(20, 
+min_periods=5).std().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1088: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["inside_bar"] = ((h <= prev_h) & (l >= prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1089: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["outside_bar"] = ((h > prev_h) & (l < prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1099: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["three_bar_reversal"] = bull_reversal_3.astype(float) - 
+bear_reversal_3.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1110: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["morning_star_score"] = morning.astype(float) - evening.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1114: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["macd_histogram_accel"] = macd_hist.diff(1).fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1122: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["rsi_bollinger"] = ((rsi_vals - rsi_lower) / (rsi_upper - rsi_lower + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1127: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["stoch_rsi"] = ((rsi_vals - rsi_min_14) / (rsi_max_14 - rsi_min_14 + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1135: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volume_climax_score"] = (tv_spike & reversal_candle).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1140: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["cumulative_delta_slope"] = (cd - cd.shift(5)) / (cd.shift(5).abs() + 
+1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1151: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_sin"] = np.sin(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1152: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_cos"] = np.cos(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1164: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["minutes_to_session_end"] = (min_dist / 60.0).clip(0, 8)  # normalize to 
+hours
+[2026-03-10 22:17:02,360] INFO feature_engineering: Computed 153 features on 
+24790 rows.
+[2026-03-10 22:17:02,584] INFO feature_engineering: Triple Barrier target: 
+24787/24787 rows (100.0% labeled, TP=23985, SL=802, tp=1.2xATR, sl=0.8xATR, 
+max_bars=3)
+   GBPJPY: 24787 rows
+[2026-03-10 22:17:02,813] WARNING data_collector: No M1 data for XAUUSD, 
+skipping.
+[2026-03-10 22:17:03,670] INFO data_collector: Loaded 99999 rows from 
+C:\Users\hardi\Downloads\quotex\data\XAUUSD_M5.csv
+[2026-03-10 22:17:03,942] INFO data_collector: Loaded 33333 rows from 
+C:\Users\hardi\Downloads\quotex\data\XAUUSD_M15.csv
+[2026-03-10 22:17:04,210] INFO data_collector: Loaded 33333 rows from 
+C:\Users\hardi\Downloads\quotex\data\XAUUSD_H1.csv
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:943: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["same_candle_score"] = (sc_fresh * 0.4 + sc_body_q * 0.3 + sc_range_norm 
+* 0.3).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:960: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["crossover_staleness"] = ((mg_rank + sg_rank) / 2).clip(0, 1).values
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:968: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["pattern_score"] = ((raw_pattern + 3) / 6).clip(0, 1)  # scale -3..+3 to 
+0..1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:979: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_agreement"] = (2 * (agreement_raw - 0.5).abs()).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:982: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_composite"] = (
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1011: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["tf_rsi_agreement"] = 1.0 - (rsi_std / 50.0).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1018: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["efficiency_ratio"] = (net_change_10 / (path_length_10 + 1e-10)).clip(0, 
+1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1024: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["fractal_dimension"] = (log_range_std / (log_range_mean.abs() + 
+1e-10)).clip(0, 2)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1041: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["hurst_exponent"] = pd.Series(
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1048: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["high_freq_energy"] = ret_diff.rolling(20, min_periods=5).var().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1051: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["low_freq_energy"] = (smooth_ret.rolling(20, min_periods=5).var() /
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1060: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["buy_pressure_ratio"] = buy_vol.rolling(10, min_periods=1).sum() / 
+(total_vol_10 + 1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1066: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["aggressive_ratio"] = big_moves.rolling(20, 
+min_periods=5).mean().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1069: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["absorption_rate_5"] = df["wick_absorption"].rolling(5, 
+min_periods=1).mean()
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1076: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_persistence"] = trending.groupby(trend_group).cumcount() + 1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1079: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_transition_prob"] = 1.0 - ((df["adx"] - 25).abs() / 25).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1083: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volatility_of_volatility"] = atr_returns.rolling(20, 
+min_periods=5).std().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1088: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["inside_bar"] = ((h <= prev_h) & (l >= prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1089: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["outside_bar"] = ((h > prev_h) & (l < prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1099: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["three_bar_reversal"] = bull_reversal_3.astype(float) - 
+bear_reversal_3.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1110: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["morning_star_score"] = morning.astype(float) - evening.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1114: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["macd_histogram_accel"] = macd_hist.diff(1).fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1122: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["rsi_bollinger"] = ((rsi_vals - rsi_lower) / (rsi_upper - rsi_lower + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1127: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["stoch_rsi"] = ((rsi_vals - rsi_min_14) / (rsi_max_14 - rsi_min_14 + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1135: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volume_climax_score"] = (tv_spike & reversal_candle).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1140: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["cumulative_delta_slope"] = (cd - cd.shift(5)) / (cd.shift(5).abs() + 
+1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1151: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_sin"] = np.sin(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1152: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_cos"] = np.cos(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1164: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["minutes_to_session_end"] = (min_dist / 60.0).clip(0, 8)  # normalize to 
+hours
+[2026-03-10 22:17:11,509] INFO feature_engineering: Computed 153 features on 
+24790 rows.
+[2026-03-10 22:17:11,753] INFO feature_engineering: Triple Barrier target: 
+24781/24787 rows (100.0% labeled, TP=24123, SL=658, tp=1.2xATR, sl=0.8xATR, 
+max_bars=3)
+   XAUUSD: 24781 rows
+[2026-03-10 22:17:11,980] WARNING data_collector: No M1 data for NZDUSD, 
+skipping.
+[2026-03-10 22:17:12,871] INFO data_collector: Loaded 99999 rows from 
+C:\Users\hardi\Downloads\quotex\data\NZDUSD_M5.csv
+[2026-03-10 22:17:13,133] INFO data_collector: Loaded 33333 rows from 
+C:\Users\hardi\Downloads\quotex\data\NZDUSD_M15.csv
+[2026-03-10 22:17:13,399] INFO data_collector: Loaded 33333 rows from 
+C:\Users\hardi\Downloads\quotex\data\NZDUSD_H1.csv
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:943: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["same_candle_score"] = (sc_fresh * 0.4 + sc_body_q * 0.3 + sc_range_norm 
+* 0.3).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:960: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["crossover_staleness"] = ((mg_rank + sg_rank) / 2).clip(0, 1).values
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:968: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["pattern_score"] = ((raw_pattern + 3) / 6).clip(0, 1)  # scale -3..+3 to 
+0..1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:979: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_agreement"] = (2 * (agreement_raw - 0.5).abs()).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:982: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["strategy_composite"] = (
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1011: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["tf_rsi_agreement"] = 1.0 - (rsi_std / 50.0).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1018: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["efficiency_ratio"] = (net_change_10 / (path_length_10 + 1e-10)).clip(0, 
+1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1024: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["fractal_dimension"] = (log_range_std / (log_range_mean.abs() + 
+1e-10)).clip(0, 2)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1041: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["hurst_exponent"] = pd.Series(
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1048: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["high_freq_energy"] = ret_diff.rolling(20, min_periods=5).var().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1051: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["low_freq_energy"] = (smooth_ret.rolling(20, min_periods=5).var() /
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1060: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["buy_pressure_ratio"] = buy_vol.rolling(10, min_periods=1).sum() / 
+(total_vol_10 + 1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1066: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["aggressive_ratio"] = big_moves.rolling(20, 
+min_periods=5).mean().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1069: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["absorption_rate_5"] = df["wick_absorption"].rolling(5, 
+min_periods=1).mean()
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1076: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_persistence"] = trending.groupby(trend_group).cumcount() + 1
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1079: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["regime_transition_prob"] = 1.0 - ((df["adx"] - 25).abs() / 25).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1083: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volatility_of_volatility"] = atr_returns.rolling(20, 
+min_periods=5).std().fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1088: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["inside_bar"] = ((h <= prev_h) & (l >= prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1089: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["outside_bar"] = ((h > prev_h) & (l < prev_l)).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1099: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["three_bar_reversal"] = bull_reversal_3.astype(float) - 
+bear_reversal_3.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1110: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["morning_star_score"] = morning.astype(float) - evening.astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1114: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["macd_histogram_accel"] = macd_hist.diff(1).fillna(0)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1122: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["rsi_bollinger"] = ((rsi_vals - rsi_lower) / (rsi_upper - rsi_lower + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1127: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["stoch_rsi"] = ((rsi_vals - rsi_min_14) / (rsi_max_14 - rsi_min_14 + 
+1e-10)).clip(0, 1)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1135: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["volume_climax_score"] = (tv_spike & reversal_candle).astype(float)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1140: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["cumulative_delta_slope"] = (cd - cd.shift(5)) / (cd.shift(5).abs() + 
+1e-10)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1151: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_sin"] = np.sin(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1152: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["day_of_week_cos"] = np.cos(2 * np.pi * dow / 5)
+C:\Users\hardi\Downloads\quotex\feature_engineering.py:1164: 
+PerformanceWarning: DataFrame is highly fragmented.  This is usually the 
+result of calling `frame.insert` many times, which has poor performance.  
+Consider joining all columns at once using pd.concat(axis=1) instead. To get a 
+de-fragmented frame, use `newframe = frame.copy()`
+  df["minutes_to_session_end"] = (min_dist / 60.0).clip(0, 8)  # normalize to 
+hours
+[2026-03-10 22:17:20,499] INFO feature_engineering: Computed 153 features on 
+24790 rows.
+[2026-03-10 22:17:20,741] INFO feature_engineering: Triple Barrier target: 
+7569/24787 rows (30.5% labeled, TP=2021, SL=5548, tp=1.2xATR, sl=0.8xATR, 
+max_bars=3)
+   NZDUSD: 7569 rows
+   Combined: 167146 rows from 9 symbols
+C:\Users\hardi\AppData\Local\Programs\Python\Python311\Lib\site-packages\sklear
+n\utils\validation.py:2691: UserWarning: X does not have valid feature names, 
+but HistGradientBoostingClassifier was fitted with feature names
+  warnings.warn(
+C:\Users\hardi\AppData\Local\Programs\Python\Python311\Lib\site-packages\sklear
+n\utils\validation.py:2691: UserWarning: X does not have valid feature names, 
+but HistGradientBoostingClassifier was fitted with feature names
+  warnings.warn(
+C:\Users\hardi\AppData\Local\Programs\Python\Python311\Lib\site-packages\sklear
+n\utils\validation.py:2691: UserWarning: X does not have valid feature names, 
+but HistGradientBoostingClassifier was fitted with feature names
+  warnings.warn(
+   Meta probabilities from sigmoid-calibrated model.
+
+>> Building weight training data (111430 rows)...
+   X shape: (111430, 4)
+   Correct: 87404 (78.4%)
+
+==================================================
+  Weight Learner ù 5 folds
+==================================================
+
+  Fold 1: Acc=0.8210 AUC=0.8275
+  Fold 2: Acc=0.8113 AUC=0.8256
+  Fold 3: Acc=0.8161 AUC=0.8300
+  Fold 4: Acc=0.8035 AUC=0.8195
+  Fold 5: Acc=0.8262 AUC=0.8451
+
+  Avg: Acc=0.8156 AUC=0.8295
+
+>> Training final weight model...
+  Coefficients: {'primary_strength': np.float64(0.8419637617780472), 'meta_reliability': np.float64(5.344750699461499), 'regime_strength': np.float64(0.25306946430020677), 'uncertainty': np.float64(-2.322845195511285)}
+  Intercept: -0.9861
+  [OK] Uncertainty coefficient is negative (correct)
+
+>> Saved weight model -> C:\Users\hardi\Downloads\quotex\models\weight_model.pkl
+
+>> Done. Next: python backtest.py --symbol EURUSD

@@ -1,12 +1,20 @@
 """
-Train Model — v15 Production leakage-free pipeline.
+Train Model — v16 Accuracy-focused pipeline.
 
 Architecture:
-  1. Load data from 9 symbols (900K+ rows)
-  2. Compute 155+ features (125 v14 + 30 v15 new)
-  3. Train 8-9 diverse tree ensemble + GRU sequence model
+  1. Load data from 9 symbols (up to 225K rows)
+  2. Compute 155+ features + MI-based feature selection
+  3. Train 8-9 diverse tree ensemble + Attention-GRU
   4. Calibrate with isotonic regression
-  5. Generate OOF predictions for meta/weight training
+  5. Generate OOF predictions + train StackingCombiner
+  6. Label smoothing + focal weighting for robust training
+
+v16 upgrades:
+  - MI feature selection (mutual-info + correlation dedup)
+  - StackingCombiner: learned blend via LogisticRegressionCV on OOF
+  - 25K rows per symbol for richer training data
+  - 5-fold purged OOF with 80-bar embargo
+  - Label smoothing (alpha=0.03)
 
 Usage:
     python train_model.py --multi-symbol
@@ -44,6 +52,7 @@ from config import (
     ENSEMBLE_SEEDS,
     TRIPLE_BARRIER_ENABLED,
     LOG_LEVEL, LOG_FORMAT,
+    STACKING_COMBINER_PATH,
 )
 from data_collector import load_csv, load_multi_tf
 from feature_engineering import (
@@ -64,9 +73,9 @@ def _load_multi_symbol_data(symbols):
             df = mtf.get("M5")
             if df is None:
                 df = load_csv(sym, "M5")
-            # Limit rows per symbol to manage memory (last 15K most recent)
-            if len(df) > 15000:
-                df = df.iloc[-15000:].reset_index(drop=True)
+            # Limit rows per symbol to manage memory (last 25K most recent)
+            if len(df) > 25000:
+                df = df.iloc[-25000:].reset_index(drop=True)
             m15, h1, m1 = mtf.get("M15"), mtf.get("H1"), mtf.get("M1")
             df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
             # Free HTF memory early
@@ -287,6 +296,25 @@ def train(symbol, use_selected_features=True, multi_symbol=False):
     except Exception as e:
         print(f">> Warning: fingerprint save failed: {e}")
 
+    # =========================================================================
+    # Step 3b: Train StackingCombiner on OOF predictions (v16)
+    # =========================================================================
+    print(f"\n>> Training StackingCombiner on OOF predictions...")
+    try:
+        from calibration import StackingCombiner
+        model_specs = get_primary_model_specs()
+        stacker = StackingCombiner()
+        stacker.model_names = [spec['name'] for spec in model_specs]
+        stacker.fit(oof_all_valid, oof_actual)
+        joblib.dump(stacker, STACKING_COMBINER_PATH)
+        # Evaluate stacker on OOF
+        stacker_proba = stacker.predict_proba(oof_all_valid)
+        stacker_acc = ((stacker_proba >= 0.5).astype(int) == oof_actual).mean()
+        print(f"   StackingCombiner OOF accuracy: {stacker_acc:.4f}")
+        print(f"   Saved -> {STACKING_COMBINER_PATH}")
+    except Exception as e:
+        print(f"   StackingCombiner training failed: {e}")
+
     # OOF data for meta + weight training
     oof_indices = np.where(oof_mask)[0]
     oof_data = {
@@ -306,9 +334,9 @@ def train(symbol, use_selected_features=True, multi_symbol=False):
     print(f"   OOF data includes per-seed probabilities for variance-based uncertainty")
 
     # =========================================================================
-    # Step 4: Train GRU sequence model (v15)
+    # Step 4: Train Attention-GRU sequence model (v16)
     # =========================================================================
-    print(f"\n>> Training GRU sequence model (v15)...")
+    print(f"\n>> Training Attention-GRU sequence model (v16)...")
     try:
         from lstm_model import train_lstm, SEQ_LEN
         lstm_result = train_lstm(

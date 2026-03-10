@@ -91,6 +91,7 @@ _meta_features = None
 _weight_model = None
 _confidence_thresholds = None  # Phase 3: learned per-regime thresholds
 _lstm_bundle = None  # v15: GRU sequence model
+_stacking_combiner = None  # v16: learned ensemble combiner
 _prediction_history = []
 _direction_history = []
 _online_learner = OnlineLearner(n_features=14, learning_rate=0.005)
@@ -135,6 +136,7 @@ def reload_models():
     """Force reload models from disk (called after retrain completes)."""
     global _ensemble, _primary_features, _meta_model
     global _meta_features, _weight_model, _confidence_thresholds, _lstm_bundle
+    global _stacking_combiner
     with _model_lock:
         _ensemble = None
         _primary_features = None
@@ -143,6 +145,7 @@ def reload_models():
         _weight_model = None
         _confidence_thresholds = None
         _lstm_bundle = None
+        _stacking_combiner = None
     load_models()
     log.info("Models reloaded from disk.")
 
@@ -150,7 +153,7 @@ def reload_models():
 def load_models():
     global _ensemble, _primary_features, _meta_model, _meta_calibrator
     global _meta_features, _weight_model, _confidence_thresholds
-    global _lstm_bundle
+    global _lstm_bundle, _stacking_combiner
 
     with _model_lock:
         if _ensemble is None:
@@ -175,6 +178,19 @@ def load_models():
             except Exception as e:
                 _lstm_bundle = None
                 log.info("LSTM load skipped: %s", e)
+
+            # v16: Load StackingCombiner
+            try:
+                from config import STACKING_COMBINER_PATH
+                if os.path.exists(STACKING_COMBINER_PATH):
+                    _stacking_combiner = joblib.load(STACKING_COMBINER_PATH)
+                    log.info("StackingCombiner loaded (v16 learned blend).")
+                else:
+                    _stacking_combiner = None
+                    log.info("StackingCombiner not found — using mean blend.")
+            except Exception as e:
+                _stacking_combiner = None
+                log.info("StackingCombiner load skipped: %s", e)
 
             # Feature fingerprint parity check
             try:
@@ -477,7 +493,17 @@ def predict(df, regime):
             except Exception as e:
                 log.debug("LSTM predict skipped: %s", e)
 
-        green_p = float(all_probs.mean())
+        # v16: StackingCombiner learned blend (fallback to mean)
+        if _stacking_combiner is not None:
+            try:
+                # Tree model probs only (exclude LSTM) for stacking combiner
+                tree_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
+                green_p = float(_stacking_combiner.predict_proba(tree_probs.reshape(1, -1)))
+            except Exception as e:
+                log.debug("StackingCombiner fallback to mean: %s", e)
+                green_p = float(all_probs.mean())
+        else:
+            green_p = float(all_probs.mean())
         red_p = 1.0 - green_p
         variance = float(all_probs.var())
         disagreement = float(all_probs.max() - all_probs.min())

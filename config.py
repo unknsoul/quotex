@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Central configuration - QUOTEX LORD v15 Production Engine.
+"""Central configuration - QUOTEX LORD v16 Accuracy Engine.
 
-v15 upgrades:
-  - 9 training symbols (added GBPJPY, XAUUSD, NZDUSD) — 900K+ rows
-  - GRU deep learning model as 8th/9th ensemble member
-  - 30+ new features (cross-pair, fractal, wavelet energy, microstructure v2)
-  - Walk-forward training with purged embargo
-  - Session-aware ensemble weight optimization
-  - Multi-timeframe voting at prediction time
-  - Dynamic self-correcting confidence thresholds
-  - Upgraded meta model with sequence features
-  - Improved calibration with temperature scaling
+v16 upgrades:
+  - Learned Stacking Combiner (replaces simple averaging of ensemble)
+  - Attention-GRU deep learning (temporal self-attention over 30-bar window)
+  - Mutual Information feature selection (removes noisy/correlated features)
+  - Stronger regularization + more OOF splits for cleaner signal
+  - Tighter triple barrier labels (1.2x TP / 0.8x SL / 3 bars)
+  - Focal loss weighting (hard-example mining)
+  - Label smoothing (reduces overfit to noisy binary labels)
+  - Larger per-symbol training window (25K rows)
+  - 80-bar purge embargo for zero leakage
+  - 5-fold internal OOF for richer meta-model training
 """
 
 import os
@@ -32,6 +33,7 @@ CHART_DIR = os.path.join(BASE_DIR, "charts")
 MODEL_PATH = os.path.join(MODEL_DIR, "primary_model.pkl")
 FEATURE_LIST_PATH = os.path.join(MODEL_DIR, "primary_features.pkl")
 ENSEMBLE_MODEL_PATH = os.path.join(MODEL_DIR, "ensemble_models.pkl")
+STACKING_COMBINER_PATH = os.path.join(MODEL_DIR, "stacking_combiner.pkl")  # v16
 META_MODEL_PATH = os.path.join(MODEL_DIR, "meta_model.pkl")
 META_FEATURE_LIST_PATH = os.path.join(MODEL_DIR, "meta_features.pkl")
 OOF_PREDICTIONS_PATH = os.path.join(MODEL_DIR, "oof_predictions.pkl")
@@ -94,9 +96,9 @@ TARGET_ATR_THRESHOLD = 0.3  # only train on moves > 0.3 * ATR
 # --- Target Generation (Phase 10: Master Architecture) ----------------------
 TARGET_LOOKAHEAD = 3        # Predict smoothed 3 candles
 TRIPLE_BARRIER_ENABLED = True
-TRIPLE_BARRIER_TP = 1.5   # Take Profit = 1.5 × ATR
-TRIPLE_BARRIER_SL = 1.0   # Stop Loss  = 1.0 × ATR (asymmetric: tighter SL)
-TRIPLE_BARRIER_MAX_BARS = 4  # max 4 candles (20 min at M5)
+TRIPLE_BARRIER_TP = 1.2   # v16: tighter TP = cleaner labels (was 1.5)
+TRIPLE_BARRIER_SL = 0.8   # v16: tighter SL = cleaner labels (was 1.0)
+TRIPLE_BARRIER_MAX_BARS = 3  # v16: 3 bars max = less noise (was 4)
 
 # --- Regime Detection --------------------------------------------------------
 ADX_TRENDING_THRESHOLD = 25
@@ -163,24 +165,24 @@ ENSEMBLE_SEEDS = [42, 123, 456, 789, 1024, 2048, 4096, 8192, 16384]  # v15: 9 se
 ENSEMBLE_SIZE = len(ENSEMBLE_SEEDS)
 
 # --- XGBoost Primary Hyperparams (Optuna Phase 9) ---------------------------
-# --- v15: Optimized for 900K+ rows, deeper regularization
-XGB_N_ESTIMATORS = 600
+# --- v16: Stronger regularization, slower LR with more trees
+XGB_N_ESTIMATORS = 800
 XGB_MAX_DEPTH = 6
-XGB_LEARNING_RATE = 0.003
-XGB_SUBSAMPLE = 0.70
-XGB_COLSAMPLE_BYTREE = 0.65
-XGB_MIN_CHILD_WEIGHT = 25
-XGB_GAMMA = 4.0
-XGB_REG_ALPHA = 1.0
-XGB_REG_LAMBDA = 3.0
+XGB_LEARNING_RATE = 0.002
+XGB_SUBSAMPLE = 0.68
+XGB_COLSAMPLE_BYTREE = 0.60
+XGB_MIN_CHILD_WEIGHT = 30
+XGB_GAMMA = 5.0
+XGB_REG_ALPHA = 1.5
+XGB_REG_LAMBDA = 5.0
 TIMESERIES_SPLITS = 5
 
 # --- Calibration Split -------------------------------------------------------
 CALIBRATION_SPLIT_RATIO = 0.8  # 80% train_main, 20% calibration
 
 # --- OOF Settings ------------------------------------------------------------
-OOF_INTERNAL_SPLITS = 3  # For generating OOF predictions within train_main
-PURGE_EMBARGO_BARS = 50  # purge gap between train/test to prevent leakage
+OOF_INTERNAL_SPLITS = 5  # v16: 5-fold OOF → richer meta-model training (was 3)
+PURGE_EMBARGO_BARS = 80  # v16: larger gap = safer leakage prevention (was 50)
 ROLLING_TRAIN_WINDOW = 0  # 0=expanding, >0=rolling window (bars). Try 5000 (~17 days M5)
 
 # --- Meta Model (LightGBM) --------------------------------------------------
