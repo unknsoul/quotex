@@ -78,16 +78,25 @@ def train_weights(symbol):
     print(f"\n>> Loaded OOF data: {len(oof_proba)} rows, {oof_all.shape[0]} seeds")
     print(f"   (Indices sorted ascending — chronological order guaranteed)")
 
-    # Load features for meta feature building
-    mtf = load_multi_tf(symbol)
-    df = mtf.get("M5")
-    if df is None:
-        df = load_csv(symbol, "M5")
-    m15, h1, m1 = mtf.get("M15"), mtf.get("H1"), mtf.get("M1")
-    df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
-    df = add_primary_training_target(df)
-    df = df.dropna(subset=["target"]).reset_index(drop=True)
-    df["target"] = df["target"].astype(int)
+    # Check if OOF data is from multi-symbol training
+    is_multi = oof_data.get("multi_symbol", False)
+    training_symbols = oof_data.get("training_symbols", [symbol])
+
+    if is_multi or oof_data.get("df_train_len", 0) > 50000:
+        from train_model import _load_multi_symbol_data
+        print(f">> Loading multi-symbol data: {training_symbols}")
+        df = _load_multi_symbol_data(training_symbols)
+    else:
+        # Load features for meta feature building
+        mtf = load_multi_tf(symbol)
+        df = mtf.get("M5")
+        if df is None:
+            df = load_csv(symbol, "M5")
+        m15, h1, m1 = mtf.get("M15"), mtf.get("H1"), mtf.get("M1")
+        df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
+        df = add_primary_training_target(df)
+        df = df.dropna(subset=["target"]).reset_index(drop=True)
+        df["target"] = df["target"].astype(int)
 
     sub = df.iloc[indices].copy().reset_index(drop=True)
 

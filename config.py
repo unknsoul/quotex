@@ -61,7 +61,7 @@ DEFAULT_SYMBOL = "EURUSD"
 SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"]
 CANDLES_TO_FETCH = 50000
 MTF_TIMEFRAMES = ["M5", "M15", "H1"]
-TRAINING_SYMBOLS = ["EURUSD"]  # multi-symbol joint training pool
+TRAINING_SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"]  # v14: multi-symbol training
 
 # --- EMA Periods -------------------------------------------------------------
 EMA_20 = 20
@@ -135,7 +135,7 @@ SESSION_CONFIDENCE_MULT = {
 }
 
 # --- Ensemble Variance Hard Filter (Phase 4) --------------------------------
-ENSEMBLE_VAR_SKIP_THRESHOLD = 0.02  # skip if ensemble variance > this
+ENSEMBLE_VAR_SKIP_THRESHOLD = 0.015  # v14: tightened from 0.02
 ENSEMBLE_VAR_FILTER_ENABLED = True
 
 # --- Slippage Modeling (Phase 4) --------------------------------------------
@@ -148,14 +148,14 @@ CONFIDENCE_MEDIUM_MIN = 60.0
 
 # --- Production Decision Gate -----------------------------------------------
 PRODUCTION_SIGNAL_GATING_ENABLED = True
-PRODUCTION_MIN_CONFIDENCE = 42.0
-PRODUCTION_MIN_META_RELIABILITY = 45.0
-PRODUCTION_MIN_UNANIMITY = 0.60
-PRODUCTION_MAX_UNCERTAINTY = 10.0
-PRODUCTION_MIN_QUALITY_SCORE = 30.0
+PRODUCTION_MIN_CONFIDENCE = 58.0       # v14: raised from 42 (data: <60% conf = 46% accuracy)
+PRODUCTION_MIN_META_RELIABILITY = 48.0  # v14: raised from 45
+PRODUCTION_MIN_UNANIMITY = 0.667        # v14: at least 4/6 models must agree
+PRODUCTION_MAX_UNCERTAINTY = 8.0         # v14: tightened from 10
+PRODUCTION_MIN_QUALITY_SCORE = 40.0      # v14: raised from 30
 PRODUCTION_CONFIDENCE_ALERT_PENALTY = 0.95
 PRODUCTION_REQUIRE_TREND_ALIGNMENT = False
-PRODUCTION_BLOCKED_REGIMES = {"CHOPPY"}  # v11: suspend signals in choppy regime
+PRODUCTION_BLOCKED_REGIMES = {"CHOPPY", "Ranging"}  # v14: Ranging=41% accuracy from 405 outcomes
 
 # --- Risk Warnings -----------------------------------------------------------
 MIN_ATR_CLOSE_RATIO = 0.00005   # lowered: M5 candles have smaller ATR
@@ -163,19 +163,20 @@ SPREAD_PERCENTILE = 90
 ATR_SPIKE_MULTIPLIER = 3.0
 
 # --- Ensemble (5 seeded XGBoost) --------------------------------------------
-ENSEMBLE_SEEDS = [42, 123, 456, 789, 1024]
+ENSEMBLE_SEEDS = [42, 123, 456, 789, 1024, 2048, 4096, 8192]  # v14: 8 seeds for up to 8 ensemble members
 ENSEMBLE_SIZE = len(ENSEMBLE_SEEDS)
 
 # --- XGBoost Primary Hyperparams (Optuna Phase 9) ---------------------------
-XGB_N_ESTIMATORS = 318
-XGB_MAX_DEPTH = 4  
-XGB_LEARNING_RATE = 0.005022
-XGB_SUBSAMPLE = 0.747
-XGB_COLSAMPLE_BYTREE = 0.734
-XGB_MIN_CHILD_WEIGHT = 12
-XGB_GAMMA = 2.822
-XGB_REG_ALPHA = 0.266
-XGB_REG_LAMBDA = 0.0036
+# v14: Improved hyperparameters — more estimators, deeper trees, stronger regularization
+XGB_N_ESTIMATORS = 450
+XGB_MAX_DEPTH = 5  
+XGB_LEARNING_RATE = 0.004
+XGB_SUBSAMPLE = 0.75
+XGB_COLSAMPLE_BYTREE = 0.70
+XGB_MIN_CHILD_WEIGHT = 18
+XGB_GAMMA = 3.0
+XGB_REG_ALPHA = 0.5
+XGB_REG_LAMBDA = 2.0
 TIMESERIES_SPLITS = 5
 
 # --- Calibration Split -------------------------------------------------------
@@ -233,7 +234,7 @@ DATA_BUFFER_SIZE = 20000
 MODEL_BACKUP_DIR = os.path.join(BASE_DIR, "models", "backup")
 
 # --- Signal Validator --------------------------------------------------------
-SIGNAL_MIN_CONFIDENCE = 42.0          # aligned with production gate to avoid over-filtering
+SIGNAL_MIN_CONFIDENCE = 58.0          # v14: aligned with production gate (raised from 42)
 SIGNAL_DUPLICATE_WINDOW_SEC = 300     # 5 min duplicate guard
 SIGNAL_MAX_PER_HOUR = 8              # raised from 6 to allow more signals
 SIGNAL_REQUIRE_MTF_ALIGNMENT = True   # block if multi-TF opposes direction
@@ -292,13 +293,16 @@ V11_WEAK_HOUR_MIN_UNANIMITY = 0.50   # v13: Relaxed — no weak-hour extra unani
 
 # --- v11: Symbol-Specific Confidence Adjustments (data-driven) ---------------
 # EURUSD (42.1%) and AUDUSD (42.3%) need higher thresholds
+# v14: Updated from 405 live outcomes analysis
 V11_SYMBOL_CONFIDENCE_ADJUSTMENTS = {
-    "USDJPY": 1.05,     # 60.3% WR — slight boost
-    "XAUUSD": 1.02,     # 55.7% WR — slight boost
-    "GBPUSD": 1.00,     # 51.9% WR — neutral
-    "GBPJPY": 1.00,     # 50.7% WR — neutral
-    "EURUSD": 0.90,     # 42.1% WR — needs higher bar
-    "AUDUSD": 0.90,     # 42.3% WR — needs higher bar
+    "USDJPY": 1.08,     # 58.8% WR — best performer, boost
+    "XAUUSD": 1.05,     # 56.8% WR — strong performer
+    "GBPUSD": 0.95,     # 47.1% WR — slight penalty
+    "GBPJPY": 0.92,     # 43.2% WR — penalty
+    "EURUSD": 0.85,     # 39.3% WR — heavy penalty
+    "AUDUSD": 0.82,     # 40.0% WR — heaviest penalty
+    "USDCAD": 0.95,     # moderate
+    "USDCHF": 0.95,     # moderate
 }
 
 # --- v11: Symmetric Triple Barrier -------------------------------------------

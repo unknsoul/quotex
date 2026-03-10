@@ -1,8 +1,11 @@
 """
-Calibration v5 — heterogeneous calibrated primary ensemble.
+Calibration v6 — heterogeneous calibrated primary ensemble.
 
-Ensemble: XGBoost + HistGradientBoosting + ExtraTrees + RandomForest + CatBoost.
-Each member is calibrated with isotonic regression on a held-out calibration slice.
+v14 upgrades:
+  - LightGBM added for algorithm diversity
+  - Deeper XGBoost trees (4→5) with stronger regularization
+  - More estimators across all members
+  - 7-8 member ensemble (XGB×2 + HistGB + ExtraTrees + RF + CatBoost + LightGBM)
 """
 
 import numpy as np
@@ -19,6 +22,12 @@ try:
     _HAS_CATBOOST = True
 except ImportError:
     _HAS_CATBOOST = False
+
+try:
+    import lightgbm as lgb
+    _HAS_LIGHTGBM = True
+except ImportError:
+    _HAS_LIGHTGBM = False
 
 
 class CalibratedModel:
@@ -67,52 +76,62 @@ def _time_decay_weights(n_samples, half_life_ratio=0.3):
 
 
 def get_primary_model_specs():
-    """Primary production ensemble specs ordered by intended diversity."""
+    """v14 production ensemble specs — improved diversity and regularization."""
     specs = [
         {
             "model_type": "xgb",
             "name": "XGB_recent_fast",
             "window_ratio": 0.45,
-            "params": {"max_depth": 3, "learning_rate": 0.015, "n_estimators": 280,
-                       "min_child_weight": 15, "reg_alpha": 0.5, "reg_lambda": 3.0,
-                       "gamma": 2.0, "subsample": 0.75, "colsample_bytree": 0.7},
+            "params": {"max_depth": 4, "learning_rate": 0.012, "n_estimators": 400,
+                       "min_child_weight": 18, "reg_alpha": 0.8, "reg_lambda": 4.0,
+                       "gamma": 2.5, "subsample": 0.72, "colsample_bytree": 0.65},
         },
         {
             "model_type": "xgb",
-            "name": "XGB_full_conservative",
+            "name": "XGB_full_deep",
             "window_ratio": 1.0,
-            "params": {"max_depth": 4, "learning_rate": 0.008, "n_estimators": 350,
-                       "min_child_weight": 18, "reg_alpha": 1.0, "reg_lambda": 5.0,
-                       "gamma": 3.0, "subsample": 0.7, "colsample_bytree": 0.65},
+            "params": {"max_depth": 5, "learning_rate": 0.005, "n_estimators": 500,
+                       "min_child_weight": 22, "reg_alpha": 1.5, "reg_lambda": 6.0,
+                       "gamma": 3.5, "subsample": 0.68, "colsample_bytree": 0.60},
         },
         {
             "model_type": "hist_gb",
             "name": "HistGB_full",
             "window_ratio": 1.0,
-            "params": {"max_depth": 4, "learning_rate": 0.03, "max_iter": 280,
-                       "min_samples_leaf": 25, "l2_regularization": 0.5},
+            "params": {"max_depth": 5, "learning_rate": 0.02, "max_iter": 400,
+                       "min_samples_leaf": 30, "l2_regularization": 1.0},
         },
         {
             "model_type": "extra_trees",
             "name": "ExtraTrees_structural",
             "window_ratio": 1.0,
-            "params": {"n_estimators": 400, "max_depth": 6, "min_samples_leaf": 18},
+            "params": {"n_estimators": 500, "max_depth": 7, "min_samples_leaf": 22},
         },
         {
             "model_type": "random_forest",
             "name": "RF_balanced_recent",
             "window_ratio": 0.7,
-            "params": {"n_estimators": 350, "max_depth": 5, "min_samples_leaf": 20},
+            "params": {"n_estimators": 450, "max_depth": 6, "min_samples_leaf": 24},
         },
     ]
-    # Add CatBoost only if installed
+    # Add CatBoost if installed
     if _HAS_CATBOOST:
         specs.append({
             "model_type": "catboost",
             "name": "CatBoost_conservative",
             "window_ratio": 1.0,
-            "params": {"depth": 4, "learning_rate": 0.03, "iterations": 300,
-                       "l2_leaf_reg": 3.0, "min_data_in_leaf": 20},
+            "params": {"depth": 5, "learning_rate": 0.02, "iterations": 400,
+                       "l2_leaf_reg": 5.0, "min_data_in_leaf": 25},
+        })
+    # Add LightGBM if installed — v14 diversity upgrade
+    if _HAS_LIGHTGBM:
+        specs.append({
+            "model_type": "lightgbm",
+            "name": "LightGBM_diverse",
+            "window_ratio": 0.8,
+            "params": {"n_estimators": 400, "max_depth": 5, "learning_rate": 0.02,
+                       "subsample": 0.75, "colsample_bytree": 0.70,
+                       "min_child_samples": 25, "reg_alpha": 0.5, "reg_lambda": 2.0},
         })
     return specs
 
@@ -193,6 +212,22 @@ def fit_model_from_spec(spec, X_train, y_train, spw=1.0, seed=42):
             random_seed=seed,
             verbose=0,
             allow_writing_files=False,
+        )
+        model.fit(X_train, y_train, sample_weight=weights)
+        return model
+
+    if model_type == "lightgbm" and _HAS_LIGHTGBM:
+        model = lgb.LGBMClassifier(
+            n_estimators=params.get("n_estimators", 400),
+            max_depth=params.get("max_depth", 5),
+            learning_rate=params.get("learning_rate", 0.02),
+            subsample=params.get("subsample", 0.75),
+            colsample_bytree=params.get("colsample_bytree", 0.70),
+            min_child_samples=params.get("min_child_samples", 25),
+            reg_alpha=params.get("reg_alpha", 0.5),
+            reg_lambda=params.get("reg_lambda", 2.0),
+            random_state=seed,
+            verbose=-1,
         )
         model.fit(X_train, y_train, sample_weight=weights)
         return model

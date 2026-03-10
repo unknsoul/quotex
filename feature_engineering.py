@@ -899,8 +899,8 @@ def compute_features(df, m15_df=None, h1_df=None, m1_df=None):
     # Normalize to 0-1 range using percentile rank within rolling window
     mg_series = pd.Series(macd_gap_change)
     sg_series = pd.Series(sma_gap_change)
-    mg_rank = mg_series.rolling(50, min_periods=10).apply(lambda x: (x.iloc[-1] >= x).mean(), raw=False).fillna(0.5)
-    sg_rank = sg_series.rolling(50, min_periods=10).apply(lambda x: (x.iloc[-1] >= x).mean(), raw=False).fillna(0.5)
+    mg_rank = mg_series.rolling(50, min_periods=10).apply(lambda x: (x[-1] >= x).mean(), raw=True).fillna(0.5)
+    sg_rank = sg_series.rolling(50, min_periods=10).apply(lambda x: (x[-1] >= x).mean(), raw=True).fillna(0.5)
     df["crossover_staleness"] = ((mg_rank + sg_rank) / 2).clip(0, 1).values
 
     # Pattern score: use existing pattern-related features as proxy

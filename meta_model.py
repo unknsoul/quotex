@@ -186,16 +186,26 @@ def train_meta(symbol):
     print(f"\n>> Loaded OOF predictions: {len(oof_data['oof_proba'])} rows")
     print(f"   (These are OUT-OF-FOLD predictions — no leakage)")
 
-    mtf = load_multi_tf(symbol)
-    df = mtf.get("M5")
-    if df is None:
-        df = load_csv(symbol, "M5")
-    m15, h1, m1 = mtf.get("M15"), mtf.get("H1"), mtf.get("M1")
+    # Check if OOF data is from multi-symbol training
+    is_multi = oof_data.get("multi_symbol", False)
+    training_symbols = oof_data.get("training_symbols", [symbol])
 
-    df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
-    df = add_primary_training_target(df)
-    df = df.dropna(subset=["target"]).reset_index(drop=True)
-    df["target"] = df["target"].astype(int)
+    if is_multi or oof_data.get("df_train_len", 0) > 50000:
+        # Load same multi-symbol data used during primary training
+        from train_model import _load_multi_symbol_data
+        print(f">> Loading multi-symbol data: {training_symbols}")
+        df = _load_multi_symbol_data(training_symbols)
+    else:
+        mtf = load_multi_tf(symbol)
+        df = mtf.get("M5")
+        if df is None:
+            df = load_csv(symbol, "M5")
+        m15, h1, m1 = mtf.get("M15"), mtf.get("H1"), mtf.get("M1")
+
+        df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
+        df = add_primary_training_target(df)
+        df = df.dropna(subset=["target"]).reset_index(drop=True)
+        df["target"] = df["target"].astype(int)
 
     print(">> Building meta features from OOF data...")
     print("   (indices sorted ascending before slicing)")

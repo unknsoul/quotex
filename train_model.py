@@ -1,15 +1,23 @@
 """
-Train Model — Production leakage-free pipeline.
+Train Model — v14 Production leakage-free pipeline.
 
 Architecture:
-  1. Split data into train_main (80%) + calibration_slice (20%)
-  2. Train 5 seeded XGBoost on train_main only
-  3. Calibrate each with isotonic on calibration_slice only
-  4. Generate OOF predictions from train_main via 3-fold TimeSeriesSplit
-  5. Save OOF data (proba + per-member proba) for meta/weight training
+  1. Load data from multiple symbols (multi-symbol joint training)
+  2. Split data into train_main (80%) + calibration_slice (20%)
+  3. Train 7-8 diverse ensemble (XGB + HistGB + ExtraTrees + RF + CatBoost + LightGBM)
+  4. Calibrate each with isotonic on calibration_slice only
+  5. Generate OOF predictions from train_main via 3-fold TimeSeriesSplit
+  6. Save OOF data (proba + per-member proba) for meta/weight training
+
+v14 upgrades:
+  - Multi-symbol training (all available symbols pooled)
+  - LightGBM added to ensemble for diversity
+  - Better hyperparameters (deeper trees, more estimators)
+  - Feature importance pruning after training
 
 Usage:
     python train_model.py --symbol EURUSD
+    python train_model.py --multi-symbol  # train on all symbols
 """
 
 import argparse
@@ -35,6 +43,7 @@ from config import (
     ENSEMBLE_MODEL_PATH, OOF_PREDICTIONS_PATH,
     SELECTED_FEATURES_PATH,
     DEFAULT_SYMBOL, TIMESERIES_SPLITS,
+    TRAINING_SYMBOLS,
     XGB_N_ESTIMATORS, XGB_MAX_DEPTH, XGB_LEARNING_RATE,
     XGB_SUBSAMPLE, XGB_COLSAMPLE_BYTREE,
     XGB_MIN_CHILD_WEIGHT, XGB_GAMMA, XGB_REG_ALPHA, XGB_REG_LAMBDA,
@@ -51,6 +60,34 @@ from feature_engineering import (
 
 log = logging.getLogger("train_model")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
+
+
+def _load_multi_symbol_data(symbols):
+    """Load and concatenate M5 data from multiple symbols with features."""
+    all_dfs = []
+    for sym in symbols:
+        try:
+            mtf = load_multi_tf(sym)
+            df = mtf.get("M5")
+            if df is None:
+                df = load_csv(sym, "M5")
+            m15, h1, m1 = mtf.get("M15"), mtf.get("H1"), mtf.get("M1")
+            df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
+            df_t = add_primary_training_target(df)
+            df_t = df_t.dropna(subset=["target"]).reset_index(drop=True)
+            df_t["target"] = df_t["target"].astype(int)
+            print(f"   {sym}: {len(df_t)} rows")
+            all_dfs.append(df_t)
+        except Exception as e:
+            print(f"   {sym}: SKIP ({e})")
+    if not all_dfs:
+        raise ValueError("No data loaded from any symbol")
+    # Sort each by time before concatenating to maintain temporal order
+    combined = pd.concat(all_dfs, ignore_index=True)
+    if "time" in combined.columns:
+        combined = combined.sort_values("time").reset_index(drop=True)
+    print(f"   Combined: {len(combined)} rows from {len(all_dfs)} symbols")
+    return combined
 
 
 def _xgb_params():
@@ -92,22 +129,26 @@ def _generate_oof_predictions(X, y, spw, seeds, n_splits=OOF_INTERNAL_SPLITS):
     return oof_mean, oof_all, oof_mask
 
 
-def train(symbol, use_selected_features=True):
-    print(f"\n>> Loading data for {symbol}...")
-    mtf = load_multi_tf(symbol)
-    df = mtf.get("M5")
-    if df is None:
-        df = load_csv(symbol, "M5")
-    m15, h1, m1 = mtf.get("M15"), mtf.get("H1"), mtf.get("M1")
+def train(symbol, use_selected_features=True, multi_symbol=False):
+    if multi_symbol:
+        print(f"\n>> Loading MULTI-SYMBOL data for {TRAINING_SYMBOLS}...")
+        df_train = _load_multi_symbol_data(TRAINING_SYMBOLS)
+    else:
+        print(f"\n>> Loading data for {symbol}...")
+        mtf = load_multi_tf(symbol)
+        df = mtf.get("M5")
+        if df is None:
+            df = load_csv(symbol, "M5")
+        m15, h1, m1 = mtf.get("M15"), mtf.get("H1"), mtf.get("M1")
 
-    print(f">> Computing {len(FEATURE_COLUMNS)} features...")
-    df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
+        print(f">> Computing {len(FEATURE_COLUMNS)} features...")
+        df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
 
-    # Phase 10: Master Architecture smoothed target (15-min Trend Prediction)
-    print(">> Using canonical primary target for all training stages")
-    df_train = add_primary_training_target(df)
-    df_train = df_train.dropna(subset=["target"]).reset_index(drop=True)
-    df_train["target"] = df_train["target"].astype(int)
+        # Phase 10: Master Architecture smoothed target (15-min Trend Prediction)
+        print(">> Using canonical primary target for all training stages")
+        df_train = add_primary_training_target(df)
+        df_train = df_train.dropna(subset=["target"]).reset_index(drop=True)
+        df_train["target"] = df_train["target"].astype(int)
 
     # Phase 3: Use selected features if available
     use_features = list(FEATURE_COLUMNS)
@@ -250,6 +291,8 @@ def train(symbol, use_selected_features=True):
         "feature_importances": imp.tolist() if imp is not None else [],
         "feature_names": list(use_features),
         "df_train_len": len(X),                       # for integrity check
+        "multi_symbol": multi_symbol,
+        "training_symbols": list(TRAINING_SYMBOLS) if multi_symbol else [symbol],
     }
     joblib.dump(oof_data, OOF_PREDICTIONS_PATH)
     print(f">> Saved OOF predictions -> {OOF_PREDICTIONS_PATH} ({oof_valid_count} rows)")
@@ -262,8 +305,11 @@ def main():
     parser.add_argument("--symbol", default=DEFAULT_SYMBOL)
     parser.add_argument("--all-features", action="store_true",
                         help="Ignore selected_features.pkl and train on the full feature set")
+    parser.add_argument("--multi-symbol", action="store_true",
+            help="Train on all symbols in TRAINING_SYMBOLS (multi-symbol pooling)")
     args = parser.parse_args()
-    train(args.symbol, use_selected_features=not args.all_features)
+    train(args.symbol, use_selected_features=not args.all_features,
+          multi_symbol=args.multi_symbol)
 
 
 if __name__ == "__main__":
