@@ -7,8 +7,10 @@ v17 adds: Ichimoku cloud features (4), CCI, Williams %R, +DI/-DI directional rat
 Total: ~72 features.
 """
 
+import warnings
 import numpy as np
 import pandas as pd
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 import logging
 
 from config import (

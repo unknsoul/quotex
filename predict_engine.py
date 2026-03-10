@@ -109,6 +109,36 @@ _skip_count = 0          # total skips counter
 
 REGIME_ENCODING = {"Trending": 0, "Ranging": 1, "High_Volatility": 2, "Low_Volatility": 3}
 
+# --- Timeout protection for hanging models -----------------------------------
+_broken_model_indices = set()
+_MODEL_PREDICT_TIMEOUT = 5.0  # seconds per model
+
+
+def _safe_ensemble_predict(models, row):
+    """Run predict_proba per model with timeout. Permanently skip hangers."""
+    probs = []
+    for i, m in enumerate(models):
+        if i in _broken_model_indices:
+            continue
+        result_holder = [None]
+        def _run(m=m, row=row, rh=result_holder):
+            try:
+                rh[0] = m.predict_proba(row)[0][1]
+            except Exception:
+                pass
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=_MODEL_PREDICT_TIMEOUT)
+        if t.is_alive():
+            mtype = type(getattr(m, 'base_estimator', m)).__name__
+            log.warning("Model %d (%s) timed out — permanently skipped", i, mtype)
+            _broken_model_indices.add(i)
+        elif result_holder[0] is not None:
+            probs.append(result_holder[0])
+        else:
+            log.warning("Model %d returned None — skipped this cycle", i)
+    return np.array(probs) if probs else np.array([0.5])
+
 
 def _binary_entropy(p):
     p = np.clip(p, 1e-10, 1 - 1e-10)
@@ -524,8 +554,8 @@ def predict(df, regime):
 
         row = df[feat_cols].iloc[[-1]]
 
-        # Ensemble predictions (V3: diverse multi-model ensemble)
-        all_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
+        # Ensemble predictions (V3: diverse multi-model ensemble, timeout-protected)
+        all_probs = _safe_ensemble_predict(ensemble, row)
 
         # v15: LSTM/GRU prediction blend
         lstm_prob = None
@@ -544,7 +574,7 @@ def predict(df, regime):
         if _stacking_combiner is not None:
             try:
                 # Include LSTM in stacker if model was trained with it
-                stacker_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
+                stacker_probs = all_probs.copy()
                 if lstm_prob is not None:
                     stacker_probs = np.append(stacker_probs, lstm_prob)
                 # Check if stacker expects this number of inputs
@@ -552,9 +582,8 @@ def predict(df, regime):
                 if len(stacker_probs) == expected:
                     green_p = float(_stacking_combiner.predict_proba(stacker_probs.reshape(1, -1)))
                 else:
-                    # Fallback: tree-only probs
-                    tree_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
-                    green_p = float(_stacking_combiner.predict_proba(tree_probs.reshape(1, -1)))
+                    # Models were skipped — stacker dimensions mismatch, use mean
+                    green_p = float(all_probs.mean())
             except Exception as e:
                 log.debug("StackingCombiner fallback to mean: %s", e)
                 green_p = float(all_probs.mean())

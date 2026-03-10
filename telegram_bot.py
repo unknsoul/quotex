@@ -103,6 +103,9 @@ from session_filter import update_hour_outcome
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 log = logging.getLogger("telegram_bot")
 
+# Suppress noisy httpx polling logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # =============================================================================
 #  Constants
 # =============================================================================
