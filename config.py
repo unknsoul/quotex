@@ -135,7 +135,7 @@ SESSION_CONFIDENCE_MULT = {
 }
 
 # --- Ensemble Variance Hard Filter (Phase 4) --------------------------------
-ENSEMBLE_VAR_SKIP_THRESHOLD = 0.015  # v14: tightened from 0.02
+ENSEMBLE_VAR_SKIP_THRESHOLD = 0.045  # v14.1: relaxed for 7-model diverse ensemble
 ENSEMBLE_VAR_FILTER_ENABLED = True
 
 # --- Slippage Modeling (Phase 4) --------------------------------------------
@@ -148,7 +148,7 @@ CONFIDENCE_MEDIUM_MIN = 60.0
 
 # --- Production Decision Gate -----------------------------------------------
 PRODUCTION_SIGNAL_GATING_ENABLED = True
-PRODUCTION_MIN_CONFIDENCE = 58.0       # v14: raised from 42 (data: <60% conf = 46% accuracy)
+PRODUCTION_MIN_CONFIDENCE = 52.0       # v14.1: balanced (was 58, blocked too many borderline signals)
 PRODUCTION_MIN_META_RELIABILITY = 48.0  # v14: raised from 45
 PRODUCTION_MIN_UNANIMITY = 0.667        # v14: at least 4/6 models must agree
 PRODUCTION_MAX_UNCERTAINTY = 8.0         # v14: tightened from 10

@@ -249,9 +249,9 @@ def _check_momentum_confirmation(pred: dict, m5_df) -> tuple:
     except Exception:
         rsi = 50  # fallback
 
-    if direction == "UP" and rsi > 85:
+    if direction == "UP" and rsi > 95:
         return False, f"RSI extreme overbought ({rsi:.0f})"
-    if direction == "DOWN" and rsi < 15:
+    if direction == "DOWN" and rsi < 5:
         return False, f"RSI extreme oversold ({rsi:.0f})"
 
     return True, "Momentum confirmed"

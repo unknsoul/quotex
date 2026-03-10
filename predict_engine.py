@@ -466,8 +466,8 @@ def predict(df, regime):
 
         # Latency check after ensemble inference
         t_ensemble = time.perf_counter()
-        if (t_ensemble - t_start) > 3.0:
-            log.error("LATENCY ABORT: ensemble took %.2fs (>3s limit)", t_ensemble - t_start)
+        if (t_ensemble - t_start) > 6.0:
+            log.error("LATENCY ABORT: ensemble took %.2fs (>6s limit)", t_ensemble - t_start)
             return _safe_fallback("Inference too slow")
 
         # Regime duration tracking
