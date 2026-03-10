@@ -113,6 +113,11 @@ FEATURE_COLUMNS = [
     "intrabar_volatility_ratio",   # current bar vs recent bars
     "directional_pressure",        # net buying/selling pressure
     "smart_money_divergence",      # OBV vs price divergence (enhanced)
+    # v11: Candle Quality & Freshness Features
+    "candle_freshness",            # How different from recent candles (0=stale, 1=fresh)
+    "candle_body_quality",         # Body/range ratio (0=doji, 1=marubozu)
+    "streak_length",               # Consecutive same-direction candle count
+    "candle_range_vs_avg",         # Current range / avg range (abnormality)
 ]
 
 
@@ -808,6 +813,52 @@ def compute_features(df, m15_df=None, h1_df=None, m1_df=None):
         )
     else:
         df["smart_money_divergence"] = 0.0
+
+    # ═══════════════════════════════════════════════════════════════
+    # v11: Candle Freshness & Quality Features
+    # ═══════════════════════════════════════════════════════════════
+    
+    # Candle freshness: how similar is each candle to its recent predecessors (vectorized)
+    candle_dir = np.where(c.values >= o.values, 1.0, -1.0)
+    candle_range = (h - l).values
+    candle_range_safe = np.where(candle_range < 1e-10, 1e-10, candle_range)
+    body_ratio = np.abs(c.values - o.values) / candle_range_safe
+
+    freshness_vals = np.ones(len(df))
+    for lag in range(1, 6):
+        dir_prev = np.roll(candle_dir, lag)
+        br_prev = np.roll(body_ratio, lag)
+        rng_prev = np.roll(candle_range, lag)
+        rng_prev_safe = np.where(rng_prev < 1e-10, 1e-10, rng_prev)
+
+        dir_match = np.where(candle_dir == dir_prev, 1.0, 0.0)
+        br_diff = 1.0 - np.abs(body_ratio - br_prev)
+        rng_max = np.maximum(candle_range_safe, rng_prev_safe)
+        rng_sim = 1.0 - np.minimum(np.abs(candle_range - rng_prev) / rng_max, 1.0)
+
+        sim = 0.35 * dir_match + 0.25 * br_diff + 0.40 * rng_sim
+        sim = np.clip(sim, 0, 1)
+        freshness_vals -= sim / 5.0
+
+    freshness_vals[:5] = 1.0  # not enough history
+    freshness_vals[candle_range < 1e-10] = 0.0
+    df["candle_freshness"] = pd.Series(freshness_vals, index=df.index).clip(0, 1)
+    
+    # Body quality: body/range ratio (0=doji, 1=marubozu)
+    full_range = h - l
+    df["candle_body_quality"] = (abs(c - o) / (full_range + 1e-10)).clip(0, 1)
+    
+    # Consecutive same-direction streak length  
+    dirs = np.sign(c.values - o.values)
+    streak = np.ones(len(dirs))
+    for i in range(1, len(dirs)):
+        if dirs[i] == dirs[i-1] and dirs[i] != 0:
+            streak[i] = streak[i-1] + 1
+    df["streak_length"] = pd.Series(streak, index=df.index).clip(0, 20)
+    
+    # Range vs recent average (detects abnormal candles)
+    avg_range = full_range.rolling(10, min_periods=1).mean()
+    df["candle_range_vs_avg"] = (full_range / (avg_range + 1e-10)).clip(0, 3)
 
     # Drop warmup
     warmup = max(EMA_200, BB_PERIOD, ATR_PERIOD, RSI_PERIOD, MACD_SLOW,

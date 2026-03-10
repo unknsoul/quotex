@@ -1,5 +1,5 @@
 """
-QUOTEX LORD v10 — Production-Grade ML Trading Signal Engine.
+QUOTEX LORD v11 — Anti-Streak + Candle Quality ML Trading Signal Engine.
 
 14-layer pipeline:
   1. Data Collector       — fetch OHLCV from MT5
@@ -71,7 +71,7 @@ from config import (
 )
 from data_collector import fetch_multi_timeframe
 from data_cleaner import clean_data
-from feature_engineering import compute_features
+from feature_engineering import compute_features, FEATURE_COLUMNS
 from predict_engine import predict, load_models, log_prediction, verify_candle_closed
 from regime_detection import detect_regime, get_session
 from risk_filter import check_warnings
@@ -161,6 +161,7 @@ _win_streaks: dict = {}            # {symbol: streak (+win, -loss)}
 _total_streak = 0                  # overall win/loss streak
 _peak_accuracy = 0.0               # best session accuracy seen
 _cycle_messages: dict = {}         # {cycle_key: {text, msg_ids, sig_ids, results}}
+CYCLE_MESSAGES_JSON = os.path.join(LOG_DIR, "cycle_messages.json")
 
 # Per-symbol adaptive confidence thresholds (learns from outcomes)
 _symbol_min_confidence: dict = {}  # {symbol: float} - dynamic min confidence per symbol
@@ -426,7 +427,7 @@ def _check_confluence(symbol: str, direction: str) -> dict:
 
 def _format_auto_signal(predictions: dict, filtered: dict) -> str:
     """
-    Format emoji-rich signal message per v10+ spec.
+    Format emoji-rich signal message per v11 spec.
     """
     now_utc = datetime.now(timezone.utc)
     now_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
@@ -447,8 +448,29 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
     n_analyzed = len(predictions) + len(filtered)
     n_passed = len(predictions)
 
+    # Today's best/worst pair
+    today = now_utc.strftime("%Y-%m-%d")
+    today_outcomes = [r for r in _outcome_results if r.get("timestamp", "").startswith(today)]
+    best_pair = worst_pair = ""
+    if today_outcomes:
+        sym_wr = {}
+        for r in today_outcomes:
+            s = r.get("symbol", "?")
+            if s not in sym_wr:
+                sym_wr[s] = {"w": 0, "t": 0}
+            sym_wr[s]["t"] += 1
+            if r.get("correct"):
+                sym_wr[s]["w"] += 1
+        if sym_wr:
+            best_sym = max(sym_wr, key=lambda x: sym_wr[x]["w"] / max(sym_wr[x]["t"], 1))
+            worst_sym = min(sym_wr, key=lambda x: sym_wr[x]["w"] / max(sym_wr[x]["t"], 1))
+            bw = sym_wr[best_sym]
+            ww = sym_wr[worst_sym]
+            best_pair = f"🥇 Best: {best_sym} ({bw['w']}/{bw['t']})"
+            worst_pair = f"🥉 Worst: {worst_sym} ({ww['w']}/{ww['t']})"
+
     lines = [
-        "⚡ QUOTEX LORD v10+ ⚡",
+        "⚡ QUOTEX LORD v11 ⚡",
         f"⏰ {now_str}",
         f"📊 Analyzed: {n_analyzed} | Passed: {n_passed}",
         "━" * 26,
@@ -480,6 +502,27 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
         conf_bars = int(conf / 10)
         conf_bar = "█" * conf_bars + "░" * (10 - conf_bars)
 
+        # Star rating (based on quality + confidence + meta)
+        avg_score = (conf + quality + meta) / 3
+        if avg_score >= 80:
+            stars = "⭐⭐⭐⭐⭐"
+        elif avg_score >= 70:
+            stars = "⭐⭐⭐⭐"
+        elif avg_score >= 60:
+            stars = "⭐⭐⭐"
+        elif avg_score >= 50:
+            stars = "⭐⭐"
+        else:
+            stars = "⭐"
+
+        # Risk level indicator
+        if uncertainty > 30:
+            risk_icon = "🔴 High Risk"
+        elif uncertainty > 15:
+            risk_icon = "🟡 Med Risk"
+        else:
+            risk_icon = "🟢 Low Risk"
+
         # Win streak indicator
         streak_text = ""
         sym_streak = _win_streaks.get(sym, 0)
@@ -490,12 +533,24 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
 
         lines.append("")
         lines.append(f"{arrow}  {sym} M5{streak_text}")
+        lines.append(f"   {stars}")
         lines.append(f"   [{conf_bar}] {conf:.0f}%")
         lines.append(f"   📈 Prob: {green:.1f}% | Meta: {meta:.0f}%")
         lines.append(f"   🎯 Models: {agree}/{total_m} | Strength: {strength}")
         lines.append(f"   🌊 {regime} | {session}")
+        lines.append(f"   ⚠️ {risk_icon} | Kelly: {kelly_pct:.1f}%")
         if quality > 0:
             lines.append(f"   ⭐ Quality: {quality:.0f}/100")
+        # v11: Candle freshness and exhaustion indicators
+        cq_freshness = pred.get("candle_freshness", 1.0)
+        cq_quality = pred.get("candle_quality", 50)
+        exhaustion = pred.get("exhaustion_score", 0)
+        if cq_freshness < 0.3:
+            lines.append(f"   🔄 Candle: Stale ({cq_freshness:.0%})")
+        elif cq_freshness > 0.7:
+            lines.append(f"   ✨ Candle: Fresh ({cq_freshness:.0%})")
+        if exhaustion > 40:
+            lines.append(f"   ⚡ Exhaustion: {exhaustion:.0f}%")
         if reasons:
             lines.append(f"   💡 {reasons}")
         lines.append(f"   ⏱ Expires: {expiry_str} UTC ({countdown_min}m {countdown_rem}s)")
@@ -506,18 +561,23 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
 
     lines.append("")
     lines.append("━" * 26)
-    lines.append(f"🛡 14-Layer Filter | Quality First")
+    lines.append(f"🛡 v11: 18-Layer Filter | Anti-Streak | Quality First")
 
     # Session accuracy
-    if _outcome_results:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        today_outcomes = [r for r in _outcome_results if r.get("timestamp", "").startswith(today)]
-        if today_outcomes:
-            wins = sum(1 for r in today_outcomes if r.get("correct"))
-            total = len(today_outcomes)
-            pct = wins / total * 100
-            trend = "📈" if pct >= 60 else "📉" if pct < 50 else "➡️"
-            lines.append(f"{trend} Session: {wins}/{total} ({pct:.0f}%)")
+    if today_outcomes:
+        wins = sum(1 for r in today_outcomes if r.get("correct"))
+        total = len(today_outcomes)
+        pct = wins / total * 100
+        trend = "📈" if pct >= 60 else "📉" if pct < 50 else "➡️"
+        lines.append(f"{trend} Session: {wins}/{total} ({pct:.0f}%)")
+        if best_pair:
+            lines.append(f"{best_pair} | {worst_pair}")
+
+    # Overall streak alert
+    if _total_streak >= 3:
+        lines.append(f"🔥 HOT STREAK: {_total_streak} wins in a row!")
+    elif _total_streak <= -3:
+        lines.append(f"⚠️ COLD STREAK: {abs(_total_streak)} losses — caution!")
 
     return "\n".join(lines)
 
@@ -621,6 +681,27 @@ def _record_sent_signal(symbol: str, pred: dict, chat_ids: list):
         pass
 
     return signal_id
+
+
+def _save_cycle_messages():
+    """Persist cycle_messages so result editing survives restarts."""
+    try:
+        with open(CYCLE_MESSAGES_JSON, "w") as f:
+            json.dump(_cycle_messages, f, indent=2, default=str)
+    except Exception:
+        pass
+
+
+def _load_cycle_messages():
+    """Load cycle_messages from disk."""
+    global _cycle_messages
+    try:
+        if os.path.exists(CYCLE_MESSAGES_JSON):
+            with open(CYCLE_MESSAGES_JSON) as f:
+                loaded = json.load(f)
+                _cycle_messages = loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        _cycle_messages = {}
 
 
 async def _resolve_pending_signals(bot: Bot):
@@ -772,15 +853,28 @@ async def _resolve_pending_signals(bot: Bot):
     for sig_id in resolved:
         _pending_signals.pop(sig_id, None)
 
-    # Edit messages for fully resolved cycles
+    # Edit messages for cycles that have ANY new results
     cycles_done = []
+    edited_any = False
     for ck, cm in list(_cycle_messages.items()):
-        if cm["sig_ids"] and len(cm["results"]) >= len(cm["sig_ids"]):
-            new_text = _build_result_text(cm["text"], cm["results"])
-            for cid, mid in cm["msg_ids"].items():
-                await _safe_edit(bot, cid, mid, new_text)
+        if not cm.get("sig_ids"):
+            continue
+        result_count = len(cm.get("results", {}))
+        if result_count == 0:
+            continue
+        # Edit as soon as ANY result is available (don't wait for all)
+        new_text = _build_result_text(cm["text"], cm["results"])
+        for cid, mid in cm.get("msg_ids", {}).items():
+            await _safe_edit(bot, cid, mid, new_text)
+        edited_any = True
+        all_done = result_count >= len(cm["sig_ids"])
+        if all_done:
             cycles_done.append(ck)
-            log.info("Edited signal message for cycle %s with results.", ck)
+            log.info("Edited signal message for cycle %s — all %d results.",
+                     ck, result_count)
+        else:
+            log.info("Edited signal message for cycle %s — %d/%d results so far.",
+                     ck, result_count, len(cm["sig_ids"]))
 
     # Clean up old cycles (> 30 min unresolved)
     for ck in list(_cycle_messages.keys()):
@@ -794,8 +888,9 @@ async def _resolve_pending_signals(bot: Bot):
     for ck in set(cycles_done):
         _cycle_messages.pop(ck, None)
 
-    # Persist remaining pending
-    if resolved:
+    # Persist cycle messages + pending signals
+    if resolved or edited_any:
+        _save_cycle_messages()
         try:
             with open(PENDING_JSON, "w") as f:
                 json.dump(_pending_signals, f, indent=2, default=str)
@@ -914,6 +1009,22 @@ def _build_result_text(original_text: str, results: dict) -> str:
         draw_text = f" / {draws}D" if draws > 0 else ""
         result_lines.append(f"\n{emoji} Cycle: {wins}W / {losses}L{draw_text} ({pct:.0f}%)")
 
+    # Add session accuracy to result
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_outcomes = [r for r in _outcome_results if r.get("timestamp", "").startswith(today)]
+    if today_outcomes:
+        tw = sum(1 for r in today_outcomes if r.get("correct"))
+        tt = len(today_outcomes)
+        tp = tw / tt * 100
+        trend = "\U0001f4c8" if tp >= 60 else "\U0001f4c9" if tp < 50 else "\u27a1\ufe0f"
+        result_lines.append(f"{trend} Today: {tw}/{tt} ({tp:.0f}%)")
+
+    # Streak alert
+    if _total_streak >= 3:
+        result_lines.append(f"\U0001f525 {_total_streak} wins in a row!")
+    elif _total_streak <= -3:
+        result_lines.append(f"\u26a0\ufe0f {abs(_total_streak)} losses — caution!")
+
     return "\n".join(edited_lines) + "\n" + "\n".join(result_lines)
 
 
@@ -941,11 +1052,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _save_subscribers()
 
     text = (
-        "QUOTEX LORD v10\n\n"
-        "Production-grade ML signal engine.\n"
-        "14-layer pipeline with calibrated probability.\n\n"
-        f"Symbols: {', '.join(SYMBOLS)}\n"
-        f"Timeframe: M5\n\n"
+        "⚡ QUOTEX LORD v11 ⚡\n\n"
+        "Anti-Streak + Candle Quality ML signal engine.\n"
+        "18-layer pipeline with calibrated probability.\n\n"
+        f"📊 Symbols: {', '.join(SYMBOLS)}\n"
+        f"⏱ Timeframe: M5 (5-minute candles)\n"
+        f"🤖 6 ML models + meta-model ensemble\n"
+        f"🛡 Auto risk management & circuit breaker\n\n"
+        "Features:\n"
+        "• Auto-signals every 5 min\n"
+        "• WIN/LOSS results on each signal\n"
+        "• Star ratings & risk levels\n"
+        "• Performance analytics\n"
+        "• Live market overview\n"
+        "• Hourly & regime breakdowns\n\n"
         "Use the menu below to get started."
     )
     await update.message.reply_text(text, reply_markup=_main_menu(chat_id))
@@ -959,6 +1079,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/scan — Multi-symbol scan\n"
         "/today — Today's signals & status\n"
         "/results — Today's results\n"
+        "/performance — Detailed performance analytics\n"
+        "/market — Live market overview\n"
         "/stats — Advanced statistics\n"
         "/audit — Signal audit trail\n"
         "/leaderboard — Pair rankings\n"
@@ -1157,6 +1279,145 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Detailed performance analytics report."""
+    try:
+        now_utc = datetime.now(timezone.utc)
+        today = now_utc.strftime("%Y-%m-%d")
+        today_outcomes = [r for r in _outcome_results if r.get("timestamp", "").startswith(today)]
+
+        lines = ["🏆 Performance Report\n"]
+
+        # All-time summary
+        total = len(_outcome_results)
+        if total > 0:
+            wins = sum(1 for r in _outcome_results if r.get("correct"))
+            pct = wins / total * 100
+            lines.append(f"📊 All-Time: {wins}W / {total - wins}L ({pct:.1f}%)")
+            lines.append(f"🔥 Current Streak: {_total_streak}")
+            lines.append(f"🏆 Peak Accuracy: {_peak_accuracy*100:.1f}%")
+        else:
+            lines.append("No outcomes recorded yet.")
+            await update.message.reply_text("\n".join(lines))
+            return
+
+        # Today summary
+        if today_outcomes:
+            tw = sum(1 for r in today_outcomes if r.get("correct"))
+            tt = len(today_outcomes)
+            tp = tw / tt * 100
+            lines.append(f"\n📅 Today: {tw}W / {tt - tw}L ({tp:.0f}%)")
+        else:
+            lines.append(f"\n📅 Today: No signals yet")
+
+        # Best performing hours (top 3)
+        hour_stats = {}
+        for r in _outcome_results:
+            ts = r.get("timestamp", "")
+            if len(ts) >= 13:
+                h = ts[11:13]
+                if h not in hour_stats:
+                    hour_stats[h] = {"w": 0, "t": 0}
+                hour_stats[h]["t"] += 1
+                if r.get("correct"):
+                    hour_stats[h]["w"] += 1
+        if hour_stats:
+            sorted_hours = sorted(hour_stats.items(), key=lambda x: x[1]["w"] / max(x[1]["t"], 1), reverse=True)
+            lines.append("\n⏰ Best Hours:")
+            for h, v in sorted_hours[:3]:
+                pct = v["w"] / v["t"] * 100 if v["t"] > 0 else 0
+                lines.append(f"  {h}:00 UTC — {v['w']}/{v['t']} ({pct:.0f}%) 🔥")
+
+        # Best performing pairs (top 3)
+        sym_stats = {}
+        for r in _outcome_results:
+            s = r.get("symbol", "?")
+            if s not in sym_stats:
+                sym_stats[s] = {"w": 0, "t": 0}
+            sym_stats[s]["t"] += 1
+            if r.get("correct"):
+                sym_stats[s]["w"] += 1
+        if sym_stats:
+            sorted_syms = sorted(sym_stats.items(), key=lambda x: x[1]["w"] / max(x[1]["t"], 1), reverse=True)
+            lines.append("\n🥇 Best Pairs:")
+            for s, v in sorted_syms[:3]:
+                pct = v["w"] / v["t"] * 100 if v["t"] > 0 else 0
+                lines.append(f"  {s}: {v['w']}/{v['t']} ({pct:.0f}%)")
+
+        # Confidence accuracy correlation
+        high_conf = [r for r in _outcome_results if r.get("confidence", 0) >= 70]
+        low_conf = [r for r in _outcome_results if r.get("confidence", 0) < 70]
+        if high_conf:
+            hc_w = sum(1 for r in high_conf if r.get("correct"))
+            hc_pct = hc_w / len(high_conf) * 100
+            lines.append(f"\n💎 High Conf (≥70%): {hc_w}/{len(high_conf)} ({hc_pct:.0f}%)")
+        if low_conf:
+            lc_w = sum(1 for r in low_conf if r.get("correct"))
+            lc_pct = lc_w / len(low_conf) * 100
+            lines.append(f"📉 Low Conf (<70%):  {lc_w}/{len(low_conf)} ({lc_pct:.0f}%)")
+
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"Performance error: {e}")
+
+
+async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Live market overview — current regimes and sessions."""
+    try:
+        now_utc = datetime.now(timezone.utc)
+        hour = now_utc.hour
+
+        # Determine session
+        if 0 <= hour < 7:
+            session = "🌏 Asian Session"
+        elif 7 <= hour < 12:
+            session = "🇪🇺 London Session"
+        elif 12 <= hour < 16:
+            session = "🇺🇸 NY + London Overlap"
+        elif 16 <= hour < 21:
+            session = "🇺🇸 New York Session"
+        else:
+            session = "🌙 Off-Hours"
+
+        lines = [
+            "🌍 Market Overview\n",
+            f"⏰ {now_utc.strftime('%H:%M UTC')} | {session}",
+            "",
+        ]
+
+        # Current regime per symbol
+        if _last_regime:
+            lines.append("🌊 Current Regimes:")
+            for sym, regime in sorted(_last_regime.items()):
+                skip = _regime_skip.get(sym, 0)
+                skip_text = f" (skip {skip})" if skip > 0 else ""
+                lines.append(f"  {sym}: {regime}{skip_text}")
+        else:
+            lines.append("🌊 Regimes: Not yet computed")
+
+        # Win streaks
+        if _win_streaks:
+            lines.append("\n🔥 Current Streaks:")
+            for sym, streak in sorted(_win_streaks.items(), key=lambda x: -x[1]):
+                icon = "🔥" if streak > 0 else "❄️" if streak < 0 else "➡️"
+                lines.append(f"  {sym}: {icon} {streak}")
+
+        # Circuit breaker status
+        lines.append(f"\n🛡 Circuit Breaker: {'🔴 HALTED' if _cb.is_halted else '🟢 ACTIVE'}")
+        if _cb.consecutive_losses > 0:
+            lines.append(f"⚠️ Consecutive losses: {_cb.consecutive_losses}")
+
+        # Adaptive confidence thresholds
+        if _symbol_min_confidence:
+            lines.append("\n🎯 Adaptive Thresholds:")
+            for sym, thresh in sorted(_symbol_min_confidence.items()):
+                lines.append(f"  {sym}: {thresh:.0f}%")
+
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"Market error: {e}")
+
+
 def _main_menu(chat_id=None):
     cid = str(chat_id) if chat_id else None
     is_sub = cid and cid in _subscribers and _subscribers[cid].get("active", False)
@@ -1168,6 +1429,8 @@ def _main_menu(chat_id=None):
          InlineKeyboardButton("📱 Scan All", callback_data="scan")],
         [InlineKeyboardButton("📡 Today", callback_data="today"),
          InlineKeyboardButton("📊 Results", callback_data="results")],
+        [InlineKeyboardButton("🏆 Performance", callback_data="performance"),
+         InlineKeyboardButton("🌍 Market", callback_data="market")],
         [InlineKeyboardButton("⚙️ Status", callback_data="status"),
          InlineKeyboardButton("📊 Dashboard", callback_data="dashboard")],
         [InlineKeyboardButton("📈 Stats", callback_data="stats"),
@@ -1223,7 +1486,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "back":
         await query.edit_message_text(
-            "⚡ QUOTEX LORD v10+ ⚡\n\nUse the menu below.",
+            "⚡ QUOTEX LORD v11 ⚡\n\nUse the menu below.",
             reply_markup=_main_menu(chat_id),
         )
 
@@ -1279,14 +1542,16 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "stats":
         try:
-            # Reuse cmd_stats logic inline
             lines = ["📊 Advanced Statistics\n"]
             total = len(_outcome_results)
             if total > 0:
                 wins = sum(1 for r in _outcome_results if r.get("correct"))
                 accuracy = wins / total * 100
-                lines.append(f"Record: {wins}/{total} ({accuracy:.1f}%)")
-                lines.append(f"Current Streak: {_total_streak}")
+                lines.append(f"📈 Record: {wins}/{total} ({accuracy:.1f}%)")
+                lines.append(f"🔥 Streak: {_total_streak}")
+                lines.append(f"🏆 Peak: {_peak_accuracy*100:.1f}%\n")
+
+                # Per-symbol stats
                 sym_stats = {}
                 for r in _outcome_results:
                     s = r.get("symbol", "?")
@@ -1296,11 +1561,46 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         sym_stats[s]["w"] += 1
                     else:
                         sym_stats[s]["l"] += 1
-                lines.append("\nPer Symbol:")
+                lines.append("📊 Per Symbol:")
                 for s, v in sorted(sym_stats.items()):
                     t = v["w"] + v["l"]
                     pct = v["w"] / t * 100 if t > 0 else 0
-                    lines.append(f"  {s}: {v['w']}/{t} ({pct:.0f}%)")
+                    bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
+                    lines.append(f"  {s}: [{bar}] {v['w']}/{t} ({pct:.0f}%)")
+
+                # Hourly breakdown
+                hour_stats = {}
+                for r in _outcome_results:
+                    ts = r.get("timestamp", "")
+                    if len(ts) >= 13:
+                        h = ts[11:13]
+                        if h not in hour_stats:
+                            hour_stats[h] = {"w": 0, "t": 0}
+                        hour_stats[h]["t"] += 1
+                        if r.get("correct"):
+                            hour_stats[h]["w"] += 1
+                if hour_stats:
+                    lines.append("\n⏰ By Hour (UTC):")
+                    for h in sorted(hour_stats.keys()):
+                        v = hour_stats[h]
+                        pct = v["w"] / v["t"] * 100 if v["t"] > 0 else 0
+                        hot = "🔥" if pct >= 65 else "❄️" if pct < 45 else ""
+                        lines.append(f"  {h}:00 — {v['w']}/{v['t']} ({pct:.0f}%) {hot}")
+
+                # Regime breakdown
+                regime_stats = {}
+                for r in _outcome_results:
+                    reg = r.get("regime", "Unknown")
+                    if reg not in regime_stats:
+                        regime_stats[reg] = {"w": 0, "t": 0}
+                    regime_stats[reg]["t"] += 1
+                    if r.get("correct"):
+                        regime_stats[reg]["w"] += 1
+                if regime_stats:
+                    lines.append("\n🌊 By Regime:")
+                    for reg, v in sorted(regime_stats.items(), key=lambda x: -x[1]["t"]):
+                        pct = v["w"] / v["t"] * 100 if v["t"] > 0 else 0
+                        lines.append(f"  {reg}: {v['w']}/{v['t']} ({pct:.0f}%)")
             else:
                 lines.append("No outcomes yet.")
             text = "\n".join(lines)
@@ -1346,22 +1646,106 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "info":
         text = (
-            "⚡ QUOTEX LORD v10+ ⚡\n\n"
-            "14-layer ML pipeline:\n"
+            "⚡ QUOTEX LORD v11 ⚡\n\n"
+            "18-layer ML pipeline:\n"
             "  6 model ensemble + isotonic calibration\n"
             "  (XGB×2 + HistGBM + ExtraTrees + RF + CatBoost)\n"
             "  HistGBM meta-model (reliability)\n"
             "  Logistic weight learner (confidence)\n"
-            "  Triple barrier labels (TP=1.5×ATR, SL=1.0×ATR)\n"
+            "  Symmetric triple barrier (TP=1.5×ATR, SL=1.0×ATR)\n"
             "  Multi-TF confluence (M5/M15/H1)\n"
+            "  🆕 Anti-Streak Engine (prevents directional collapse)\n"
+            "  🆕 Candle Quality Filter (detects stale candles)\n"
+            "  🆕 Momentum Exhaustion Detector\n"
+            "  🆕 Hour Gating + Symbol Confidence\n"
             "  Signal validator + quality filter\n"
             "  Circuit breaker (5 losses / 8% DD)\n"
             "  Online learning (SGD/PA)\n"
             "  Feature drift detection (PSI/KS)\n\n"
-            f"Features: 103 forward-safe\n"
+            f"Features: {len(FEATURE_COLUMNS)} forward-safe\n"
             f"Symbols: {len(SYMBOLS)}\n"
             "Quality over quantity."
         )
+        await query.edit_message_text(text, reply_markup=_main_menu(chat_id))
+
+    elif data == "performance":
+        try:
+            total = len(_outcome_results)
+            lines = ["🏆 Performance Report\n"]
+            if total > 0:
+                wins = sum(1 for r in _outcome_results if r.get("correct"))
+                pct = wins / total * 100
+                lines.append(f"📊 All-Time: {wins}W / {total - wins}L ({pct:.1f}%)")
+                lines.append(f"🔥 Streak: {_total_streak} | 🏆 Peak: {_peak_accuracy*100:.1f}%")
+
+                # Confidence accuracy
+                high_conf = [r for r in _outcome_results if r.get("confidence", 0) >= 70]
+                low_conf = [r for r in _outcome_results if r.get("confidence", 0) < 70]
+                if high_conf:
+                    hc_w = sum(1 for r in high_conf if r.get("correct"))
+                    hc_pct = hc_w / len(high_conf) * 100
+                    lines.append(f"\n💎 High Conf (≥70%): {hc_w}/{len(high_conf)} ({hc_pct:.0f}%)")
+                if low_conf:
+                    lc_w = sum(1 for r in low_conf if r.get("correct"))
+                    lc_pct = lc_w / len(low_conf) * 100
+                    lines.append(f"📉 Low Conf (<70%):  {lc_w}/{len(low_conf)} ({lc_pct:.0f}%)")
+
+                # Best hours
+                hour_stats = {}
+                for r in _outcome_results:
+                    ts = r.get("timestamp", "")
+                    if len(ts) >= 13:
+                        h = ts[11:13]
+                        if h not in hour_stats:
+                            hour_stats[h] = {"w": 0, "t": 0}
+                        hour_stats[h]["t"] += 1
+                        if r.get("correct"):
+                            hour_stats[h]["w"] += 1
+                if hour_stats:
+                    sorted_hours = sorted(hour_stats.items(), key=lambda x: x[1]["w"] / max(x[1]["t"], 1), reverse=True)
+                    lines.append("\n⏰ Best Hours:")
+                    for h, v in sorted_hours[:3]:
+                        hp = v["w"] / v["t"] * 100 if v["t"] > 0 else 0
+                        lines.append(f"  {h}:00 UTC — {v['w']}/{v['t']} ({hp:.0f}%) 🔥")
+            else:
+                lines.append("No outcomes yet.")
+            text = "\n".join(lines)
+        except Exception as e:
+            text = f"Performance error: {e}"
+        await query.edit_message_text(text, reply_markup=_main_menu(chat_id))
+
+    elif data == "market":
+        try:
+            now_utc = datetime.now(timezone.utc)
+            hour = now_utc.hour
+            if 0 <= hour < 7:
+                session = "🌏 Asian"
+            elif 7 <= hour < 12:
+                session = "🇪🇺 London"
+            elif 12 <= hour < 16:
+                session = "🇺🇸 NY+London"
+            elif 16 <= hour < 21:
+                session = "🇺🇸 New York"
+            else:
+                session = "🌙 Off-Hours"
+
+            lines = [
+                "🌍 Market Overview\n",
+                f"⏰ {now_utc.strftime('%H:%M UTC')} | {session}",
+                "",
+            ]
+            if _last_regime:
+                lines.append("🌊 Regimes:")
+                for sym, regime in sorted(_last_regime.items()):
+                    lines.append(f"  {sym}: {regime}")
+            if _symbol_min_confidence:
+                lines.append("\n🎯 Adaptive Thresholds:")
+                for sym, thresh in sorted(_symbol_min_confidence.items()):
+                    lines.append(f"  {sym}: {thresh:.0f}%")
+            lines.append(f"\n🛡 Circuit Breaker: {'🔴 HALTED' if _cb.is_halted else '🟢 ACTIVE'}")
+            text = "\n".join(lines)
+        except Exception as e:
+            text = f"Market error: {e}"
         await query.edit_message_text(text, reply_markup=_main_menu(chat_id))
 
 
@@ -1371,18 +1755,36 @@ def _get_status_text() -> str:
     n_outcomes = len(_outcome_results)
     acc = _accuracy.accuracy if hasattr(_accuracy, 'accuracy') else 0
     corr = _conf_corr.correlation if hasattr(_conf_corr, 'correlation') else 0
-    cb_status = "HALTED" if _cb.is_halted else "OK"
+    cb_status = "🔴 HALTED" if _cb.is_halted else "🟢 OK"
     losses = _cb.consecutive_losses
 
+    now_utc = datetime.now(timezone.utc)
+    today = now_utc.strftime("%Y-%m-%d")
+    today_outcomes = [r for r in _outcome_results if r.get("timestamp", "").startswith(today)]
+    today_wins = sum(1 for r in today_outcomes if r.get("correct"))
+    today_total = len(today_outcomes)
+    today_pct = today_wins / today_total * 100 if today_total > 0 else 0
+
+    # Pending signals count
+    n_pending = len(_pending_signals)
+
+    # Uptime estimate from outcome history
+    first_ts = _outcome_results[0].get("timestamp", "") if _outcome_results else ""
+
     return (
-        "System Status\n\n"
-        f"Subscribers: {n_subs} active\n"
-        f"Total outcomes: {n_outcomes}\n"
-        f"Rolling accuracy: {acc*100:.1f}%\n"
-        f"Conf correlation: {corr:.3f}\n"
-        f"Circuit breaker: {cb_status}\n"
-        f"Consecutive losses: {losses}\n"
-        f"Pair scores: {dict(sorted(_pair_scores.items()))}\n"
+        "⚙️ System Status\n\n"
+        f"👥 Subscribers: {n_subs} active\n"
+        f"📊 Total outcomes: {n_outcomes}\n"
+        f"📈 Rolling accuracy: {acc*100:.1f}%\n"
+        f"📉 Conf correlation: {corr:.3f}\n"
+        f"🛡 Circuit breaker: {cb_status}\n"
+        f"⚠️ Consecutive losses: {losses}\n"
+        f"⏳ Pending signals: {n_pending}\n"
+        f"🔥 Overall streak: {_total_streak}\n"
+        f"🏆 Peak accuracy: {_peak_accuracy*100:.1f}%\n"
+        f"\n📅 Today ({today}):\n"
+        f"  Signals: {today_total} | Win: {today_wins} ({today_pct:.0f}%)\n"
+        f"\n📊 Pair scores: {dict(sorted(_pair_scores.items()))}\n"
     )
 
 
@@ -1736,6 +2138,16 @@ async def _auto_signal_job(app: Application):
                     regime = pred.get("market_regime", "Unknown")
                     risk_warnings = pred.get("risk_warnings", [])
 
+                    # v11: Symbol-specific confidence adjustment
+                    try:
+                        from config import V11_SYMBOL_CONFIDENCE_ADJUSTMENTS
+                        sym_mult = V11_SYMBOL_CONFIDENCE_ADJUSTMENTS.get(sym, 1.0)
+                        if sym_mult != 1.0:
+                            conf = conf * sym_mult
+                            pred["final_confidence_percent"] = conf
+                    except Exception:
+                        pass
+
                     # Regime transition detection
                     prev = _last_regime.get(sym)
                     if prev and regime != prev:
@@ -1931,6 +2343,7 @@ async def _auto_signal_job(app: Application):
                         "sig_ids": sig_ids,
                         "results": {},
                     }
+                    _save_cycle_messages()
 
                 # Persist pending signals (with db_ids now attached)
                 try:
@@ -1942,6 +2355,25 @@ async def _auto_signal_job(app: Application):
                 log.info("Sent %d signals to %d subscribers.", len(predictions), len(sent_ids))
             else:
                 log.info("No signals passed filters this cycle.")
+                # ── No-Signal Notification ──
+                now_utc = datetime.now(timezone.utc)
+                no_sig_msg = (
+                    "\u23f3 *No Signal Available*\n\n"
+                    f"\u23f0 Time: {now_utc.strftime('%H:%M UTC')}\n"
+                    f"\U0001f50d Pairs scanned: {len(SYMBOLS)}\n"
+                )
+                if filtered_out:
+                    reasons = list(filtered_out.values())[:3]
+                    no_sig_msg += f"\u274c Filtered: {len(filtered_out)} pair(s)\n"
+                    for r in reasons:
+                        no_sig_msg += f"  \u2022 {r[:60]}\n"
+                no_sig_msg += (
+                    "\n\U0001f504 Next scan in ~5 minutes.\n"
+                    "\U0001f4a1 _Only high-confidence signals are sent._"
+                )
+                for cid, info in active_subs.items():
+                    if info.get("active"):
+                        await _safe_send(bot, cid, no_sig_msg)
 
         except Exception as e:
             log.error("Auto-signal cycle error: %s", e, exc_info=True)
@@ -2096,7 +2528,7 @@ async def _retrain_check_job(app: Application):
 # =============================================================================
 
 def main():
-    """Initialize and start the v10 bot."""
+    """Initialize and start the v11 bot."""
     if not TELEGRAM_BOT_TOKEN:
         log.error("TELEGRAM_BOT_TOKEN not set. Exiting.")
         sys.exit(1)
@@ -2130,6 +2562,9 @@ def main():
     except Exception:
         _pending_signals = {}
 
+    # Load cycle messages (for result editing after restart)
+    _load_cycle_messages()
+
     record_startup()
 
     # Build application
@@ -2147,10 +2582,12 @@ def main():
     app.add_handler(CommandHandler("audit", cmd_audit))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
+    app.add_handler(CommandHandler("performance", cmd_performance))
+    app.add_handler(CommandHandler("market", cmd_market))
     app.add_handler(CallbackQueryHandler(_handle_callback))
 
     async def _on_startup(app_ref: Application):
-        log.info("Telegram bot starting (v10)...")
+        log.info("Telegram bot starting (v11)...")
 
         # Start background tasks
         asyncio.create_task(_auto_signal_job(app_ref))
@@ -2162,7 +2599,7 @@ def main():
 
     app.post_init = _on_startup
 
-    log.info("QUOTEX LORD v10 starting...")
+    log.info("QUOTEX LORD v11 starting...")
     app.run_polling(drop_pending_updates=True)
 
 

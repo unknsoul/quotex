@@ -1,15 +1,13 @@
 """
-Predict Engine — Production-safe, race-condition protected.
+Predict Engine — v11 Production-safe, anti-streak, candle-quality aware.
 
-Features:
+v11 upgrades:
+  - Anti-streak engine: prevents directional collapse
+  - Candle quality filter: detects stale/repetitive candles
+  - Momentum exhaustion: detects trend exhaustion
+  - Hour gating: blocks worst-performing hours
+  - Symbol confidence adjustments: data-driven per-symbol scaling
   - Race condition protection via retrain lock
-  - Candle integrity verification (only closed candles)
-  - Uncertainty from ensemble variance: confidence *= (1 - normalized_variance)
-  - Sigmoid-calibrated meta (Platt scaling)
-  - Rolling confidence-accuracy correlation tracking
-  - Adaptive confidence (rolling calibration window)
-  - Kelly criterion position sizing
-  - Model cached in memory
 
 Live parity: meta features built identically to training
   (ensemble_variance, no spread_ratio, no correctness-derived features)
@@ -48,6 +46,20 @@ from config import (
     PRODUCTION_BLOCKED_REGIMES,
     LOG_LEVEL, LOG_FORMAT,
 )
+
+# v11 imports
+from config import (
+    V11_ANTI_STREAK_ENABLED, V11_CANDLE_QUALITY_ENABLED,
+    V11_CANDLE_FRESHNESS_MIN, V11_CANDLE_QUALITY_MIN,
+    V11_EXHAUSTION_ENABLED, V11_EXHAUSTION_SKIP_THRESHOLD,
+    V11_EXHAUSTION_PENALTY_START,
+    V11_HOUR_GATING_ENABLED, V11_BLOCKED_HOURS, V11_BOOSTED_HOURS,
+    V11_HOUR_BOOST_MULT,
+    V11_SYMBOL_CONFIDENCE_ADJUSTMENTS,
+)
+from candle_quality import candle_quality_score, candle_freshness_score
+from anti_streak import apply_streak_correction, get_streak_engine
+from momentum_exhaust import compute_exhaustion_score
 from regime_detection import (
     get_regime_thresholds, regime_stability_score, get_session,
     get_trend_alignment,
@@ -530,22 +542,105 @@ def predict(df, regime):
         # Confidence reliability (rolling correlation)
         conf_reliability, conf_alert = get_confidence_reliability()
 
+        # ═══════════════════════════════════════════════════════════
+        # ═══ v11: NEW FILTERS (anti-streak, candle quality, exhaustion, hour/symbol gating)
+        # ═══════════════════════════════════════════════════════════
+        
+        v11_skip_reasons = []
+        predicted_dir = "UP" if green_p >= 0.5 else "DOWN"
+        
+        # v11 Layer 1: Hour Gating (blocks worst hours: 09=37.5%, 10=23.5% WR)
+        hour_val = None
+        try:
+            last_row = df.iloc[-1]
+            if hasattr(last_row, 'get'):
+                t = last_row.get("time", None)
+                if t is not None and hasattr(t, 'hour'):
+                    hour_val = t.hour
+        except Exception:
+            pass
+        
+        if V11_HOUR_GATING_ENABLED and hour_val is not None:
+            if hour_val in V11_BLOCKED_HOURS:
+                v11_skip_reasons.append(f"Blocked hour ({hour_val:02d} UTC)")
+            elif hour_val in V11_BOOSTED_HOURS:
+                confidence *= V11_HOUR_BOOST_MULT
+        
+        # v11 Layer 2: Candle Quality Filter (stale/repetitive candles)
+        candle_info = {"quality": 50.0, "freshness": 1.0}
+        if V11_CANDLE_QUALITY_ENABLED:
+            try:
+                candle_info = candle_quality_score(df)
+                if candle_info["freshness"] < V11_CANDLE_FRESHNESS_MIN:
+                    v11_skip_reasons.append(
+                        f"Stale candle (freshness={candle_info['freshness']:.2f})"
+                    )
+                elif candle_info["quality"] < V11_CANDLE_QUALITY_MIN:
+                    v11_skip_reasons.append(
+                        f"Low candle quality ({candle_info['quality']:.0f})"
+                    )
+            except Exception as e:
+                log.debug("Candle quality check failed: %s", e)
+        
+        # v11 Layer 3: Anti-Streak Engine (prevents directional collapse)
+        streak_reason = ""
+        if V11_ANTI_STREAK_ENABLED:
+            try:
+                adj_conf, force_hold, streak_reason = apply_streak_correction(
+                    predicted_dir, confidence * 100
+                )
+                if force_hold:
+                    v11_skip_reasons.append(streak_reason)
+                elif streak_reason:
+                    confidence = adj_conf / 100.0
+            except Exception as e:
+                log.debug("Anti-streak check failed: %s", e)
+        
+        # v11 Layer 4: Momentum Exhaustion
+        exhaustion_info = {"exhaustion_score": 0, "should_skip": False}
+        if V11_EXHAUSTION_ENABLED:
+            try:
+                exhaustion_info = compute_exhaustion_score(df, predicted_dir)
+                if exhaustion_info["should_skip"]:
+                    v11_skip_reasons.append(exhaustion_info.get("reason", "Trend exhausted"))
+                elif exhaustion_info["exhaustion_score"] > V11_EXHAUSTION_PENALTY_START:
+                    # Proportional penalty between 50-75%
+                    excess = exhaustion_info["exhaustion_score"] - V11_EXHAUSTION_PENALTY_START
+                    penalty = min(excess / 50.0 * 0.15, 0.15)
+                    confidence *= (1.0 - penalty)
+            except Exception as e:
+                log.debug("Exhaustion check failed: %s", e)
+        
+        # v11 Layer 5: Symbol-Specific Confidence Adjustment
+        # Applied later in telegram_bot when symbol is known, but if df has symbol info:
+        # (This is handled in the result dict for the caller to apply)
+        
+        # ═══ END v11 FILTERS ═══════════════════════════════════════
+
         # Adaptive confidence (rolling calibration)
         raw_confidence_pct = round(confidence * 100, 2)
         adaptive_conf = _adaptive_confidence(raw_confidence_pct)
-        trade, skip_reason, confidence_pct, quality_score = _apply_production_gate(
-            df=df,
-            regime=regime,
-            green_p=green_p,
-            meta_rel=meta_rel,
-            confidence_pct=raw_confidence_pct,
-            adaptive_conf_pct=adaptive_conf,
-            unanimity=unanimity,
-            uncertainty_pct=uncertainty_pct,
-            stability_score=stability_score,
-            conf_alert=conf_alert,
-            ensemble_variance=variance,
-        )
+        
+        # If v11 filters say skip, force HOLD before production gate
+        if v11_skip_reasons:
+            trade = "HOLD"
+            skip_reason = "; ".join(v11_skip_reasons[:3])
+            confidence_pct = raw_confidence_pct
+            quality_score = 0.0
+        else:
+            trade, skip_reason, confidence_pct, quality_score = _apply_production_gate(
+                df=df,
+                regime=regime,
+                green_p=green_p,
+                meta_rel=meta_rel,
+                confidence_pct=raw_confidence_pct,
+                adaptive_conf_pct=adaptive_conf,
+                unanimity=unanimity,
+                uncertainty_pct=uncertainty_pct,
+                stability_score=stability_score,
+                conf_alert=conf_alert,
+                ensemble_variance=variance,
+            )
 
         # Convert to percentages
         green_pct = round(green_p * 100, 2)
@@ -573,6 +668,13 @@ def predict(df, regime):
             kelly_pct = round(kelly_quarter * 100, 1)
 
         # Direction history already updated above (before meta row building)
+
+        # v11: Record prediction in anti-streak engine
+        if V11_ANTI_STREAK_ENABLED and trade != "HOLD":
+            try:
+                get_streak_engine().record_prediction(predicted_dir)
+            except Exception:
+                pass
 
         # Latency measurement
         latency_ms = round((time.perf_counter() - t_start) * 1000, 1)
@@ -626,6 +728,11 @@ def predict(df, regime):
             "reason_chain": reason_chain,
             "total_skips": _skip_count,
             "latency_ms": latency_ms,
+            # v11 fields
+            "candle_freshness": candle_info.get("freshness", 1.0),
+            "candle_quality": candle_info.get("quality", 50.0),
+            "exhaustion_score": exhaustion_info.get("exhaustion_score", 0),
+            "streak_length": get_streak_engine().current_streak_len if V11_ANTI_STREAK_ENABLED else 0,
         }
 
         log.info(
@@ -661,6 +768,11 @@ def _safe_fallback(reason="unknown"):
         "total_skips": _skip_count,
         "latency_ms": -1,
         "error": reason,
+        # v11 fields
+        "candle_freshness": 1.0,
+        "candle_quality": 0.0,
+        "exhaustion_score": 0,
+        "streak_length": 0,
     }
 
 def update_prediction_history(green_p, was_correct, confidence=0.5):

@@ -1,14 +1,16 @@
 """
-Triple Barrier Labeler — V3 Layer 4: Industry-standard labeling with sample weights.
+Triple Barrier Labeler — V4 (v11): Symmetric barrier checking.
 
 For each bar, checks which barrier is hit first:
   - Take-profit: high[t+k] >= close[t] + tp_mult * ATR → label = 1
   - Stop-loss:   low[t+k]  <= close[t] - sl_mult * ATR → label = 0
-  - Time barrier: k > max_bars → label based on return sign (not NaN)
+  - BOTH hit in same bar (v11 fix): label based on open-to-close direction
+  - Time barrier: k > max_bars → label based on return sign
 
-Key difference from V2: time barrier assigns label based on return direction
-(not NaN), and produces tb_weight for sample weighting (higher weight for
-clear TP/SL hits, lower for time barrier exits).
+V4 change (v11): If both TP and SL are breached in the same bar,
+we no longer always give TP priority. Instead, we check the bar's
+open-to-close direction to determine which was likely hit first.
+This eliminates bullish labeling bias from v3.
 """
 
 import numpy as np
@@ -37,6 +39,7 @@ def label_triple_barrier(df, tp_mult=DEFAULT_TP_MULT, sl_mult=DEFAULT_SL_MULT,
     close = df["close"].values
     high = df["high"].values
     low = df["low"].values
+    open_ = df["open"].values
     
     # Use raw ATR (not normalized) for barrier levels
     if "atr_14" in df.columns:
@@ -71,16 +74,32 @@ def label_triple_barrier(df, tp_mult=DEFAULT_TP_MULT, sl_mult=DEFAULT_SL_MULT,
             if j >= n:
                 break
             
-            # Check TP hit first (bullish)
-            if high[j] >= tp_level:
+            tp_hit = high[j] >= tp_level
+            sl_hit = low[j] <= sl_level
+            
+            # V4 FIX: Both barriers hit in same bar — use bar direction
+            if tp_hit and sl_hit:
+                bar_return = close[j] - open_[j]
+                if bar_return >= 0:  # bullish bar → TP likely first
+                    targets[i] = 1.0
+                    barrier_types[i] = "TP"
+                else:  # bearish bar → SL likely first
+                    targets[i] = 0.0
+                    barrier_types[i] = "SL"
+                weights[i] = 0.75  # lower weight — ambiguous
+                hit = True
+                break
+            
+            # Only TP hit
+            if tp_hit:
                 targets[i] = 1.0
                 weights[i] = 1.0
                 barrier_types[i] = "TP"
                 hit = True
                 break
             
-            # Check SL hit (bearish)
-            if low[j] <= sl_level:
+            # Only SL hit
+            if sl_hit:
                 targets[i] = 0.0
                 weights[i] = 1.0
                 barrier_types[i] = "SL"

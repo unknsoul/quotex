@@ -1,8 +1,14 @@
 """
-Central configuration — QUOTEX LORD v10 Production Engine.
+Central configuration — QUOTEX LORD v11 Production Engine.
 
-14-layer pipeline: 5-model ensemble + HistGBM meta + logistic weight learner.
-Triple barrier labels (TP=1.5×ATR, SL=1.0×ATR, max_bars=4).
+v11 upgrades:
+  - Anti-streak engine (prevents directional collapse)
+  - Candle quality filter (detects stale/repetitive candles)
+  - Momentum exhaustion detector
+  - Symmetric triple barrier labeling (fixes bullish bias)
+  - Hour gating (blocks worst-performing hours)
+  - Symbol-specific confidence adjustments
+  - Data-driven from 418 outcome analysis
 """
 
 import os
@@ -254,3 +260,44 @@ SESSION_BLOCK_MAP = {
 # --- Performance Dashboard ---------------------------------------------------
 DASHBOARD_DIR = os.path.join(LOG_DIR, "dashboards")
 DASHBOARD_ROLLING_WINDOW = 50    # trades for rolling metrics
+
+# --- v11: Anti-Streak Engine (data-driven from 418 outcomes) -----------------
+# Model predicted DOWN 96% of last 100 signals. Long streaks (>10) had 49.8% WR
+# vs short streaks (<=3) at 55% WR. This fixes directional collapse.
+V11_ANTI_STREAK_ENABLED = True
+V11_STREAK_PENALTY_START = 4         # Start penalizing after N consecutive same-direction
+V11_STREAK_PENALTY_RATE = 0.04       # 4% penalty per excess signal
+V11_STREAK_MAX_PENALTY = 0.30        # Maximum 30% reduction
+V11_STREAK_FORCE_HOLD = 12           # Force HOLD after 12 consecutive same-direction
+
+# --- v11: Candle Quality Filter ----------------------------------------------
+# Detects stale/repetitive candles in trending markets (user's specific concern)
+V11_CANDLE_QUALITY_ENABLED = True
+V11_CANDLE_FRESHNESS_MIN = 0.12      # Skip if freshness < 12% (very stale)
+V11_CANDLE_QUALITY_MIN = 25.0        # Skip if quality score < 25/100
+
+# --- v11: Momentum Exhaustion ------------------------------------------------
+V11_EXHAUSTION_ENABLED = True
+V11_EXHAUSTION_SKIP_THRESHOLD = 75   # Skip if exhaustion > 75%
+V11_EXHAUSTION_PENALTY_START = 50    # Start penalizing at 50%
+
+# --- v11: Hour Gating (data-driven from outcome analysis) --------------------
+# Hours with <45% win rate are blocked; hours with 60%+ get boosted
+V11_HOUR_GATING_ENABLED = True
+V11_BLOCKED_HOURS = [9, 10]          # 23.5% and 37.5% WR — block entirely
+V11_BOOSTED_HOURS = [5, 14, 16]      # 64%+ WR — boost confidence by 5%
+V11_HOUR_BOOST_MULT = 1.05
+
+# --- v11: Symbol-Specific Confidence Adjustments (data-driven) ---------------
+# EURUSD (42.1%) and AUDUSD (42.3%) need higher thresholds
+V11_SYMBOL_CONFIDENCE_ADJUSTMENTS = {
+    "USDJPY": 1.05,     # 60.3% WR — slight boost
+    "XAUUSD": 1.02,     # 55.7% WR — slight boost
+    "GBPUSD": 1.00,     # 51.9% WR — neutral
+    "GBPJPY": 1.00,     # 50.7% WR — neutral
+    "EURUSD": 0.90,     # 42.1% WR — needs higher bar
+    "AUDUSD": 0.90,     # 42.3% WR — needs higher bar
+}
+
+# --- v11: Symmetric Triple Barrier -------------------------------------------
+V11_TRIPLE_BARRIER_SYMMETRIC = True  # Use symmetric TP/SL checking (fixes bias)
