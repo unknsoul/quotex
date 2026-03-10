@@ -23,5 +23,8 @@ pydantic>=2.0
 # Charts
 matplotlib>=3.7
 
+# Deep Learning (v15)
+torch>=2.0
+
 # Environment
 python-dotenv>=1.0

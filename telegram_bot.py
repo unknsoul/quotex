@@ -1,5 +1,5 @@
 """
-QUOTEX LORD v11 — Advanced 21-Layer ML Trading Signal Engine.
+QUOTEX LORD v15 — Advanced ML Trading Signal Engine with GRU Deep Learning.
 
 14-layer pipeline:
   1. Data Collector       — fetch OHLCV from MT5
@@ -485,7 +485,7 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
             worst_pair = f"🥉 Worst: {worst_sym} ({ww['w']}/{ww['t']})"
 
     lines = [
-        "⚡ QUOTEX LORD v11 ⚡",
+        "⚡ QUOTEX LORD v15 ⚡",
         f"⏰ {now_str}",
         f"📊 Analyzed: {n_analyzed} | Passed: {n_passed}",
         "━" * 26,
@@ -1129,12 +1129,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _save_subscribers()
 
     text = (
-        "⚡ QUOTEX LORD v11 Advanced ⚡\n\n"
+        "⚡ QUOTEX LORD v15 Advanced ⚡\n\n"
         "9-Strategy | 12-Pattern | Same-Candle Guard\n"
-        "21-layer ML pipeline with smart confidence scaling.\n\n"
+        "v15 ML pipeline with GRU deep learning + smart confidence.\n\n"
         f"📊 Symbols: {', '.join(SYMBOLS)}\n"
         f"⏱ Timeframe: M5 (5-minute candles)\n"
-        f"🤖 6 ML models + meta-model ensemble\n"
+        f"🤖 9 ML models + GRU + meta-model ensemble\n"
         f"🛡 Auto risk management & circuit breaker\n\n"
         "Features:\n"
         "• Auto-signals every 5 min\n"
@@ -1563,7 +1563,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "back":
         await query.edit_message_text(
-            "⚡ QUOTEX LORD v11 Advanced ⚡\n\nUse the menu below.",
+            "⚡ QUOTEX LORD v15 Advanced ⚡\n\nUse the menu below.",
             reply_markup=_main_menu(chat_id),
         )
 
@@ -1723,13 +1723,13 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "info":
         text = (
-            "⚡ QUOTEX LORD v11 Advanced ⚡\n\n"
-            "21-layer ML pipeline:\n"
+            "⚡ QUOTEX LORD v15 Advanced ⚡\n\n"
+            "v15 ML pipeline:\n"
             "  ✅ Same-Candle Detector (SC-1 to SC-5)\n"
             "  ✅ 9-Strategy Signal Engine (parallel)\n"
             "  ✅ 12 Candlestick Pattern Overlay\n"
             "  ✅ Crossover Staleness Tracker\n"
-            "  ✅ 6 model ensemble + isotonic calibration\n"
+            "  ✅ 9 model ensemble + GRU + isotonic calibration\n"
             "  (XGB×2 + HistGBM + ExtraTrees + RF + CatBoost)\n"
             "  ✅ HistGBM meta-model (reliability)\n"
             "  ✅ Logistic weight learner (confidence)\n"
@@ -2724,7 +2724,7 @@ def main():
 
     app.post_init = _on_startup
 
-    log.info("QUOTEX LORD v11 Advanced starting...")
+    log.info("QUOTEX LORD v15 Advanced starting...")
     app.run_polling(drop_pending_updates=True)
 
 

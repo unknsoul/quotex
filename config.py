@@ -1,20 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Central configuration - QUOTEX LORD v11 Advanced Production Engine.
+"""Central configuration - QUOTEX LORD v15 Production Engine.
 
-v11 upgrades:
-  - 9 Strategy Signal Engine (parallel evaluation)
-  - Same-Candle / Stale Candle Detector (SC-1 to SC-5)
-  - Staleness Tracker (crossover signal decay)
-  - 12 Candlestick Pattern Overlay
-  - CHOPPY regime detection + signal suspension
-  - Anti-streak engine (prevents directional collapse)
-  - Candle quality filter (detects stale/repetitive candles)
-  - Momentum exhaustion detector
-  - Symmetric triple barrier labeling (fixes bullish bias)
-  - Hour-strategy confidence scaling (no blocking)
-  - Symbol-specific confidence adjustments
-  - Martingale money management (capped at step 3)
-  - Data-driven from 418 outcome analysis
+v15 upgrades:
+  - 9 training symbols (added GBPJPY, XAUUSD, NZDUSD) — 900K+ rows
+  - GRU deep learning model as 8th/9th ensemble member
+  - 30+ new features (cross-pair, fractal, wavelet energy, microstructure v2)
+  - Walk-forward training with purged embargo
+  - Session-aware ensemble weight optimization
+  - Multi-timeframe voting at prediction time
+  - Dynamic self-correcting confidence thresholds
+  - Upgraded meta model with sequence features
+  - Improved calibration with temperature scaling
 """
 
 import os
@@ -58,10 +54,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # --- Data Settings -----------------------------------------------------------
 DEFAULT_SYMBOL = "EURUSD"
-SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"]
-CANDLES_TO_FETCH = 50000
-MTF_TIMEFRAMES = ["M5", "M15", "H1"]
-TRAINING_SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"]  # v14: multi-symbol training
+SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "GBPJPY", "XAUUSD", "NZDUSD"]
+CANDLES_TO_FETCH = 99999
+MTF_TIMEFRAMES = ["M1", "M5", "M15", "H1"]
+TRAINING_SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "GBPJPY", "XAUUSD", "NZDUSD"]  # v15: 9-symbol training
 
 # --- EMA Periods -------------------------------------------------------------
 EMA_20 = 20
@@ -148,11 +144,11 @@ CONFIDENCE_MEDIUM_MIN = 60.0
 
 # --- Production Decision Gate -----------------------------------------------
 PRODUCTION_SIGNAL_GATING_ENABLED = True
-PRODUCTION_MIN_CONFIDENCE = 52.0       # v14.1: balanced (was 58, blocked too many borderline signals)
-PRODUCTION_MIN_META_RELIABILITY = 48.0  # v14: raised from 45
-PRODUCTION_MIN_UNANIMITY = 0.667        # v14: at least 4/6 models must agree
-PRODUCTION_MAX_UNCERTAINTY = 8.0         # v14: tightened from 10
-PRODUCTION_MIN_QUALITY_SCORE = 40.0      # v14: raised from 30
+PRODUCTION_MIN_CONFIDENCE = 54.0       # v15: slightly higher with better model
+PRODUCTION_MIN_META_RELIABILITY = 50.0  # v15: raised — meta model more reliable
+PRODUCTION_MIN_UNANIMITY = 0.625        # v15: 5/8 models must agree (more members)
+PRODUCTION_MAX_UNCERTAINTY = 10.0        # v15: relaxed for larger ensemble
+PRODUCTION_MIN_QUALITY_SCORE = 35.0      # v15: slightly relaxed
 PRODUCTION_CONFIDENCE_ALERT_PENALTY = 0.95
 PRODUCTION_REQUIRE_TREND_ALIGNMENT = False
 PRODUCTION_BLOCKED_REGIMES = {"CHOPPY", "Ranging"}  # v14: Ranging=41% accuracy from 405 outcomes
@@ -163,20 +159,20 @@ SPREAD_PERCENTILE = 90
 ATR_SPIKE_MULTIPLIER = 3.0
 
 # --- Ensemble (5 seeded XGBoost) --------------------------------------------
-ENSEMBLE_SEEDS = [42, 123, 456, 789, 1024, 2048, 4096, 8192]  # v14: 8 seeds for up to 8 ensemble members
+ENSEMBLE_SEEDS = [42, 123, 456, 789, 1024, 2048, 4096, 8192, 16384]  # v15: 9 seeds
 ENSEMBLE_SIZE = len(ENSEMBLE_SEEDS)
 
 # --- XGBoost Primary Hyperparams (Optuna Phase 9) ---------------------------
-# v14: Improved hyperparameters — more estimators, deeper trees, stronger regularization
-XGB_N_ESTIMATORS = 450
-XGB_MAX_DEPTH = 5  
-XGB_LEARNING_RATE = 0.004
-XGB_SUBSAMPLE = 0.75
-XGB_COLSAMPLE_BYTREE = 0.70
-XGB_MIN_CHILD_WEIGHT = 18
-XGB_GAMMA = 3.0
-XGB_REG_ALPHA = 0.5
-XGB_REG_LAMBDA = 2.0
+# --- v15: Optimized for 900K+ rows, deeper regularization
+XGB_N_ESTIMATORS = 600
+XGB_MAX_DEPTH = 6
+XGB_LEARNING_RATE = 0.003
+XGB_SUBSAMPLE = 0.70
+XGB_COLSAMPLE_BYTREE = 0.65
+XGB_MIN_CHILD_WEIGHT = 25
+XGB_GAMMA = 4.0
+XGB_REG_ALPHA = 1.0
+XGB_REG_LAMBDA = 3.0
 TIMESERIES_SPLITS = 5
 
 # --- Calibration Split -------------------------------------------------------
@@ -234,7 +230,7 @@ DATA_BUFFER_SIZE = 20000
 MODEL_BACKUP_DIR = os.path.join(BASE_DIR, "models", "backup")
 
 # --- Signal Validator --------------------------------------------------------
-SIGNAL_MIN_CONFIDENCE = 58.0          # v14: aligned with production gate (raised from 42)
+SIGNAL_MIN_CONFIDENCE = 54.0          # v15: aligned with production gate
 SIGNAL_DUPLICATE_WINDOW_SEC = 300     # 5 min duplicate guard
 SIGNAL_MAX_PER_HOUR = 8              # raised from 6 to allow more signals
 SIGNAL_REQUIRE_MTF_ALIGNMENT = True   # block if multi-TF opposes direction
@@ -293,16 +289,17 @@ V11_WEAK_HOUR_MIN_UNANIMITY = 0.50   # v13: Relaxed — no weak-hour extra unani
 
 # --- v11: Symbol-Specific Confidence Adjustments (data-driven) ---------------
 # EURUSD (42.1%) and AUDUSD (42.3%) need higher thresholds
-# v14: Updated from 405 live outcomes analysis
+# v15: Reset — new model trained on all 9 symbols, start fresh
 V11_SYMBOL_CONFIDENCE_ADJUSTMENTS = {
-    "USDJPY": 1.08,     # 58.8% WR — best performer, boost
-    "XAUUSD": 1.05,     # 56.8% WR — strong performer
-    "GBPUSD": 0.95,     # 47.1% WR — slight penalty
-    "GBPJPY": 0.92,     # 43.2% WR — penalty
-    "EURUSD": 0.85,     # 39.3% WR — heavy penalty
-    "AUDUSD": 0.82,     # 40.0% WR — heaviest penalty
-    "USDCAD": 0.95,     # moderate
-    "USDCHF": 0.95,     # moderate
+    "USDJPY": 1.05,
+    "XAUUSD": 1.03,
+    "GBPUSD": 0.98,
+    "GBPJPY": 0.97,
+    "EURUSD": 0.95,
+    "AUDUSD": 0.95,
+    "USDCAD": 0.98,
+    "USDCHF": 0.98,
+    "NZDUSD": 0.97,
 }
 
 # --- v11: Symmetric Triple Barrier -------------------------------------------

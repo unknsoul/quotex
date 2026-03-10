@@ -129,6 +129,44 @@ FEATURE_COLUMNS = [
     "pattern_score",               # Candlestick pattern score (-20 to +20 scaled to 0-1)
     "strategy_agreement",          # Fraction of 8 strategies agreeing (0-1)
     "strategy_composite",          # Composite strategy score (0-100 scaled to 0-1)
+    # ═══════ v15: Advanced Features (30 new) ═══════
+    # Cross-timeframe features
+    "m15_rsi",                     # M15 RSI value
+    "h1_rsi",                      # H1 RSI value
+    "m15_bb_position",             # M15 Bollinger Band position
+    "h1_adx",                      # H1 ADX strength
+    "tf_rsi_agreement",            # Agreement of RSI across M5/M15/H1
+    # Fractal / Market structure
+    "fractal_dimension",           # Fractal dimension (Higuchi method proxy)
+    "hurst_exponent",              # Hurst exponent (trending vs mean-reverting)
+    "efficiency_ratio",            # Kaufman efficiency ratio
+    # Wavelet / Frequency domain energy
+    "high_freq_energy",            # High-frequency component energy
+    "low_freq_energy",             # Low-frequency (trend) energy ratio
+    # Advanced order flow
+    "buy_pressure_ratio",          # Buy volume / total volume (rolling)
+    "aggressive_ratio",            # Large moves / all moves
+    "absorption_rate_5",           # Wick absorption momentum (5-bar)
+    # Regime quantification
+    "regime_persistence",          # How long current regime has lasted
+    "regime_transition_prob",      # Probability of regime change
+    "volatility_of_volatility",    # Vol of vol (VVIX proxy)
+    # Advanced candle features
+    "inside_bar",                  # Inside bar pattern (1/0)
+    "outside_bar",                 # Outside bar pattern (1/0)
+    "three_bar_reversal",          # Three-bar reversal pattern
+    "morning_star_score",          # Morning/evening star pattern
+    # Momentum higher-order
+    "macd_histogram_accel",        # MACD histogram acceleration
+    "rsi_bollinger",               # RSI position within its own Bollinger Band
+    "stoch_rsi",                   # Stochastic RSI
+    # Volume microstructure
+    "volume_climax_score",         # Volume spike + reversal candle
+    "cumulative_delta_slope",      # Slope of cumulative delta proxy
+    # Session / Time features
+    "day_of_week_sin",             # Day of week cyclical
+    "day_of_week_cos",             # Day of week cyclical
+    "minutes_to_session_end",      # Minutes until session close
 ]
 
 
@@ -269,8 +307,11 @@ def compute_htf_features(m5_df, m15_df=None, h1_df=None):
         h1.loc[bear, "h1_ema_alignment"] = -1
 
         h1["h1_atr"] = _atr(h1["high"], h1["low"], h1["close"], ATR_PERIOD)
+        h1["h1_rsi"] = _rsi(h1["close"], RSI_PERIOD)
+        h1["h1_adx"] = _adx(h1["high"], h1["low"], h1["close"], ADX_PERIOD)
 
-        h1_merge = h1[["time", "h1_trend_direction", "h1_ema_alignment", "h1_atr"]].copy()
+        h1_merge = h1[["time", "h1_trend_direction", "h1_ema_alignment", "h1_atr",
+                        "h1_rsi", "h1_adx"]].copy()
         h1_merge = h1_merge.sort_values("time")
         # merge_asof direction="backward" already ensures we only use
         # H1 bars whose timestamp <= M5 timestamp (i.e. completed bars).
@@ -283,6 +324,8 @@ def compute_htf_features(m5_df, m15_df=None, h1_df=None):
         df["h1_trend_direction"] = 0
         df["h1_ema_alignment"] = 0
         df["h1_atr"] = 0.0
+        df["h1_rsi"] = 50.0
+        df["h1_adx"] = 25.0
 
     if m15_df is not None and len(m15_df) > 0:
         m15 = m15_df.copy()
@@ -292,8 +335,15 @@ def compute_htf_features(m5_df, m15_df=None, h1_df=None):
         m15_macd = _ema(m15_c, MACD_FAST) - _ema(m15_c, MACD_SLOW)
         m15_macd_sig = _ema(m15_macd, MACD_SIGNAL)
         m15["m15_momentum"] = ((m15_rsi - 50) / 50) + (m15_macd > m15_macd_sig).astype(float)
+        m15["m15_rsi"] = m15_rsi
+        # M15 Bollinger Band position
+        m15_bb_mid = m15_c.rolling(BB_PERIOD).mean()
+        m15_bb_std = m15_c.rolling(BB_PERIOD).std()
+        m15_bb_upper = m15_bb_mid + BB_STD * m15_bb_std
+        m15_bb_lower = m15_bb_mid - BB_STD * m15_bb_std
+        m15["m15_bb_position"] = ((m15_c - m15_bb_lower) / (m15_bb_upper - m15_bb_lower + 1e-10)) * 2 - 1
 
-        m15_merge = m15[["time", "m15_momentum"]].copy()
+        m15_merge = m15[["time", "m15_momentum", "m15_rsi", "m15_bb_position"]].copy()
         m15_merge = m15_merge.sort_values("time")
         # merge_asof direction="backward" already uses only completed M15 bars.
         m15_merge = _normalize_time(m15_merge)
@@ -301,11 +351,17 @@ def compute_htf_features(m5_df, m15_df=None, h1_df=None):
         df = pd.merge_asof(df, m15_merge, on="time", direction="backward")
     else:
         df["m15_momentum"] = 0.0
+        df["m15_rsi"] = 50.0
+        df["m15_bb_position"] = 0.0
 
     df["h1_trend_direction"] = df["h1_trend_direction"].fillna(0).astype(int)
     df["h1_ema_alignment"] = df["h1_ema_alignment"].fillna(0).astype(int)
     df["h1_atr"] = df["h1_atr"].fillna(0.0)
+    df["h1_rsi"] = df["h1_rsi"].fillna(50.0)
+    df["h1_adx"] = df["h1_adx"].fillna(25.0)
     df["m15_momentum"] = df["m15_momentum"].fillna(0.0)
+    df["m15_rsi"] = df["m15_rsi"].fillna(50.0)
+    df["m15_bb_position"] = df["m15_bb_position"].fillna(0.0)
     return df
 
 
@@ -929,6 +985,187 @@ def compute_features(df, m15_df=None, h1_df=None, m1_df=None):
         df["crossover_staleness"] * 0.2 +
         df["pattern_score"] * 0.2
     ).clip(0, 1)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # v15: Advanced Features (30 new)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # --- Cross-timeframe RSI / BB / ADX ---
+    # These are computed in compute_htf_features and merged via merge_asof
+    # If not present (no HTF data), fall back to 0 / neutral
+    if "m15_rsi" not in df.columns:
+        df["m15_rsi"] = 50.0
+    if "h1_rsi" not in df.columns:
+        df["h1_rsi"] = 50.0
+    if "m15_bb_position" not in df.columns:
+        df["m15_bb_position"] = 0.0
+    if "h1_adx" not in df.columns:
+        df["h1_adx"] = 25.0
+
+    # TF RSI agreement: how aligned are RSI values across timeframes
+    rsi_m5 = df["rsi_14"].fillna(50)
+    rsi_m15 = df["m15_rsi"].fillna(50)
+    rsi_h1 = df["h1_rsi"].fillna(50)
+    rsi_mean = (rsi_m5 + rsi_m15 + rsi_h1) / 3
+    rsi_std = pd.concat([rsi_m5, rsi_m15, rsi_h1], axis=1).std(axis=1)
+    df["tf_rsi_agreement"] = 1.0 - (rsi_std / 50.0).clip(0, 1)
+
+    # --- Fractal / Market structure ---
+    # Efficiency ratio (Kaufman): net price change / sum of all changes
+    price_change_abs = c.diff().abs()
+    net_change_10 = (c - c.shift(10)).abs()
+    path_length_10 = price_change_abs.rolling(10, min_periods=2).sum()
+    df["efficiency_ratio"] = (net_change_10 / (path_length_10 + 1e-10)).clip(0, 1)
+
+    # Fractal dimension proxy (box-counting approximation via range/returns)
+    log_range = np.log((h - l).clip(lower=1e-10))
+    log_range_mean = log_range.rolling(20, min_periods=5).mean()
+    log_range_std = log_range.rolling(20, min_periods=5).std()
+    df["fractal_dimension"] = (log_range_std / (log_range_mean.abs() + 1e-10)).clip(0, 2)
+
+    # Hurst exponent proxy: R/S analysis simplified
+    # H > 0.5 = trending, H < 0.5 = mean-reverting
+    ret_series = returns.fillna(0)
+    def _rolling_hurst(vals, w=50):
+        result = np.full(len(vals), 0.5)
+        for i in range(w, len(vals)):
+            window = vals[i-w:i]
+            if np.std(window) < 1e-10:
+                continue
+            cumdev = np.cumsum(window - np.mean(window))
+            r = np.max(cumdev) - np.min(cumdev)
+            s = np.std(window)
+            if s > 1e-10 and r > 0:
+                result[i] = np.log(r / s + 1e-10) / np.log(w)
+        return result
+    df["hurst_exponent"] = pd.Series(
+        _rolling_hurst(ret_series.values, 50), index=df.index
+    ).clip(0, 1).fillna(0.5)
+
+    # --- Wavelet / Frequency energy proxy ---
+    # High-frequency energy: variance of first differences (noise)
+    ret_diff = ret_series.diff().fillna(0)
+    df["high_freq_energy"] = ret_diff.rolling(20, min_periods=5).var().fillna(0)
+    # Low-frequency energy: variance of smoothed returns (trend)
+    smooth_ret = ret_series.rolling(10, min_periods=3).mean()
+    df["low_freq_energy"] = (smooth_ret.rolling(20, min_periods=5).var() /
+                              (df["high_freq_energy"] + 1e-10)).clip(0, 10)
+
+    # --- Advanced order flow ---
+    if "tick_volume" in df.columns:
+        tv = df["tick_volume"].astype(float).clip(lower=1)
+        buy_vol = tv * (c > o).astype(float)
+        sell_vol = tv * (c <= o).astype(float)
+        total_vol_10 = tv.rolling(10, min_periods=1).sum()
+        df["buy_pressure_ratio"] = buy_vol.rolling(10, min_periods=1).sum() / (total_vol_10 + 1e-10)
+    else:
+        df["buy_pressure_ratio"] = 0.5
+
+    # Aggressive ratio: fraction of bars with >1 ATR move
+    big_moves = (returns.abs() > df["atr_14"]).astype(float)
+    df["aggressive_ratio"] = big_moves.rolling(20, min_periods=5).mean().fillna(0)
+
+    # Absorption rate over 5 bars
+    df["absorption_rate_5"] = df["wick_absorption"].rolling(5, min_periods=1).mean()
+
+    # --- Regime quantification ---
+    # Regime persistence: how many consecutive bars in same ADX regime
+    trending = (df["adx"] > 25).astype(int)
+    trend_change = trending.ne(trending.shift(1)).astype(int)
+    trend_group = trend_change.cumsum()
+    df["regime_persistence"] = trending.groupby(trend_group).cumcount() + 1
+
+    # Regime transition probability: ADX near threshold = high transition prob
+    df["regime_transition_prob"] = 1.0 - ((df["adx"] - 25).abs() / 25).clip(0, 1)
+
+    # Volatility of volatility
+    atr_returns = df["atr_14"].pct_change().fillna(0)
+    df["volatility_of_volatility"] = atr_returns.rolling(20, min_periods=5).std().fillna(0)
+
+    # --- Advanced candle patterns ---
+    prev_h = h.shift(1)
+    prev_l = l.shift(1)
+    df["inside_bar"] = ((h <= prev_h) & (l >= prev_l)).astype(float)
+    df["outside_bar"] = ((h > prev_h) & (l < prev_l)).astype(float)
+
+    # Three-bar reversal: down-doji-up or up-doji-down
+    body_1 = (c.shift(2) - o.shift(2))
+    body_2_abs = (c.shift(1) - o.shift(1)).abs()
+    range_2 = (h.shift(1) - l.shift(1)).clip(lower=1e-10)
+    body_3 = (c - o)
+    is_doji_mid = (body_2_abs / range_2) < 0.3
+    bull_reversal_3 = (body_1 < 0) & is_doji_mid & (body_3 > 0)
+    bear_reversal_3 = (body_1 > 0) & is_doji_mid & (body_3 < 0)
+    df["three_bar_reversal"] = bull_reversal_3.astype(float) - bear_reversal_3.astype(float)
+
+    # Morning/evening star (simplified): big down, small body, big up
+    big_body_thresh = full_range.rolling(20, min_periods=5).mean() * 0.6
+    big_down_1 = (o.shift(2) - c.shift(2)) > big_body_thresh.shift(2)
+    small_body_2 = body_2_abs < big_body_thresh.shift(1) * 0.5
+    big_up_3 = (c - o) > big_body_thresh
+    morning = big_down_1 & small_body_2 & big_up_3
+    big_up_1 = (c.shift(2) - o.shift(2)) > big_body_thresh.shift(2)
+    big_down_3 = (o - c) > big_body_thresh
+    evening = big_up_1 & small_body_2 & big_down_3
+    df["morning_star_score"] = morning.astype(float) - evening.astype(float)
+
+    # --- Momentum higher-order ---
+    macd_hist = df["macd"] - df["macd_signal"]
+    df["macd_histogram_accel"] = macd_hist.diff(1).fillna(0)
+
+    # RSI Bollinger: RSI position within its own rolling BB
+    rsi_vals = df["rsi_14"]
+    rsi_ma = rsi_vals.rolling(20, min_periods=10).mean()
+    rsi_std = rsi_vals.rolling(20, min_periods=10).std()
+    rsi_upper = rsi_ma + 2 * rsi_std
+    rsi_lower = rsi_ma - 2 * rsi_std
+    df["rsi_bollinger"] = ((rsi_vals - rsi_lower) / (rsi_upper - rsi_lower + 1e-10)).clip(0, 1)
+
+    # Stochastic RSI
+    rsi_min_14 = rsi_vals.rolling(14, min_periods=5).min()
+    rsi_max_14 = rsi_vals.rolling(14, min_periods=5).max()
+    df["stoch_rsi"] = ((rsi_vals - rsi_min_14) / (rsi_max_14 - rsi_min_14 + 1e-10)).clip(0, 1)
+
+    # --- Volume microstructure ---
+    if "tick_volume" in df.columns:
+        tv = df["tick_volume"].astype(float)
+        tv_mean_20 = tv.rolling(20, min_periods=5).mean()
+        tv_spike = tv > (tv_mean_20 * 2)  # volume > 2x average
+        reversal_candle = (c.shift(1) > o.shift(1)) != (c > o)  # direction change
+        df["volume_climax_score"] = (tv_spike & reversal_candle).astype(float)
+
+        # Cumulative delta slope
+        if "cumulative_delta" in df.columns:
+            cd = df["cumulative_delta"]
+            df["cumulative_delta_slope"] = (cd - cd.shift(5)) / (cd.shift(5).abs() + 1e-10)
+            df["cumulative_delta_slope"] = df["cumulative_delta_slope"].clip(-10, 10).fillna(0)
+        else:
+            df["cumulative_delta_slope"] = 0.0
+    else:
+        df["volume_climax_score"] = 0.0
+        df["cumulative_delta_slope"] = 0.0
+
+    # --- Session / Time features ---
+    if "time" in df.columns:
+        dow = df["time"].dt.dayofweek  # 0=Monday
+        df["day_of_week_sin"] = np.sin(2 * np.pi * dow / 5)
+        df["day_of_week_cos"] = np.cos(2 * np.pi * dow / 5)
+
+        # Minutes to session end (London=16:00, NY=21:00)
+        hour_now = df["time"].dt.hour
+        minute_now = df["time"].dt.minute
+        total_min = hour_now * 60 + minute_now
+        # Use closest major session close
+        london_close = 16 * 60
+        ny_close = 21 * 60
+        dist_london = (london_close - total_min).clip(lower=0)
+        dist_ny = (ny_close - total_min).clip(lower=0)
+        min_dist = pd.concat([dist_london, dist_ny], axis=1).min(axis=1)
+        df["minutes_to_session_end"] = (min_dist / 60.0).clip(0, 8)  # normalize to hours
+    else:
+        df["day_of_week_sin"] = 0.0
+        df["day_of_week_cos"] = 0.0
+        df["minutes_to_session_end"] = 4.0
 
     # Drop warmup
     warmup = max(EMA_200, BB_PERIOD, ATR_PERIOD, RSI_PERIOD, MACD_SLOW,

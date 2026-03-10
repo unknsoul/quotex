@@ -1,23 +1,15 @@
 """
-Train Model — v14 Production leakage-free pipeline.
+Train Model — v15 Production leakage-free pipeline.
 
 Architecture:
-  1. Load data from multiple symbols (multi-symbol joint training)
-  2. Split data into train_main (80%) + calibration_slice (20%)
-  3. Train 7-8 diverse ensemble (XGB + HistGB + ExtraTrees + RF + CatBoost + LightGBM)
-  4. Calibrate each with isotonic on calibration_slice only
-  5. Generate OOF predictions from train_main via 3-fold TimeSeriesSplit
-  6. Save OOF data (proba + per-member proba) for meta/weight training
-
-v14 upgrades:
-  - Multi-symbol training (all available symbols pooled)
-  - LightGBM added to ensemble for diversity
-  - Better hyperparameters (deeper trees, more estimators)
-  - Feature importance pruning after training
+  1. Load data from 9 symbols (900K+ rows)
+  2. Compute 155+ features (125 v14 + 30 v15 new)
+  3. Train 8-9 diverse tree ensemble + GRU sequence model
+  4. Calibrate with isotonic regression
+  5. Generate OOF predictions for meta/weight training
 
 Usage:
-    python train_model.py --symbol EURUSD
-    python train_model.py --multi-symbol  # train on all symbols
+    python train_model.py --multi-symbol
 """
 
 import argparse
@@ -64,6 +56,7 @@ logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 
 def _load_multi_symbol_data(symbols):
     """Load and concatenate M5 data from multiple symbols with features."""
+    import gc
     all_dfs = []
     for sym in symbols:
         try:
@@ -71,22 +64,36 @@ def _load_multi_symbol_data(symbols):
             df = mtf.get("M5")
             if df is None:
                 df = load_csv(sym, "M5")
+            # Limit rows per symbol to manage memory (last 15K most recent)
+            if len(df) > 15000:
+                df = df.iloc[-15000:].reset_index(drop=True)
             m15, h1, m1 = mtf.get("M15"), mtf.get("H1"), mtf.get("M1")
             df = compute_features(df, m15_df=m15, h1_df=h1, m1_df=m1)
+            # Free HTF memory early
+            del m15, h1, m1, mtf
             df_t = add_primary_training_target(df)
+            del df
             df_t = df_t.dropna(subset=["target"]).reset_index(drop=True)
             df_t["target"] = df_t["target"].astype(int)
+            # Defragment, keep only needed columns, and use float32 to save memory
+            keep_cols = [c for c in FEATURE_COLUMNS if c in df_t.columns] + ["target", "time"]
+            df_t = df_t[keep_cols].copy()
+            float_cols = df_t.select_dtypes(include=['float64']).columns
+            df_t[float_cols] = df_t[float_cols].astype(np.float32)
+            gc.collect()
             print(f"   {sym}: {len(df_t)} rows")
             all_dfs.append(df_t)
         except Exception as e:
             print(f"   {sym}: SKIP ({e})")
+            gc.collect()
     if not all_dfs:
         raise ValueError("No data loaded from any symbol")
-    # Sort each by time before concatenating to maintain temporal order
     combined = pd.concat(all_dfs, ignore_index=True)
+    del all_dfs
+    gc.collect()
     if "time" in combined.columns:
         combined = combined.sort_values("time").reset_index(drop=True)
-    print(f"   Combined: {len(combined)} rows from {len(all_dfs)} symbols")
+    print(f"   Combined: {len(combined)} rows from {len(symbols)} symbols")
     return combined
 
 
@@ -297,6 +304,25 @@ def train(symbol, use_selected_features=True, multi_symbol=False):
     joblib.dump(oof_data, OOF_PREDICTIONS_PATH)
     print(f">> Saved OOF predictions -> {OOF_PREDICTIONS_PATH} ({oof_valid_count} rows)")
     print(f"   OOF data includes per-seed probabilities for variance-based uncertainty")
+
+    # =========================================================================
+    # Step 4: Train GRU sequence model (v15)
+    # =========================================================================
+    print(f"\n>> Training GRU sequence model (v15)...")
+    try:
+        from lstm_model import train_lstm, SEQ_LEN
+        lstm_result = train_lstm(
+            X_main.values, y_main, X_cal.values, y_cal,
+            feature_names=use_features
+        )
+        if lstm_result:
+            print(f"   LSTM: val_acc={lstm_result['val_accuracy']:.4f} val_auc={lstm_result['val_auc']:.4f}")
+            print(f"   LSTM model saved -> {lstm_result['path']}")
+        else:
+            print(f"   LSTM training skipped (PyTorch not available)")
+    except Exception as e:
+        print(f"   LSTM training failed: {e}")
+
     print(f"\n>> Done. Next: python meta_model.py --symbol {symbol}")
 
 

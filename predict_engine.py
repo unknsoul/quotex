@@ -90,6 +90,7 @@ _meta_model = None
 _meta_features = None
 _weight_model = None
 _confidence_thresholds = None  # Phase 3: learned per-regime thresholds
+_lstm_bundle = None  # v15: GRU sequence model
 _prediction_history = []
 _direction_history = []
 _online_learner = OnlineLearner(n_features=14, learning_rate=0.005)
@@ -133,7 +134,7 @@ def set_retrain_flag(active):
 def reload_models():
     """Force reload models from disk (called after retrain completes)."""
     global _ensemble, _primary_features, _meta_model
-    global _meta_features, _weight_model, _confidence_thresholds
+    global _meta_features, _weight_model, _confidence_thresholds, _lstm_bundle
     with _model_lock:
         _ensemble = None
         _primary_features = None
@@ -141,6 +142,7 @@ def reload_models():
         _meta_features = None
         _weight_model = None
         _confidence_thresholds = None
+        _lstm_bundle = None
     load_models()
     log.info("Models reloaded from disk.")
 
@@ -148,6 +150,7 @@ def reload_models():
 def load_models():
     global _ensemble, _primary_features, _meta_model, _meta_calibrator
     global _meta_features, _weight_model, _confidence_thresholds
+    global _lstm_bundle
 
     with _model_lock:
         if _ensemble is None:
@@ -160,6 +163,18 @@ def load_models():
             else:
                 raise FileNotFoundError("No model found.")
             _primary_features = joblib.load(FEATURE_LIST_PATH)
+
+            # v15: Load LSTM model
+            try:
+                from lstm_model import load_lstm_model
+                _lstm_bundle = load_lstm_model(len(_primary_features))
+                if _lstm_bundle:
+                    log.info("LSTM/GRU model loaded (%d features).", len(_primary_features))
+                else:
+                    log.info("LSTM model not found — tree-only ensemble.")
+            except Exception as e:
+                _lstm_bundle = None
+                log.info("LSTM load skipped: %s", e)
 
             # Feature fingerprint parity check
             try:
@@ -448,6 +463,20 @@ def predict(df, regime):
 
         # Ensemble predictions (V3: diverse multi-model ensemble)
         all_probs = np.array([m.predict_proba(row)[0][1] for m in ensemble])
+
+        # v15: LSTM/GRU prediction blend
+        lstm_prob = None
+        if _lstm_bundle is not None:
+            try:
+                from lstm_model import predict_lstm, SEQ_LEN
+                if len(df) >= SEQ_LEN:
+                    X_window = df[feat_cols].iloc[-SEQ_LEN:].values
+                    lstm_prob = predict_lstm(_lstm_bundle, X_window)
+                    if lstm_prob is not None:
+                        all_probs = np.append(all_probs, lstm_prob)
+            except Exception as e:
+                log.debug("LSTM predict skipped: %s", e)
+
         green_p = float(all_probs.mean())
         red_p = 1.0 - green_p
         variance = float(all_probs.var())
