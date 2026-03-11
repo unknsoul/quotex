@@ -67,6 +67,7 @@ from same_candle_detector import detect_same_candle
 from strategy_scorer import score_strategies, get_regime_weight_overrides
 from staleness_tracker import track_crossover_staleness
 from candle_patterns import compute_pattern_score_adjustment
+from signal_consensus import compute_all_signals, get_consensus_vote
 from regime_detection import (
     get_regime_thresholds, regime_stability_score, get_session,
     get_trend_alignment,
@@ -371,48 +372,7 @@ def _should_skip(regime, confidence_pct, df, ensemble_variance=0.0):
     """
     global _cooldown_remaining, _skip_count
 
-    if not REGIME_FILTER_ENABLED:
-        return False, ""
-
-    # 0. Phase 4: Ensemble variance hard filter (highest precision filter)
-    if ENSEMBLE_VAR_FILTER_ENABLED and ensemble_variance > ENSEMBLE_VAR_SKIP_THRESHOLD:
-        _skip_count += 1
-        return True, f"High ensemble disagreement (var={ensemble_variance:.4f} > {ENSEMBLE_VAR_SKIP_THRESHOLD})"
-
-    # 1. Cooldown check: if we're in cooldown, skip
-    if _cooldown_remaining > 0:
-        _cooldown_remaining -= 1
-        _skip_count += 1
-        return True, f"Cooldown ({_cooldown_remaining + 1} bars left)"
-
-    # 2. Rolling accuracy check: if recent accuracy < threshold, enter cooldown
-    if len(_rolling_correct) >= REGIME_ROLLING_ACCURACY_WINDOW:
-        recent = _rolling_correct[-REGIME_ROLLING_ACCURACY_WINDOW:]
-        rolling_acc = sum(recent) / len(recent)
-        if rolling_acc < REGIME_SKIP_ACCURACY_THRESHOLD:
-            _cooldown_remaining = REGIME_COOLDOWN_BARS
-            _skip_count += 1
-            log.warning("REGIME FILTER: accuracy %.1f%% < %.1f%%, entering cooldown (%d bars)",
-                        rolling_acc * 100, REGIME_SKIP_ACCURACY_THRESHOLD * 100, REGIME_COOLDOWN_BARS)
-            return True, f"Low accuracy ({rolling_acc:.0%} < {REGIME_SKIP_ACCURACY_THRESHOLD:.0%})"
-
-    # 3. Learned confidence thresholds check (if available)
-    if _confidence_thresholds is not None:
-        regime_info = _confidence_thresholds.get(regime)
-        if regime_info and regime_info.get("min_confidence", 0) > 0:
-            if confidence_pct < regime_info["min_confidence"]:
-                _skip_count += 1
-                return True, f"Below {regime} threshold ({confidence_pct:.0f}% < {regime_info['min_confidence']}%)"
-
-    # 4. Regime stability check
-    try:
-        stability = regime_stability_score(df)
-        if stability < 0.5:
-            _skip_count += 1
-            return True, f"Regime transition (stability={stability:.2f})"
-    except Exception:
-        pass
-
+    # v18: Skip filter disabled — always produce a signal
     return False, ""
 
 
@@ -526,11 +486,11 @@ def _apply_production_gate(df, regime, green_p, meta_rel, confidence_pct,
     if len(soft_failures) >= 3:
         reasons.extend(soft_failures[:2])
 
-    if PRODUCTION_SIGNAL_GATING_ENABLED and reasons:
-        return "HOLD", "; ".join(reasons[:3]), round(effective_conf, 2), quality_score
-
+    # v18: Gating disabled — always output BUY/SELL, never HOLD
+    # Reasons are still collected for logging but do not block signals
     trade = "BUY" if green_p >= 0.5 else "SELL"
-    return trade, "", round(effective_conf, 2), quality_score
+    info = "; ".join(reasons[:3]) if reasons else ""
+    return trade, info, round(effective_conf, 2), quality_score
 
 
 def predict(df, regime):
@@ -846,26 +806,46 @@ def predict(df, regime):
         raw_confidence_pct = round(confidence * 100, 2)
         adaptive_conf = _adaptive_confidence(raw_confidence_pct)
         
-        # If v11 filters say skip, force HOLD before production gate
+        # v18: v11 filters collect info only — never force HOLD
+        # Always pass through to production gate (which also always outputs BUY/SELL)
         if v11_skip_reasons:
-            trade = "HOLD"
-            skip_reason = "; ".join(v11_skip_reasons[:3])
-            confidence_pct = raw_confidence_pct
-            quality_score = 0.0
-        else:
-            trade, skip_reason, confidence_pct, quality_score = _apply_production_gate(
-                df=df,
-                regime=regime,
-                green_p=green_p,
-                meta_rel=meta_rel,
-                confidence_pct=raw_confidence_pct,
-                adaptive_conf_pct=adaptive_conf,
-                unanimity=unanimity,
-                uncertainty_pct=uncertainty_pct,
-                stability_score=stability_score,
-                conf_alert=conf_alert,
-                ensemble_variance=variance,
+            log.debug("v11 info (non-blocking): %s", "; ".join(v11_skip_reasons[:3]))
+        trade, skip_reason, confidence_pct, quality_score = _apply_production_gate(
+            df=df,
+            regime=regime,
+            green_p=green_p,
+            meta_rel=meta_rel,
+            confidence_pct=raw_confidence_pct,
+            adaptive_conf_pct=adaptive_conf,
+            unanimity=unanimity,
+            uncertainty_pct=uncertainty_pct,
+            stability_score=stability_score,
+            conf_alert=conf_alert,
+            ensemble_variance=variance,
+        )
+
+        # ═══ v18: Signal Consensus — 55+ indicators vote on direction ═══
+        # ML ensemble + indicator majority decide final direction together
+        try:
+            last_row = df.iloc[-1]
+            ml_dir = "BUY" if green_p >= 0.5 else "SELL"
+            consensus_dir, consensus_boost, consensus_info = get_consensus_vote(
+                last_row, ml_direction=ml_dir, ml_green_p=green_p
             )
+            trade = consensus_dir  # Final direction from consensus
+            confidence *= consensus_boost
+            confidence_pct = round(confidence * 100, 2)
+            log.info(
+                "Consensus: %d signals, BUY=%d SELL=%d → %s (strength=%.2f)",
+                consensus_info["active_count"], consensus_info["buy_count"],
+                consensus_info["sell_count"], consensus_dir,
+                consensus_info["consensus_strength"],
+            )
+        except Exception as e:
+            log.debug("Signal consensus fallback: %s", e)
+            consensus_info = {"active_count": 0, "buy_count": 0, "sell_count": 0,
+                             "net_score": 0, "consensus_direction": trade,
+                             "consensus_strength": 0.0, "signals": {}}
 
         # Convert to percentages
         green_pct = round(green_p * 100, 2)
@@ -941,7 +921,7 @@ def predict(df, regime):
             "ensemble_agree_count": agree_count,         # e.g. 6/7
             "ensemble_total": n_models,
             "suggested_trade": trade,
-            "suggested_direction": "HOLD" if trade == "HOLD" else ("UP" if green_p >= 0.5 else "DOWN"),
+            "suggested_direction": "UP" if trade == "BUY" else "DOWN",
             "error": None,
             "_meta_row": meta_row,
             "market_regime": regime,
@@ -971,6 +951,13 @@ def predict(df, regime):
             "pattern_adjustment": pattern_info.get("adjustment", 0),
             "pattern_names": pattern_info.get("patterns", []),
             "pattern_suppressed": pattern_info.get("suppressed", False),
+            # v18: Signal consensus fields
+            "consensus_direction": consensus_info.get("consensus_direction", trade),
+            "consensus_buy_count": consensus_info.get("buy_count", 0),
+            "consensus_sell_count": consensus_info.get("sell_count", 0),
+            "consensus_active_signals": consensus_info.get("active_count", 0),
+            "consensus_strength": consensus_info.get("consensus_strength", 0.0),
+            "consensus_net_score": consensus_info.get("net_score", 0),
         }
 
         log.info(
@@ -985,7 +972,7 @@ def predict(df, regime):
 
 
 def _safe_fallback(reason="unknown"):
-    """Return a safe HOLD prediction — never crashes the caller."""
+    """Return a safe BUY prediction — never crashes the caller. Always signals."""
     return {
         "green_probability_percent": 50.0,
         "red_probability_percent": 50.0,
@@ -997,8 +984,8 @@ def _safe_fallback(reason="unknown"):
         "confidence_level": "Low",
         "confidence_reliability_score": 0.0,
         "kelly_fraction_percent": 0.0,
-        "suggested_trade": "HOLD",
-        "suggested_direction": "HOLD",
+        "suggested_trade": "BUY",
+        "suggested_direction": "UP",
         "market_regime": "Unknown",
         "regime_stability": 0.0,
         "session": "Off",

@@ -128,7 +128,7 @@ class StackingGatekeeper:
             self._save()
             log.info("Stacker: %d samples, lr=%.4f", self.n_samples, self.lr)
 
-    def should_send(self, pred: dict, threshold: float = 0.48) -> dict:  # v16.1: lowered from 0.55
+    def should_send(self, pred: dict, threshold: float = 0.50) -> dict:  # v17.2: raised — 48% was worse than coinflip
         """
         Should we send this signal? Based on gatekeeper's prediction
         of correctness probability.

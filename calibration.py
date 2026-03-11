@@ -8,6 +8,7 @@ v17 upgrades:
   - Stronger regularization across all ensemble members
 """
 
+import logging
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
 from sklearn.ensemble import (
@@ -16,6 +17,9 @@ from sklearn.ensemble import (
     RandomForestClassifier,
 )
 import xgboost as xgb
+from asymmetric_loss import asymmetric_logloss_objective, asymmetric_logloss_eval
+
+log = logging.getLogger("calibration")
 
 try:
     from catboost import CatBoostClassifier
@@ -103,6 +107,15 @@ def get_primary_model_specs():
                        "gamma": 4.5, "subsample": 0.68, "colsample_bytree": 0.48},
         },
         {
+            "model_type": "xgb",
+            "name": "XGB_asymmetric_FP",
+            "window_ratio": 1.0,
+            "use_asymmetric": True,  # v17.2: 3x FP penalty — precision over recall
+            "params": {"max_depth": 5, "learning_rate": 0.004, "n_estimators": 800,
+                       "min_child_weight": 32, "reg_alpha": 2.0, "reg_lambda": 8.0,
+                       "gamma": 5.0, "subsample": 0.65, "colsample_bytree": 0.52},
+        },
+        {
             "model_type": "hist_gb",
             "name": "HistGB_full",
             "window_ratio": 1.0,
@@ -164,16 +177,17 @@ def fit_model_from_spec(spec, X_train, y_train, spw=1.0, seed=42,
         val_time_w = _time_decay_weights(len(y_val), half_life_ratio=0.3)
         val_weights = val_class_w * val_time_w
 
+    # v17.2: Check if this spec uses asymmetric FP-penalty loss
+    use_asymmetric = spec.get("use_asymmetric", False)
+
     if model_type == "xgb":
-        model = xgb.XGBClassifier(
+        xgb_kwargs = dict(
             n_estimators=params.get("n_estimators", 280),
             max_depth=params.get("max_depth", 4),
             learning_rate=params.get("learning_rate", 0.015),
             subsample=params.get("subsample", 0.75),
             colsample_bytree=params.get("colsample_bytree", 0.7),
             scale_pos_weight=1.0,  # handled via sample_weight
-            objective="binary:logistic",
-            eval_metric="logloss",
             use_label_encoder=False,
             random_state=seed,
             verbosity=0,
@@ -183,10 +197,23 @@ def fit_model_from_spec(spec, X_train, y_train, spw=1.0, seed=42,
             gamma=params.get("gamma", 2.0),
             early_stopping_rounds=50 if X_val is not None else None,
         )
-        fit_kwargs = {"sample_weight": weights, "verbose": False}
+        if use_asymmetric:
+            # v17.2: Custom asymmetric objective — 3x FP penalty
+            xgb_kwargs["objective"] = asymmetric_logloss_objective
+            xgb_kwargs["eval_metric"] = "logloss"
+            # disable_default_eval_metric not needed with string eval_metric
+            log.info("Using asymmetric loss (3x FP penalty) for %s", spec.get('name', '?'))
+        else:
+            xgb_kwargs["objective"] = "binary:logistic"
+            xgb_kwargs["eval_metric"] = "logloss"
+        model = xgb.XGBClassifier(**xgb_kwargs)
+        fit_kwargs = {"verbose": False}
+        if not use_asymmetric:
+            # Custom objectives in newer XGBoost reject sample_weight in fit()
+            fit_kwargs["sample_weight"] = weights
         if X_val is not None:
             fit_kwargs["eval_set"] = [(X_val, y_val)]
-            if val_weights is not None:
+            if val_weights is not None and not use_asymmetric:
                 fit_kwargs["sample_weight_eval_set"] = [val_weights]
         model.fit(X_train, y_train, **fit_kwargs)
         return model

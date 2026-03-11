@@ -19,10 +19,10 @@ import logging
 
 log = logging.getLogger("triple_barrier")
 
-# Defaults from v10 spec
-DEFAULT_TP_MULT = 1.5
-DEFAULT_SL_MULT = 1.0   # Asymmetric: tighter SL than TP
-DEFAULT_MAX_BARS = 4    # 4 candles = 20 min at M5
+# Defaults aligned with config.py (v17.2 sync)
+DEFAULT_TP_MULT = 1.2    # v16: tighter TP for cleaner labels (was 1.5)
+DEFAULT_SL_MULT = 0.8    # v16: tighter SL for cleaner labels (was 1.0)
+DEFAULT_MAX_BARS = 3     # v16: 3 bars max = less noise (was 4)
 
 
 def label_triple_barrier(df, tp_mult=DEFAULT_TP_MULT, sl_mult=DEFAULT_SL_MULT,

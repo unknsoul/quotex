@@ -179,6 +179,56 @@ FEATURE_COLUMNS = [
     "day_of_week_sin",             # Day of week cyclical
     "day_of_week_cos",             # Day of week cyclical
     "minutes_to_session_end",      # Minutes until session close
+    # ═══════ v18: 35+ Classic TA Indicators (Binary Options Optimized) ═══════
+    # Fast EMAs (short-term scalping)
+    "ema_5",                       # EMA 5 distance from close
+    "ema_8",                       # EMA 8 distance from close
+    "ema_13",                      # EMA 13 distance from close
+    # Moving average variants
+    "sma_10",                      # SMA 10 distance from close
+    "sma_30",                      # SMA 30 distance from close
+    "dema_20",                     # Double EMA 20 distance
+    "tema_20",                     # Triple EMA 20 distance
+    "wma_20",                      # Weighted MA 20 distance
+    # Multi-period RSI
+    "rsi_7",                       # Fast RSI (7-period)
+    "rsi_21",                      # Slow RSI (21-period)
+    # Rate of Change (momentum)
+    "roc_10",                      # Rate of Change 10-period
+    "roc_20",                      # Rate of Change 20-period
+    # Trend indicators
+    "parabolic_sar_dir",           # Parabolic SAR direction (1=bull, 0=bear)
+    "supertrend_dir",              # Supertrend direction (1=bull, 0=bear)
+    "aroon_up",                    # Aroon Up (0-100 normalized)
+    "aroon_down",                  # Aroon Down (0-100 normalized)
+    "aroon_osc",                   # Aroon Oscillator (-100 to +100)
+    "vortex_diff",                 # Vortex indicator (+VI - -VI)
+    # Volatility channels
+    "keltner_position",            # Price position within Keltner Channel (0-1)
+    "keltner_width",               # Keltner Channel width (normalized)
+    "donchian_position",           # Donchian Channel position (0-1)
+    "donchian_width",              # Donchian Channel width (normalized)
+    # Volume indicators
+    "mfi_14",                      # Money Flow Index (0-100 normalized)
+    "cmf_20",                      # Chaikin Money Flow (-1 to +1)
+    "force_index_13",              # Force Index (normalized)
+    # Advanced momentum oscillators
+    "ultimate_oscillator",         # Ultimate Oscillator (0-1)
+    "tsi",                         # True Strength Index (-1 to +1)
+    "chande_momentum",             # Chande Momentum Oscillator (-1 to +1)
+    "ppo",                         # Percentage Price Oscillator
+    "awesome_oscillator",          # Awesome Oscillator (normalized)
+    # Elder Ray
+    "bull_power",                  # Elder Ray Bull Power (normalized)
+    "bear_power",                  # Elder Ray Bear Power (normalized)
+    # Pivots & regression
+    "pivot_distance",              # Distance from classic pivot point
+    "linreg_slope_20",             # Linear regression slope (20-bar)
+    "linreg_r2_20",                # Linear regression R² (trend quality)
+    # MACD histogram raw
+    "macd_histogram",              # Raw MACD histogram
+    # Mass Index (squeeze detection)
+    "mass_index",                  # Mass Index (squeeze indicator)
 ]
 
 
@@ -1233,6 +1283,266 @@ def compute_features(df, m15_df=None, h1_df=None, m1_df=None):
         df["day_of_week_sin"] = 0.0
         df["day_of_week_cos"] = 0.0
         df["minutes_to_session_end"] = 4.0
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # v18: 35+ Classic TA Indicators (Binary Options Optimized)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # --- Fast EMAs (scalping) ---
+    ema5 = _ema(c, 5)
+    ema8 = _ema(c, 8)
+    ema13 = _ema(c, 13)
+    df["ema_5"] = (c - ema5) / (c + 1e-10)
+    df["ema_8"] = (c - ema8) / (c + 1e-10)
+    df["ema_13"] = (c - ema13) / (c + 1e-10)
+
+    # --- Moving average variants ---
+    sma10 = c.rolling(10, min_periods=5).mean()
+    sma30 = c.rolling(30, min_periods=15).mean()
+    df["sma_10"] = (c - sma10) / (c + 1e-10)
+    df["sma_30"] = (c - sma30) / (c + 1e-10)
+
+    # DEMA(20) = 2*EMA(20) - EMA(EMA(20), 20)
+    dema20 = 2 * ema20 - _ema(ema20, EMA_20)
+    df["dema_20"] = (c - dema20) / (c + 1e-10)
+
+    # TEMA(20) = 3*EMA - 3*EMA(EMA) + EMA(EMA(EMA))
+    ema_ema20 = _ema(ema20, EMA_20)
+    tema20 = 3 * ema20 - 3 * ema_ema20 + _ema(ema_ema20, EMA_20)
+    df["tema_20"] = (c - tema20) / (c + 1e-10)
+
+    # WMA(20): linearly weighted moving average
+    weights_20 = np.arange(1, 21, dtype=float)
+    df["wma_20"] = (c.rolling(20, min_periods=10).apply(
+        lambda x: np.dot(x, weights_20[:len(x)]) / weights_20[:len(x)].sum(), raw=True
+    ) - c) / (c + 1e-10) * -1  # distance from close
+
+    # --- Multi-period RSI ---
+    df["rsi_7"] = _rsi(c, 7)
+    df["rsi_21"] = _rsi(c, 21)
+
+    # --- Rate of Change ---
+    df["roc_10"] = c.pct_change(10).fillna(0).clip(-0.1, 0.1)
+    df["roc_20"] = c.pct_change(20).fillna(0).clip(-0.2, 0.2)
+
+    # --- Parabolic SAR direction ---
+    # Simplified: compare close to exponentially-weighted trailing stop
+    sar_af_init, sar_af_max = 0.02, 0.20
+    sar_dir = pd.Series(1.0, index=df.index)  # 1=bull, 0=bear
+    sar_val = l.rolling(5, min_periods=1).min().values.copy()
+    ep = h.values.copy()
+    af = np.full(len(df), sar_af_init)
+    c_vals, h_vals, l_vals = c.values, h.values, l.values
+    for i in range(1, len(df)):
+        if sar_dir.iloc[i-1] == 1:  # bullish
+            sar_val[i] = sar_val[i-1] + af[i-1] * (ep[i-1] - sar_val[i-1])
+            sar_val[i] = min(sar_val[i], l_vals[i-1], l_vals[max(0, i-2)])
+            if h_vals[i] > ep[i-1]:
+                ep[i] = h_vals[i]
+                af[i] = min(af[i-1] + sar_af_init, sar_af_max)
+            else:
+                ep[i] = ep[i-1]
+                af[i] = af[i-1]
+            if l_vals[i] < sar_val[i]:
+                sar_dir.iloc[i] = 0
+                sar_val[i] = ep[i-1]
+                ep[i] = l_vals[i]
+                af[i] = sar_af_init
+            else:
+                sar_dir.iloc[i] = 1
+        else:  # bearish
+            sar_val[i] = sar_val[i-1] - af[i-1] * (sar_val[i-1] - ep[i-1])
+            sar_val[i] = max(sar_val[i], h_vals[i-1], h_vals[max(0, i-2)])
+            if l_vals[i] < ep[i-1]:
+                ep[i] = l_vals[i]
+                af[i] = min(af[i-1] + sar_af_init, sar_af_max)
+            else:
+                ep[i] = ep[i-1]
+                af[i] = af[i-1]
+            if h_vals[i] > sar_val[i]:
+                sar_dir.iloc[i] = 1
+                sar_val[i] = ep[i-1]
+                ep[i] = h_vals[i]
+                af[i] = sar_af_init
+            else:
+                sar_dir.iloc[i] = 0
+    df["parabolic_sar_dir"] = sar_dir.values
+
+    # --- Supertrend direction ---
+    st_mult = 3.0
+    st_period = 10
+    hl2 = (h + l) / 2
+    st_atr = _atr(h, l, c, st_period)
+    upper_band = hl2 + st_mult * st_atr
+    lower_band = hl2 - st_mult * st_atr
+    supertrend = pd.Series(0.0, index=df.index)
+    direction = pd.Series(1.0, index=df.index)
+    final_ub = upper_band.copy()
+    final_lb = lower_band.copy()
+    for i in range(1, len(df)):
+        if upper_band.iloc[i] < final_ub.iloc[i-1] or c.iloc[i-1] > final_ub.iloc[i-1]:
+            final_ub.iloc[i] = upper_band.iloc[i]
+        else:
+            final_ub.iloc[i] = final_ub.iloc[i-1]
+        if lower_band.iloc[i] > final_lb.iloc[i-1] or c.iloc[i-1] < final_lb.iloc[i-1]:
+            final_lb.iloc[i] = lower_band.iloc[i]
+        else:
+            final_lb.iloc[i] = final_lb.iloc[i-1]
+        if direction.iloc[i-1] == 1:
+            if c.iloc[i] < final_lb.iloc[i]:
+                direction.iloc[i] = -1
+            else:
+                direction.iloc[i] = 1
+        else:
+            if c.iloc[i] > final_ub.iloc[i]:
+                direction.iloc[i] = 1
+            else:
+                direction.iloc[i] = -1
+    df["supertrend_dir"] = ((direction + 1) / 2).values  # 0=bear, 1=bull
+
+    # --- Aroon ---
+    aroon_period = 25
+    df["aroon_up"] = h.rolling(aroon_period + 1, min_periods=aroon_period).apply(
+        lambda x: x.argmax() / aroon_period * 100, raw=True).fillna(50) / 100.0
+    df["aroon_down"] = l.rolling(aroon_period + 1, min_periods=aroon_period).apply(
+        lambda x: x.argmin() / aroon_period * 100, raw=True).fillna(50) / 100.0
+    df["aroon_osc"] = df["aroon_up"] - df["aroon_down"]
+
+    # --- Vortex Indicator ---
+    vm_plus = (h - l.shift(1)).abs()
+    vm_minus = (l - h.shift(1)).abs()
+    tr_v = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
+    vi_plus = vm_plus.rolling(14, min_periods=7).sum() / (tr_v.rolling(14, min_periods=7).sum() + 1e-10)
+    vi_minus = vm_minus.rolling(14, min_periods=7).sum() / (tr_v.rolling(14, min_periods=7).sum() + 1e-10)
+    df["vortex_diff"] = vi_plus - vi_minus
+
+    # --- Keltner Channel ---
+    keltner_ema = _ema(c, 20)
+    keltner_atr = _atr(h, l, c, 10)
+    keltner_upper = keltner_ema + 2 * keltner_atr
+    keltner_lower = keltner_ema - 2 * keltner_atr
+    df["keltner_position"] = ((c - keltner_lower) / (keltner_upper - keltner_lower + 1e-10)).clip(0, 1)
+    df["keltner_width"] = (keltner_upper - keltner_lower) / (c + 1e-10)
+
+    # --- Donchian Channel ---
+    donchian_high = h.rolling(20, min_periods=10).max()
+    donchian_low = l.rolling(20, min_periods=10).min()
+    df["donchian_position"] = ((c - donchian_low) / (donchian_high - donchian_low + 1e-10)).clip(0, 1)
+    df["donchian_width"] = (donchian_high - donchian_low) / (c + 1e-10)
+
+    # --- MFI (Money Flow Index) ---
+    if "tick_volume" in df.columns:
+        tv_mfi = df["tick_volume"].astype(float).clip(lower=1)
+        typical_price = (h + l + c) / 3
+        raw_money_flow = typical_price * tv_mfi
+        pos_flow = raw_money_flow.where(typical_price > typical_price.shift(1), 0)
+        neg_flow = raw_money_flow.where(typical_price < typical_price.shift(1), 0)
+        pos_sum = pos_flow.rolling(14, min_periods=7).sum()
+        neg_sum = neg_flow.rolling(14, min_periods=7).sum()
+        mfi_ratio = pos_sum / (neg_sum + 1e-10)
+        df["mfi_14"] = (100 - 100 / (1 + mfi_ratio)) / 100.0  # 0-1
+    else:
+        df["mfi_14"] = 0.5
+
+    # --- CMF (Chaikin Money Flow) ---
+    if "tick_volume" in df.columns:
+        clv = ((c - l) - (h - c)) / (h - l + 1e-10)
+        tv_cmf = df["tick_volume"].astype(float).clip(lower=1)
+        df["cmf_20"] = (clv * tv_cmf).rolling(20, min_periods=10).sum() / (
+            tv_cmf.rolling(20, min_periods=10).sum() + 1e-10)
+    else:
+        df["cmf_20"] = 0.0
+
+    # --- Force Index ---
+    if "tick_volume" in df.columns:
+        fi = c.diff() * df["tick_volume"].astype(float)
+        fi_ema = _ema(fi.fillna(0), 13)
+        fi_std = fi_ema.rolling(50, min_periods=10).std()
+        df["force_index_13"] = (fi_ema / (fi_std + 1e-10)).clip(-3, 3) / 3.0
+    else:
+        df["force_index_13"] = 0.0
+
+    # --- Ultimate Oscillator ---
+    bp = c - pd.concat([l, c.shift(1)], axis=1).min(axis=1)
+    tr_uo = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
+    avg7 = bp.rolling(7, min_periods=4).sum() / (tr_uo.rolling(7, min_periods=4).sum() + 1e-10)
+    avg14 = bp.rolling(14, min_periods=7).sum() / (tr_uo.rolling(14, min_periods=7).sum() + 1e-10)
+    avg28 = bp.rolling(28, min_periods=14).sum() / (tr_uo.rolling(28, min_periods=14).sum() + 1e-10)
+    df["ultimate_oscillator"] = ((4 * avg7 + 2 * avg14 + avg28) / 7.0).clip(0, 1)
+
+    # --- TSI (True Strength Index) ---
+    price_change = c.diff()
+    double_smooth_pc = _ema(_ema(price_change.fillna(0), 25), 13)
+    double_smooth_apc = _ema(_ema(price_change.abs().fillna(0), 25), 13)
+    df["tsi"] = (double_smooth_pc / (double_smooth_apc + 1e-10)).clip(-1, 1)
+
+    # --- Chande Momentum Oscillator ---
+    gains_1 = price_change.clip(lower=0)
+    losses_1 = (-price_change).clip(lower=0)
+    sum_gains = gains_1.rolling(14, min_periods=7).sum()
+    sum_losses = losses_1.rolling(14, min_periods=7).sum()
+    df["chande_momentum"] = ((sum_gains - sum_losses) / (sum_gains + sum_losses + 1e-10)).clip(-1, 1)
+
+    # --- PPO (Percentage Price Oscillator) ---
+    ppo_fast = _ema(c, 12)
+    ppo_slow = _ema(c, 26)
+    df["ppo"] = ((ppo_fast - ppo_slow) / (ppo_slow + 1e-10) * 100).clip(-5, 5) / 5.0
+
+    # --- Awesome Oscillator ---
+    ao_fast = (h + l).rolling(5, min_periods=3).mean() / 2
+    ao_slow = (h + l).rolling(34, min_periods=17).mean() / 2
+    ao_raw = ao_fast - ao_slow
+    ao_std = ao_raw.rolling(50, min_periods=10).std()
+    df["awesome_oscillator"] = (ao_raw / (ao_std + 1e-10)).clip(-3, 3) / 3.0
+
+    # --- Elder Ray Bull/Bear Power ---
+    elder_ema = _ema(c, 13)
+    bull_pwr = h - elder_ema
+    bear_pwr = l - elder_ema
+    bp_std = bull_pwr.rolling(50, min_periods=10).std()
+    df["bull_power"] = (bull_pwr / (bp_std + 1e-10)).clip(-3, 3) / 3.0
+    brp_std = bear_pwr.rolling(50, min_periods=10).std()
+    df["bear_power"] = (bear_pwr / (brp_std + 1e-10)).clip(-3, 3) / 3.0
+
+    # --- Pivot distance ---
+    prev_h_piv = h.shift(1)
+    prev_l_piv = l.shift(1)
+    prev_c_piv = c.shift(1)
+    pivot = (prev_h_piv + prev_l_piv + prev_c_piv) / 3
+    df["pivot_distance"] = ((c - pivot) / (atr_raw + 1e-10)).clip(-5, 5) / 5.0
+
+    # --- Linear regression slope & R² (20-bar) ---
+    def _linreg_features(series, window=20):
+        slope = pd.Series(np.nan, index=series.index)
+        r2 = pd.Series(np.nan, index=series.index)
+        x = np.arange(window, dtype=float)
+        x_mean = x.mean()
+        ss_xx = ((x - x_mean) ** 2).sum()
+        vals = series.values
+        for i in range(window, len(vals)):
+            y = vals[i-window:i]
+            if np.isnan(y).any():
+                continue
+            y_mean = y.mean()
+            ss_xy = ((x - x_mean) * (y - y_mean)).sum()
+            ss_yy = ((y - y_mean) ** 2).sum()
+            b = ss_xy / (ss_xx + 1e-10)
+            slope.iloc[i] = b
+            r2.iloc[i] = (ss_xy ** 2) / (ss_xx * ss_yy + 1e-10)
+        return slope.fillna(0), r2.fillna(0).clip(0, 1)
+    lr_slope, lr_r2 = _linreg_features(c, 20)
+    slope_std = lr_slope.rolling(50, min_periods=10).std()
+    df["linreg_slope_20"] = (lr_slope / (slope_std + 1e-10)).clip(-3, 3) / 3.0
+    df["linreg_r2_20"] = lr_r2
+
+    # --- MACD Histogram (raw) ---
+    df["macd_histogram"] = df["macd"] - df["macd_signal"]
+
+    # --- Mass Index (squeeze detection) ---
+    ema9_hl = _ema(h - l, 9)
+    ema9_ema9_hl = _ema(ema9_hl, 9)
+    ema_ratio = ema9_hl / (ema9_ema9_hl + 1e-10)
+    df["mass_index"] = ema_ratio.rolling(25, min_periods=10).sum() / 25.0  # normalized around 1.0
 
     # Drop warmup
     warmup = max(EMA_200, BB_PERIOD, ATR_PERIOD, RSI_PERIOD, MACD_SLOW,

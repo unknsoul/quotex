@@ -18,16 +18,16 @@ log = logging.getLogger("asymmetric_loss")
 FP_PENALTY = 3.0  # False positive penalty multiplier
 
 
-def asymmetric_logloss_objective(y_pred, dtrain):
+def asymmetric_logloss_objective(y_true, y_pred):
     """
     Custom XGBoost objective: asymmetric log loss.
     
     FP penalty = 3× (predicting UP when price goes DOWN is expensive).
     FN penalty = 1× (missing a trade is cheaper).
     
+    Sklearn API: receives (y_true, y_pred) as numpy arrays.
     Returns (gradient, hessian) for XGBoost.
     """
-    y_true = dtrain.get_label()
     # Sigmoid transform
     p = 1.0 / (1.0 + np.exp(-y_pred))
     p = np.clip(p, 1e-7, 1 - 1e-7)
@@ -46,13 +46,13 @@ def asymmetric_logloss_objective(y_pred, dtrain):
     return grad, hess
 
 
-def asymmetric_logloss_eval(y_pred, dtrain):
+def asymmetric_logloss_eval(y_true, y_pred):
     """
     Custom XGBoost evaluation metric matching the asymmetric objective.
     
-    Returns (name, value, higher_is_better).
+    Sklearn API: receives (y_true, y_pred) as numpy arrays.
+    Returns (name, value).
     """
-    y_true = dtrain.get_label()
     p = 1.0 / (1.0 + np.exp(-y_pred))
     p = np.clip(p, 1e-7, 1 - 1e-7)
     
@@ -60,7 +60,7 @@ def asymmetric_logloss_eval(y_pred, dtrain):
     
     loss = -weights * (y_true * np.log(p) + (1 - y_true) * np.log(1 - p))
     
-    return "asymm_logloss", float(np.mean(loss)), False
+    return "asymm_logloss", float(np.mean(loss))
 
 
 def get_asymmetric_xgb_params(base_params=None):

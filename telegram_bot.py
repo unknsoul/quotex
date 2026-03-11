@@ -1,5 +1,5 @@
 """
-QUOTEX LORD v17.1 — Live Accuracy Fix.
+QUOTEX LORD v18 — 66-Signal Consensus + 199 Indicators.
 
 14-layer pipeline:
   1. Data Collector       — fetch OHLCV from MT5
@@ -488,7 +488,7 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
             worst_pair = f"🥉 Worst: {worst_sym} ({ww['w']}/{ww['t']})"
 
     lines = [
-        "⚡ QUOTEX LORD v17.1 ⚡",
+        "⚡ QUOTEX LORD v18 ⚡",
         f"⏰ {now_str}",
         f"📊 Analyzed: {n_analyzed} | Passed: {n_passed}",
         "━" * 26,
@@ -584,6 +584,14 @@ def _format_auto_signal(predictions: dict, filtered: dict) -> str:
         strat_dir = pred.get("strategy_direction", "NEUTRAL")
         if strat_agree > 0:
             lines.append(f"   🎯 Strategies: {strat_agree}/8 {strat_dir} (score: {strat_comp:.0f})")
+        # v18: Signal consensus display
+        cons_active = pred.get("consensus_active_signals", 0)
+        cons_buy = pred.get("consensus_buy_count", 0)
+        cons_sell = pred.get("consensus_sell_count", 0)
+        cons_strength = pred.get("consensus_strength", 0)
+        if cons_active > 0:
+            cons_icon = "🟢" if cons_buy > cons_sell else "🔴"
+            lines.append(f"   {cons_icon} Signals: {cons_buy}↑ / {cons_sell}↓ of {cons_active} ({cons_strength:.0%})")
         # v11: Pattern overlay
         patterns = pred.get("pattern_names", [])
         pat_adj = pred.get("pattern_adjustment", 0)
@@ -2180,12 +2188,11 @@ async def _auto_signal_job(app: Application):
                     except Exception:
                         _pair_scores[sym] = 25  # assume tradeable on error
 
-            # Filter by pair score
-            tradeable = {s for s in needed_symbols if _pair_scores.get(s, 25) >= PAIR_SELECTOR_MIN_SCORE}
-            skipped_pairs = needed_symbols - tradeable
+            # Filter by pair score — v18: log only, don't skip any
+            tradeable = needed_symbols  # Always trade all symbols
+            skipped_pairs = {s for s in needed_symbols if _pair_scores.get(s, 25) < PAIR_SELECTOR_MIN_SCORE}
             if skipped_pairs:
-                log.info("Pair selector skipped %s (score < %d)", skipped_pairs, PAIR_SELECTOR_MIN_SCORE)
-            needed_symbols = tradeable
+                log.debug("Pair scores below threshold (non-blocking): %s", skipped_pairs)
 
             if not needed_symbols:
                 log.info("No tradeable symbols this cycle.")
@@ -2204,23 +2211,22 @@ async def _auto_signal_job(app: Application):
                     # Cooldown check
                     if sym in _cooldown_until:
                         if datetime.now(timezone.utc) < _cooldown_until[sym]:
-                            filtered_out[sym] = "cooldown"
-                            continue
+                            # v18: Log but don't skip — always produce signal
+                            log.debug("Cooldown info for %s (non-blocking)", sym)
+                            del _cooldown_until[sym]
                         else:
                             del _cooldown_until[sym]
 
                     # Per-symbol consecutive loss check
                     if _consecutive_losses.get(sym, 0) >= MAX_CONSECUTIVE_LOSSES_PER_SYM:
-                        _cooldown_until[sym] = datetime.now(timezone.utc) + timedelta(minutes=15)  # v16.1: 15 min (was 30)
-                        filtered_out[sym] = f"per_sym_losses:{_consecutive_losses[sym]}"
+                        # v18: Reset counter but don't skip
+                        log.debug("Loss streak info for %s: %d (non-blocking)", sym, _consecutive_losses.get(sym, 0))
                         _consecutive_losses[sym] = 0
-                        continue
 
-                    # Regime transition skip
+                    # Regime transition skip — v18: non-blocking
                     if _regime_skip.get(sym, 0) > 0:
                         _regime_skip[sym] -= 1
-                        filtered_out[sym] = "regime_transition"
-                        continue
+                        log.debug("Regime transition info for %s (non-blocking)", sym)
 
                     # ── Layers 1-8: Prediction Pipeline ──
                     pred = _run_prediction(sym)
@@ -2242,28 +2248,24 @@ async def _auto_signal_job(app: Application):
                     except Exception:
                         pass
 
-                    # Regime transition detection
+                    # Regime transition detection — v18: non-blocking
                     prev = _last_regime.get(sym)
                     if prev and regime != prev:
-                        _regime_skip[sym] = 1  # v16.1: 1 cycle skip (was 2)
-                        filtered_out[sym] = f"regime_shift:{prev}->{regime}"
-                        _last_regime[sym] = regime
-                        continue
+                        _regime_skip[sym] = 1
+                        log.debug("Regime shift %s: %s->%s (non-blocking)", sym, prev, regime)
                     _last_regime[sym] = regime
 
-                    # Skip errors
+                    # Skip errors — keep this as hard gate (no data = can't predict)
                     if pred.get("error"):
                         filtered_out[sym] = pred["error"]
                         continue
 
                     # ── LAYER 9: Risk Filter ──
 
-                    # 9a. Hard risk warnings (ATR spike, high spread, low vol)
+                    # 9a. Hard risk warnings — v18: non-blocking (info only)
                     blocked, reason = _has_hard_risk(risk_warnings)
                     if blocked:
-                        filtered_out[sym] = f"risk:{reason}"
-                        log.info("Risk filter blocked %s: %s", sym, reason)
-                        continue
+                        log.debug("Risk info for %s: %s (non-blocking)", sym, reason)
 
                     # 9b. Confidence gate (adaptive per-symbol + v12 Bayesian)
                     sym_min_conf = _symbol_min_confidence.get(sym, MIN_CONFIDENCE)
@@ -2275,8 +2277,8 @@ async def _auto_signal_job(app: Application):
                     except Exception:
                         pass
                     if conf < sym_min_conf:
-                        filtered_out[sym] = f"confidence<{sym_min_conf:.0f}"
-                        continue
+                        # v18: Log but don't skip
+                        log.debug("Low confidence info for %s: %.0f < %.0f (non-blocking)", sym, conf, sym_min_conf)
 
                     # 9c. Ensemble agreement (v12: use feedback loop thresholds)
                     unanimity = float(pred.get("ensemble_unanimity", 0))
@@ -2285,21 +2287,16 @@ async def _auto_signal_job(app: Application):
                     effective_min_unanimity = max(MIN_UNANIMITY, fb_thresholds.get("min_unanimity", MIN_UNANIMITY))
                     effective_max_variance = min(MAX_ENSEMBLE_VARIANCE, fb_thresholds.get("max_variance", MAX_ENSEMBLE_VARIANCE))
                     if unanimity < effective_min_unanimity:
-                        filtered_out[sym] = f"unanimity:{unanimity:.2f}<{effective_min_unanimity:.2f}"
-                        continue
+                        log.debug("Low unanimity info for %s: %.2f < %.2f (non-blocking)", sym, unanimity, effective_min_unanimity)
                     if variance > effective_max_variance:
-                        filtered_out[sym] = f"variance:{variance:.3f}>{effective_max_variance:.3f}"
-                        continue
+                        log.debug("High variance info for %s: %.3f > %.3f (non-blocking)", sym, variance, effective_max_variance)
 
-                    # 9d. Production gate (HOLD)
-                    if trade == "HOLD" or direction == "HOLD":
-                        filtered_out[sym] = pred.get("skip_reason", "hold")
-                        continue
+                    # 9d. Production gate — v18: never HOLD
+                    # predict_engine always returns BUY/SELL now
 
-                    # 9e. Blocked regimes
+                    # 9e. Blocked regimes — v18: non-blocking
                     if regime in PRODUCTION_BLOCKED_REGIMES:
-                        filtered_out[sym] = f"blocked_regime:{regime}"
-                        continue
+                        log.debug("Blocked regime info for %s: %s (non-blocking)", sym, regime)
 
                     # 9f. Multi-TF confluence (Layer 9 extension)
                     cf = _check_confluence(sym, direction)
@@ -2307,20 +2304,9 @@ async def _auto_signal_job(app: Application):
                     pred["_confluence_score"] = cf.get("confluence_score", 0)
                     if not cf.get("confluence_pass", True):
                         reason = cf.get("reason", "TF conflict")
-                        soft_override = (
-                            cf.get("h1_hard_gate_pass", True)
-                            and conf >= SIGNAL_SOFT_CONFLUENCE_OVERRIDE_CONFIDENCE
-                            and float(pred.get("quality_score", 0)) >= SIGNAL_SOFT_CONFLUENCE_OVERRIDE_QUALITY
-                            and float(pred.get("ensemble_unanimity", 0)) >= SIGNAL_SOFT_CONFLUENCE_OVERRIDE_UNANIMITY
-                        )
-                        if soft_override:
-                            pred["_confluence_override"] = True
-                            pred["_confluence_score"] = max(pred.get("_confluence_score", 0), 2)
-                            log.info("Confluence soft override %s: %s", sym, reason)
-                        else:
-                            filtered_out[sym] = f"confluence:{reason}"
-                            log.info("Confluence filter blocked %s: %s", sym, reason)
-                            continue
+                        # v18: Log confluence info but never block
+                        log.debug("Confluence info for %s: %s (non-blocking)", sym, reason)
+                        pred["_confluence_override"] = True
 
                     # 9g. Session multiplier — DISABLED v13 (pure technical analysis)
                     session = pred.get("session", "Off")
@@ -2336,9 +2322,8 @@ async def _auto_signal_job(app: Application):
                             m5_data = d.get("M5")
                         mom_pass, mom_reason = _check_momentum_confirmation(pred, m5_data)
                         if not mom_pass:
-                            filtered_out[sym] = f"momentum:{mom_reason}"
-                            log.info("Momentum filter blocked %s: %s", sym, mom_reason)
-                            continue
+                            # v18: Log but don't block
+                            log.debug("Momentum info for %s: %s (non-blocking)", sym, mom_reason)
                         # Also compute candle pattern quality and attach to pred
                         cpq = _check_candle_pattern_quality(m5_data, direction)
                         pred["_candle_pattern_quality"] = cpq
@@ -2352,13 +2337,12 @@ async def _auto_signal_job(app: Application):
                     record_error(f"{sym}: {e}")
                     filtered_out[sym] = f"error:{e}"
 
-            # ── Correlation Guard ──
+            # ── Correlation Guard ── v18: non-blocking (info only)
             try:
                 for sym, pred in list(predictions.items()):
                     corr = check_correlation(sym, pred.get("suggested_direction", ""), predictions)
                     if not corr.get("corr_pass", True):
-                        filtered_out[sym] = f"correlation:{corr.get('reason')}"
-                        del predictions[sym]
+                        log.debug("Correlation info for %s: %s (non-blocking)", sym, corr.get('reason'))
             except Exception as e:
                 log.warning("Correlation filter error: %s", e)
 
@@ -2721,7 +2705,7 @@ def main():
 
     app.post_init = _on_startup
 
-    log.info("QUOTEX LORD v17.1 Live Accuracy Fix starting...")
+    log.info("QUOTEX LORD v18 Signal Consensus starting...")
     app.run_polling(drop_pending_updates=True)
 
 
